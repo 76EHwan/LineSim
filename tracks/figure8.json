@@ -1,0 +1,37 @@
+// ZETIN-rule practice course (contest_limit, 2022-08-26): figure-8 with a 90 deg crossing.
+//   line 2 cm, every arc R = 25 cm in 45 deg steps, marks 2 x 5 cm bars 4 cm from the line edge,
+//   end marks (left+right) at goal and start, >= 30 cm straight between them and
+//   >= 20 cm straight before the goal / after the start, >= 20 cm straight around the crossing.
+// s = 0 is the crossing center, heading +x. Check geometry with: python tools/course.py tracks/figure8.json
+//
+//   north-east loop: 90 deg corners and a 45/90/45 S-bend
+//   south-west loop: end-mark straight, 90 deg corners, 45 + 135 deg combination
+{
+  "name": "figure8",
+  "closed": true,
+  "line_width": 0.02,
+  "mark": { "gap": 0.04, "along": 0.02, "across": 0.05 },
+  "goal_s": 6.2633,
+  "start_s": 6.7633,
+  "auto_turn_marks": true,
+  "segments": [
+    { "straight": 0.40 },
+    { "arc": 90 },
+    { "straight": 0.30 },
+    { "arc": -45 },
+    { "arc": 90 },
+    { "arc": -45 },
+    { "straight": 0.30 },
+    { "arc": 90 },
+    { "straight": 0.15 },
+    { "arc": 90 },
+    { "straight": 2.5071 },
+    { "arc": -90 },
+    { "straight": 1.20 },
+    { "arc": -90 },
+    { "straight": 0.3464 },
+    { "arc": 45 },
+    { "arc": -135 },
+    { "straight": 1.5964 }
+  ]
+}

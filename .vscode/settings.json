@@ -1,0 +1,25 @@
+{
+  // track / robot / scenario files carry // comments
+  "files.associations": {
+    "**/tracks/*.json": "jsonc",
+    "**/robots/*.json": "jsonc",
+    "**/scenarios/*.json": "jsonc"
+  },
+  "search.exclude": {
+    "build/**": true,
+    "runs/**": true,
+    "third_party/**": true
+  },
+  // the project is built by build.bat (Visual Studio generator); keep CMake Tools out of the way
+  "cmake.configureOnOpen": false,
+  "cmake.automaticReconfigure": false,
+  // if CMake Tools is used anyway, keep its (Ninja) tree away from build.bat's build/
+  "cmake.buildDirectory": "${workspaceFolder}/build-cmaketools",
+  "cmake.cmakePath": "cube-cmake",
+  "cmake.configureArgs": [
+    "-DCMAKE_COMMAND=cube-cmake"
+  ],
+  "cmake.preferredGenerators": [
+    "Ninja"
+  ]
+}

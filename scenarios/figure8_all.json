@@ -1,0 +1,13 @@
+// 1st drive (learn the course) followed by the 2nd, 3rd and 4th drives in the
+// same power-on session, exactly like at the track.
+{
+  "track": "../tracks/figure8.json",
+  "robot": "../robots/full.json",
+  "drives": [1, 2, 3, 4],
+  "params": {
+    "base_mps": 1.8,
+    "max_mps": 4.0
+  },
+  "seed": 1,
+  "max_drive_time": 40
+}

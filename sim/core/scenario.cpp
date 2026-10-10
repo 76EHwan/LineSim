@@ -1,0 +1,534 @@
+#include "core/scenario.h"
+
+#include <windows.h>
+
+#include <chrono>
+#include <ctime>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <filesystem>
+#include <memory>
+
+#include "core/json.h"
+#include "core/simulation.h"
+#include "sim_mcu.h"
+#include "view/live_view.h"
+#include "view/viewer.h"
+#include "world/robot.h"
+#include "world/sensors.h"
+#include "world/track.h"
+#include "world/track_gen.h"
+
+namespace fs = std::filesystem;
+
+namespace {
+constexpr double kRadToDeg = 57.29577951308232;
+
+// menu.c "Last Used" reads/writes STM32 Bank2 sector 7 (0x081E0000..0x08200000) through
+// raw pointers. Back that address range with erased (0xFF) memory in this process.
+bool map_firmware_flash() {
+	static bool mapped = false;
+	if (mapped)
+		return true;
+	void* p = VirtualAlloc(reinterpret_cast<void*>(0x081E0000), 0x20000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+	if (!p)
+		return false;
+	std::memset(p, 0xFF, 0x20000);
+	mapped = true;
+	return true;
+}
+
+std::string lcd_text() {
+	std::string s;
+	for (int r = 0; r < SIM_LCD_ROWS; r++) {
+		std::string row = sim_lcd_row(r);
+		while (!row.empty() && row.back() == ' ')
+			row.pop_back();
+		s += row;
+		s += '\n';
+	}
+	while (s.size() > 1 && s[s.size() - 1] == '\n' && s[s.size() - 2] == '\n')
+		s.pop_back();
+	return s;
+}
+
+double parse_lap_time(const std::string& lcd) {
+	size_t p = lcd.find("T:");
+	if (p == std::string::npos)
+		return -1;
+	return std::atof(lcd.c_str() + p + 2);
+}
+}  // namespace
+
+bool apply_param(FwDriveParams* p, const std::string& key, double v) {
+	if (key == "base_mps") p->base_mps = (float) v;
+	else if (key == "max_mps") p->max_mps = (float) v;
+	else if (key == "accel") p->accel = (float) v;
+	else if (key == "decel") p->decel = (float) v;
+	else if (key == "steer_kp") p->steer_kp = (float) v;
+	else if (key == "steer_kd") p->steer_kd = (float) v;
+	else if (key == "pos_atten_gain") p->pos_atten_gain = (float) v;
+	else if (key == "pit_in_m") p->pit_in_m = (float) v;
+	else if (key == "target_shift") p->target_shift = (float) v;
+	else if (key == "fan_en") p->fan_en = (int) v;
+	else return false;
+	return true;
+}
+
+bool load_scenario_file(const std::string& path, ScenarioOptions* opt, std::string* err) {
+	json::Value j;
+	if (!json::parse_file(path, &j, err))
+		return false;
+	fs::path base = fs::path(path).parent_path();
+	auto rel = [&](const std::string& p) { return p.empty() || fs::path(p).is_absolute() ? p : (base / p).string(); };
+	opt->track_path = rel(j.str("track", opt->track_path));
+	opt->robot_path = rel(j.str("robot", opt->robot_path));
+	if (j.has("out"))
+		opt->out_dir = rel(j.str("out", ""));
+	if (const json::Value* d = j.get("drives"); d && d->is_arr()) {
+		opt->drives.clear();
+		for (const json::Value& e : d->a)
+			opt->drives.push_back(static_cast<int>(e.n));
+	}
+	if (const json::Value* p = j.get("params"); p && p->is_obj())
+		for (const auto& kv : p->o)
+			opt->params[kv.first] = kv.second.n;
+	opt->seed = static_cast<unsigned>(j.num("seed", opt->seed));
+	opt->max_drive_time = j.num("max_drive_time", opt->max_drive_time);
+	opt->off_track_mm = j.num("off_track_mm", opt->off_track_mm);
+	return true;
+}
+
+ScenarioResult run_scenario(const ScenarioOptions& opt) {
+	ScenarioResult res;
+	auto wall0 = std::chrono::steady_clock::now();
+
+	Track track;
+	std::string err;
+	unsigned map_seed = static_cast<unsigned>(std::time(nullptr));
+	std::string generated;   // JSON of a generated course, saved into the output folder below
+	if (opt.track_path == "random") {
+		TrackGenOptions g;
+		g.seed = map_seed;
+		generated = generate_track(g, &err);
+		if (generated.empty() || !track.load_text(generated, "random", &err)) {
+			res.error = err;
+			return res;
+		}
+	} else if (!track.load(opt.track_path, &err)) {
+		res.error = err;
+		return res;
+	}
+	res.track_path_used = opt.track_path;
+	for (const std::string& w : track.warnings())
+		std::fprintf(stderr, "track warning: %s\n", w.c_str());
+	RobotParams rp;
+	std::string robot_path = opt.robot_path;
+	if (!robot_path.empty() && !fs::exists(robot_path)) {
+		// robots/full.json is made locally from the CAD model and is not in the repository
+		fs::path fallback = fs::path(robot_path).parent_path() / "default.json";
+		if (fs::exists(fallback)) {
+			std::fprintf(stderr,
+				"robot file %s not found (make it with tools/step_import.py robots/Full.step); using %s\n",
+				robot_path.c_str(), fallback.string().c_str());
+			robot_path = fallback.string();
+		}
+	}
+	if (!robot_path.empty()) {
+		json::Value j;
+		if (!json::parse_file(robot_path, &j, &err)) {
+			res.error = err;
+			return res;
+		}
+		rp.load(j, fs::absolute(robot_path).parent_path().generic_string());
+	}
+
+	fs::path out = opt.out_dir;
+	fs::path sd = out / "sdcard";
+	std::error_code ec;
+	// Reusing an output folder (e.g. runs/latest): drop the previous run's result files so
+	// nothing stale is left next to the new ones. The virtual SD card is kept, like a real card.
+	if (fs::is_directory(out, ec)) {
+		for (const auto& e : fs::directory_iterator(out, ec)) {
+			std::string name = e.path().filename().string();
+			bool ours = name == "summary.json" || name == "index.html" || name == "trajectory.svg" || name == "robot.xml" ||
+				(name.rfind("drive", 0) == 0 && (e.path().extension() == ".csv" || e.path().extension() == ".svg"));
+			if (ours && e.is_regular_file())
+				fs::remove(e.path(), ec);
+		}
+	}
+	// A card that has been used on the robot already has these folders. On a blank card
+	// Delete_All_Marker_Logs() gets FR_NO_PATH and waits 10 x 500 ms at boot (same on hardware).
+	fs::create_directories(sd / "Drive_Data", ec);
+	if (ec) {
+		res.error = "cannot create " + sd.string();
+		return res;
+	}
+	auto save_generated = [&](const std::string& text, unsigned seed) {
+		fs::path f = out / ("random_" + std::to_string(seed) + ".json");
+		FILE* fp = std::fopen(f.string().c_str(), "wb");
+		if (fp) {
+			std::fwrite(text.data(), 1, text.size(), fp);
+			std::fclose(fp);
+		}
+		res.track_path_used = f.string();
+	};
+	if (!generated.empty())
+		save_generated(generated, map_seed);
+	if (!map_firmware_flash()) {
+		res.error = "cannot map the firmware flash region at 0x081E0000";
+		return res;
+	}
+
+	auto robot = std::make_unique<Robot>();
+	if (!robot->init(rp, (out / "robot.xml").string(), &err)) {
+		res.error = err;
+		return res;
+	}
+	IrBar ir;
+	ir.init(rp, opt.seed);
+	Imu imu;
+	imu.init(rp, opt.seed + 101);
+
+	auto sim = std::make_unique<Simulation>(*robot, ir, imu, track, sd.generic_string());
+	// Sensor bar 8 cm behind the start line unless the track fixes the start position.
+	auto start_pose = [&]() {
+		return track.pose_at(track.has_robot_start() ? track.robot_start_s() : track.start_s() - rp.sensor_x - 0.08);
+	};
+	Pose2 start = start_pose();
+
+	// ---- optional 3D viewer ----
+	std::unique_ptr<Viewer> viewer;
+	std::unique_ptr<LiveView> live;
+	SessionState session;
+	session.map_name = track.name();
+	session.expected = track.expected_markers();
+	bool booted = false;
+	if (opt.view || opt.interactive || opt.session) {
+		viewer = std::make_unique<Viewer>();
+		std::string title = "LineSim - " + track.name() +
+			(opt.interactive ? " (interactive)" : opt.session ? " (session)" : "");
+		if (!viewer->open(1400, 860, title.c_str(), &err)) {
+			res.error = "viewer: " + err;
+			return res;
+		}
+		viewer->attach(robot->model(), robot->data(), robot->body_id(), track);
+		viewer->set_sensor_offset(rp.ir_sensors.empty() ? rp.sensor_x : rp.ir_sensors[7][0] - 0.01);
+		{
+			std::vector<std::array<double, 2>> pts;
+			for (int i = 0; i < 16; i++)
+				pts.push_back(i < (int) rp.ir_sensors.size() ? rp.ir_sensors[i]
+				                                              : std::array<double, 2>{rp.sensor_x, -(-1.0 + 2.0 * i / 15.0) * rp.sensor_half_width});
+			viewer->set_sensor_points(pts);
+		}
+		live = std::make_unique<LiveView>(*viewer, *robot, track, opt.interactive, opt.view_speed);
+		live->on_reset = [&]() {
+			robot->place(start);
+			ir.set_lifted(false);
+		};
+		if (opt.session)
+			live->session = &session;
+	}
+
+	// ---- per-drive bookkeeping, shared between the two fibers ----
+	int current = 0;              // drive running on the firmware fiber (0 = none)
+	bool ramp_seen = false, ramp_done = false;
+	double t_finished = 0;
+	bool lifted = false;
+	bool lcd_captured = false;
+	std::string lift_reason;
+	DriveResult* cur = nullptr;
+	double lat_sq = 0;
+
+	sim->on_ramp_timer = [&](bool on) {
+		if (!current)
+			return;
+		if (on) {
+			ramp_seen = true;
+		} else if (ramp_seen && !ramp_done) {
+			ramp_done = true;
+			t_finished = sim->t();
+		}
+	};
+
+	sim->on_millisecond = [&]() {
+		// operator: once the run is over, hold K to save / confirm, release, repeat
+		bool press = false;
+		if (!opt.interactive && current && ramp_done) {
+			double since = sim->t() - t_finished;
+			// the result screen is up once the robot has stopped; keep it before pressing K
+			if (!lcd_captured && since > 0.25 && cur) {
+				cur->lcd = lcd_text();
+				cur->lap_time_fw = parse_lap_time(cur->lcd);
+				lcd_captured = true;
+			}
+			press = since > 0.3 && std::fmod(since - 0.3, 1.6) < 0.8;
+		}
+		if (!opt.interactive)
+			fwb_set_button(FWB_BTN_K, press);
+
+		if (session.request_abort) {   // X in the session: the operator picks the robot up
+			session.request_abort = false;
+			if (current && !lifted) {
+				lifted = true;
+				lift_reason = "stopped";
+				ir.set_lifted(true);
+			}
+		}
+		if (live) {
+			std::string phase;
+			bool ff;
+			if (opt.interactive) {
+				ff = !booted;
+				phase = booted ? "interactive (firmware menu)" : "booting firmware";
+			} else if (opt.session) {
+				ff = !booted || (current && !(ramp_seen && !ramp_done));
+				phase = !booted ? "booting firmware"
+				        : current ? "drive " + std::to_string(current) + (ramp_done ? " - finished" : ramp_seen ? "" : " - starting")
+				                  : "session: press 1-4 to drive";
+			} else {
+				ff = !(current && ramp_seen && !ramp_done);
+				phase = current ? "drive " + std::to_string(current) + (ramp_done ? " - finished" : ramp_seen ? "" : " - starting")
+				                : "booting firmware";
+			}
+			live->tick(sim->t(), ff, phase);
+		}
+
+		if (!cur || !ramp_seen || ramp_done)
+			return;
+		Robot& r = sim->robot();
+		Pose2 pz = r.pose();
+		Vec2 bar = r.body_to_ground(rp.sensor_x, 0.0);
+		double lat = 0, s = 0;
+		track.nearest(bar, &lat, &s);
+		FwTelemetry tm;
+		fwb_telemetry(&tm);
+		Sample smp{};
+		smp.t = sim->t();
+		smp.x = (float) pz.x;
+		smp.y = (float) pz.y;
+		smp.yaw_deg = (float) (pz.th * kRadToDeg);
+		smp.v = (float) r.forward_speed();
+		smp.wz_dps = (float) (r.yaw_rate() * kRadToDeg);
+		smp.lat_mm = (float) (lat * 1000);
+		smp.s = (float) s;
+		smp.pitch_deg = (float) (r.pitch() * kRadToDeg);
+		for (int k = 0; k < 2; k++) {
+			smp.wheel_v[k] = (float) (r.wheel_speed(k) * rp.wheel_radius);
+			smp.iq[k] = (float) r.iq(k);
+			smp.omega_t[k] = tm.omega_target[k];
+			smp.omega_m[k] = tm.omega_meas[k];
+			smp.iq_cmd[k] = tm.iq_cmd[k];
+		}
+		smp.tgt_base = tm.target_base_mps;
+		smp.cur_base = tm.current_base_mps;
+		smp.tgt_pos = tm.target_pos;
+		smp.odom = tm.odom_m;
+		smp.yaw_fw = tm.yaw_deg;
+		smp.lost = tm.lost;
+		smp.markers = tm.marker_count;
+		smp.contact = r.chassis_contact();
+		if (!cur->samples.empty()) {
+			const Sample& pv = cur->samples.back();
+			cur->dist_m += std::hypot(smp.x - pv.x, smp.y - pv.y);
+		}
+		cur->samples.push_back(smp);
+		cur->max_lat_mm = std::max(cur->max_lat_mm, (double) std::fabs(smp.lat_mm));
+		cur->max_v = std::max(cur->max_v, (double) smp.v);
+		lat_sq += smp.lat_mm * smp.lat_mm;
+
+		if (!lifted) {
+			double running = sim->t() - cur->t_start;
+			if (std::fabs(lat * 1000) > opt.off_track_mm) {
+				lifted = true;
+				lift_reason = "off_track";
+			} else if (running > opt.max_drive_time) {
+				lifted = true;
+				lift_reason = "timeout";
+			}
+			if (lifted)
+				ir.set_lifted(true);
+		}
+	};
+
+	res.drives.reserve(opt.session ? 4096 : opt.drives.size());
+
+	// One drive, as the operator does it: put the robot on the start line, select the drive.
+	auto run_one = [&](int n) {
+		res.drives.emplace_back();
+		cur = &res.drives.back();
+		cur->n = n;
+		robot->place(start);
+		ir.set_lifted(false);
+		lifted = false;
+		lift_reason.clear();
+		ramp_seen = ramp_done = false;
+		lcd_captured = false;
+		lat_sq = 0;
+		current = n;
+		cur->t_start = sim->t();
+		if (!opt.quiet)
+			std::printf("[%8.3f s] drive %d start\n", sim->t(), n);
+		auto w0 = std::chrono::steady_clock::now();
+		uint64_t r0 = sim->resumes, s0 = sim->sleeps, f0[16];
+		std::memcpy(f0, sim->fired, sizeof f0);
+
+		fwb_drive(n);
+
+		current = 0;
+		cur->t_end = sim->t();
+		if (getenv("LINESIM_PROFILE")) {
+			FILETIME c, e, k, u;
+			GetThreadTimes(GetCurrentThread(), &c, &e, &k, &u);
+			double cpu = (((uint64_t) u.dwHighDateTime << 32) | u.dwLowDateTime) * 1e-7;
+			std::printf("  profile: wall %.2f s, thread cpu total %.2f s, resumes %llu, sleeps %llu, events:",
+				std::chrono::duration<double>(std::chrono::steady_clock::now() - w0).count(), cpu,
+				(unsigned long long) (sim->resumes - r0), (unsigned long long) (sim->sleeps - s0));
+			for (int k = 0; k < 9; k++)
+				std::printf(" %llu", (unsigned long long) (sim->fired[k] - f0[k]));
+			std::printf("\n");
+		}
+		if (!lcd_captured)
+			cur->lcd = lcd_text();
+		FwMarker m[256];
+		int nm = fwb_marker_log(m, 256);
+		cur->markers.assign(m, m + nm);
+		if (!cur->samples.empty())
+			cur->rms_lat_mm = std::sqrt(lat_sq / cur->samples.size());
+		if (!ramp_seen)
+			cur->outcome = "not_started";
+		else if (lifted)
+			cur->outcome = lift_reason;
+		else if (cur->lcd.find("Line Lost") != std::string::npos)
+			cur->outcome = "line_lost";
+		else
+			cur->outcome = "finished";
+
+		// logged markers vs. the course
+		std::string got, want = track.expected_markers();
+		for (const FwMarker& x : cur->markers)
+			got += "?LRCU"[x.type >= 1 && x.type <= 4 ? x.type : 0];
+		size_t k = 0;
+		while (k < got.size() && k < want.size() && got[k] == want[k])
+			k++;
+		char buf[96];
+		if (k == got.size() && k == want.size())
+			cur->marker_check = "OK";
+		else if (k < got.size() && k < want.size())
+			std::snprintf(buf, sizeof buf, "#%zu %c (expected %c)", k, got[k], want[k]), cur->marker_check = buf;
+		else
+			std::snprintf(buf, sizeof buf, "%zu of %zu markers", got.size(), want.size()), cur->marker_check = buf;
+
+		if (!opt.quiet)
+			std::printf("[%8.3f s] drive %d %s, lap %.2f s, markers %s\n", sim->t(), n, cur->outcome.c_str(),
+				cur->lap_time_fw, cur->marker_check.c_str());
+		cur = nullptr;
+	};
+
+	// Session: replace the course by a new random one (firmware idle, between events).
+	auto new_map = [&]() {
+		TrackGenOptions g;
+		g.seed = ++map_seed;
+		std::string e;
+		std::string text = generate_track(g, &e);
+		if (text.empty() || !track.load_text(text, "random", &e)) {
+			session.message = "map generator: " + e;
+			return;
+		}
+		save_generated(text, g.seed);
+		if (viewer)
+			viewer->set_track(track);
+		start = start_pose();
+		robot->place(start);
+		ir.set_lifted(false);
+		session.map_name = track.name();
+		session.expected = track.expected_markers();
+		session.message = "new course - run drive 1 first (2-4 replay its marker log)";
+		if (!opt.quiet)
+			std::printf("[%8.3f s] new course %s (%.2f m)\n", sim->t(), res.track_path_used.c_str(), track.length());
+	};
+
+	sim->start([&]() {
+		robot->place(start);
+		fwb_boot();
+
+		uint16_t white[IrBar::kChannels], black[IrBar::kChannels];
+		ir.calibration(white, black);
+		fwb_install_sensor_calibration(white, black);
+		fwb_save_sensor_calibration();
+
+		FwDriveParams p;
+		fwb_get_drive_params(&p);
+		for (const auto& kv : opt.params)
+			apply_param(&p, kv.first, kv.second);
+		fwb_set_drive_params(&p);
+		res.params = p;
+		session.params = p;
+		session.ready = true;
+		booted = true;
+
+		if (opt.interactive) {   // like main.c: the menu loop forever, buttons from the keyboard
+			for (;;) {
+				fwb_menu_step();
+				sim_fw_yield();   // main.c's while(1) is firmware code and yields per pass; this loop is ours
+			}
+		}
+
+		if (opt.session) {   // wait for keys from the viewer, forever
+			for (const int n : opt.drives) {   // scenario drives first, if any were given
+				fwb_set_drive_params(&session.params);
+				session.busy = true;
+				run_one(n);
+				session.busy = false;
+			}
+			for (;;) {
+				if (session.request_new_map) {
+					session.request_new_map = false;
+					new_map();
+				} else if (session.request_drive) {
+					int n = session.request_drive;
+					session.request_drive = 0;
+					fwb_set_drive_params(&session.params);
+					res.params = session.params;
+					session.busy = true;
+					session.message.clear();
+					run_one(n);
+					session.busy = false;
+					const DriveResult& d = res.drives.back();
+					char line[160];
+					std::snprintf(line, sizeof line, "drive %d  %-9s lap %5.2f s  vmax %.2f  markers %s", n, d.outcome.c_str(),
+						d.lap_time_fw, d.max_v, d.marker_check.c_str());
+					session.history.push_back(line);
+				} else {
+					sim_fw_sleep_until_ns(sim_now_ns() + 1000000);
+				}
+			}
+		}
+
+		for (int n : opt.drives)
+			run_one(n);
+	});
+
+	const double t_limit = (opt.interactive || opt.session) ? 1e7 : 30.0 + opt.drives.size() * (opt.max_drive_time + 20.0);
+	Simulation::Stop st = sim->run(t_limit, [&]() { return live && live->stop_requested(); });
+	if (live && st != Simulation::Stop::Predicate)
+		live->hold_until_closed();
+	res.sim_seconds = sim->t();
+	res.wall_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - wall0).count();
+	if (st == Simulation::Stop::Halted) {
+		res.halt_reason = sim->halt_reason();
+		res.error = "firmware halted: " + res.halt_reason;
+		return res;
+	}
+	if (st == Simulation::Stop::Predicate && !opt.interactive && !opt.session) {
+		res.error = "stopped from the viewer before the run finished";
+		return res;
+	}
+	if (st == Simulation::Stop::TimeLimit) {
+		res.error = "simulation time limit reached (firmware stuck waiting?)\nLCD:\n" + lcd_text();
+		return res;
+	}
+	res.ok = true;
+	return res;
+}

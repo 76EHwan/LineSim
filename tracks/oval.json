@@ -1,0 +1,15 @@
+// ZETIN-rule oval: two 1 m straights and two 180 deg arcs (R 25 cm).
+// End marks on the bottom straight: goal at 0.25 m, start at 0.75 m.
+{
+  "name": "oval",
+  "closed": true,
+  "line_width": 0.02,
+  "goal_s": 0.25,
+  "start_s": 0.75,
+  "segments": [
+    { "straight": 1.0 },
+    { "arc": 180 },
+    { "straight": 1.0 },
+    { "arc": 180 }
+  ]
+}

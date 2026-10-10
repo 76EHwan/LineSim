@@ -1,0 +1,8 @@
+// Quick check: 1st drive only on the ZETIN-rule oval.
+{
+  "track": "../tracks/oval.json",
+  "robot": "../robots/full.json",
+  "drives": [1],
+  "seed": 1,
+  "max_drive_time": 30
+}

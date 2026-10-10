@@ -1,0 +1,37 @@
+{
+  // F5 opens the 3D session (Release build, fast). For breakpoints in firmware/Main/Src/*.c
+  // pick "Debug firmware" in the Run and Debug view: Debug build, slower simulation.
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "LineSim: 3D session (random course)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/Release/linesim.exe",
+      "args": ["view", "--session", "--track", "random", "--robot", "robots/full.json", "--out", "runs/latest"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "preLaunchTask": "LineSim: Build (Release)"
+    },
+    {
+      "name": "LineSim: 3D session (figure8)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/Release/linesim.exe",
+      "args": ["view", "--session", "--track", "tracks/figure8.json", "--robot", "robots/full.json", "--out", "runs/latest"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "preLaunchTask": "LineSim: Build (Release)"
+    },
+    {
+      "name": "Debug firmware (3D session, Debug build)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/Debug/linesim.exe",
+      "args": ["view", "--session", "--track", "tracks/figure8.json", "--robot", "robots/full.json", "--out", "runs/debug"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "preLaunchTask": "LineSim: Build (Debug)"
+    }
+  ]
+}

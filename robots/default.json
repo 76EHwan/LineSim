@@ -1,0 +1,46 @@
+// Robot plant parameters. Frame: origin at the middle of the wheel axle,
+// x forward, y left, z up. Units: SI (m, kg, s, N, A, V).
+//
+// Values marked (fw) come from the firmware headers; the rest are placeholders
+// until they are measured or extracted from the CAD model (Full.step).
+{
+  "mass": 0.20,                       // everything except the two wheels [kg]
+  "com": [0.035, 0.0, 0.004],
+  "inertia": [1.6e-4, 2.4e-4, 3.6e-4],// about the COM, principal axes [kg m^2]
+
+  "wheel_radius": 0.0115,             // (fw) TIRE_DIAMETER / 2
+  "wheel_width": 0.008,
+  "track": 0.186,                     // (fw) THREAD
+  "wheel_mass": 0.006,
+  "tire_mu": 1.3,
+
+  "skids": [[0.125, 0.05], [0.125, -0.05]],
+  "skid_radius": 0.0025,
+  "skid_mu": 0.15,
+  "body_box": [0.05, 0.0, -0.002, 0.08, 0.075, 0.004],
+
+  "sensor_x": 0.13,                   // (fw) SENSOR_DIST_L
+  "sensor_half_width": 0.08,          // (fw) SENSOR_HALF_WIDTH
+  "marker_sensor_y": 0.09,
+  "sensor_sigma": 0.0025,
+  "ir_white": 3300, "ir_black": 350, "ir_noise": 6, "ir_spread": 0.06,
+
+  "fan_force": 0.0,                   // downforce at 100 % duty [N]
+  "vbat": 16.8,                       // (fw) MOTOR_RATED_VOLTAGE
+  "gyro_noise_dps": 0.08,
+  "gyro_bias_dps": 0.4,
+
+  "timestep": 1e-4,
+
+  "motor": {
+    "kt": 6.46e-3,                    // (fw) MOTOR_TORQUE_CONSTANT
+    "r_phase": 0.96,                  // (fw) MOTOR_PARAM_PHASE_RESISTOR
+    "j_rotor": 0.812e-7,              // (fw) MOTOR_PARAM_ROTOR_INERTIA
+    "gear": 3.5454545,                // (fw) GEAR_RATIO 39/11
+    "efficiency": 0.90,
+    "friction": 0.25e-3,
+    "viscous": 2.0e-8,
+    "current_tau": 1.3e-4,
+    "voltage_ratio": 0.40
+  }
+}

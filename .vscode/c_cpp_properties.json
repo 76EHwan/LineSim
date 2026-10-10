@@ -1,0 +1,32 @@
+{
+  "configurations": [
+    {
+      "name": "LineSim (MSVC)",
+      "compilerPath": "C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/cl.exe",
+      "intelliSenseMode": "windows-msvc-x64",
+      "cStandard": "c17",
+      "cppStandard": "c++17",
+      "includePath": [
+        "${workspaceFolder}/sim",
+        "${workspaceFolder}/sim/fw_shim/include",
+        "${workspaceFolder}/firmware/Core/Inc",
+        "${workspaceFolder}/firmware/Main/Inc",
+        "${workspaceFolder}/firmware/Drivers/BSP/Button",
+        "${workspaceFolder}/firmware/Drivers/BSP/FUET-8540",
+        "${workspaceFolder}/firmware/Drivers/BSP/LSM6DS3TR-C",
+        "${workspaceFolder}/firmware/Drivers/BSP/DRV8316C",
+        "${workspaceFolder}/firmware/Drivers/BSP/MCT8316Z",
+        "${workspaceFolder}/firmware/Drivers/BSP/MT6701",
+        "${workspaceFolder}/firmware/Drivers/BSP/SDcard",
+        "${workspaceFolder}/firmware/Drivers/BSP/w25qxx",
+        "${workspaceFolder}/third_party/mujoco/include"
+      ],
+      "defines": [
+        "_CRT_SECURE_NO_WARNINGS",
+        "SIM_FW_REAL_MAIN_H=\"${workspaceFolder}/firmware/Core/Inc/main.h\""
+      ],
+      "forcedInclude": ["${workspaceFolder}/sim/fw_shim/include/sim_compat.h"]
+    }
+  ],
+  "version": 4
+}

@@ -1,0 +1,17 @@
+/build/
+/runs/
+__pycache__/
+/build-cmaketools/
+/robots/Full.step
+/robots/mesh/
+/tools/.venv/
+/real_logs/
+# made locally from robots/Full.step (tools/step_import.py), not shared
+/robots/full.json
+# personal editor / STM32 extension state
+/.settings/
+*.code-workspace
+linesim_*.bmp
+# rebuilt from private run logs (tools/track_from_logs.py), kept local
+/tracks/practice_board.json
+/scenarios/practice_board.json
