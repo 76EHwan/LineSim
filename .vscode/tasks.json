@@ -111,14 +111,14 @@
       "id": "track",
       "type": "pickString",
       "description": "Course (random = a new ZETIN-rule course every time)",
-      "options": ["random", "tracks/figure8.json", "tracks/practice_board.json", "tracks/oval.json"],
+      "options": ["random", "tracks/figure8.json", "tracks/oval.json"],
       "default": "random"
     },
     {
       "id": "scenario",
       "type": "pickString",
       "description": "Scenario",
-      "options": ["scenarios/figure8_all.json", "scenarios/practice_board.json", "scenarios/oval_first.json"],
+      "options": ["scenarios/figure8_all.json", "scenarios/oval_first.json"],
       "default": "scenarios/figure8_all.json"
     },
     { "id": "baseSpeed", "type": "promptString", "description": "base speed [m/s] (driveData.base_mps)", "default": "1.8" },

@@ -35,7 +35,7 @@ build.bat
 | 하고 싶은 것 | 방법 |
 |---|---|
 | 빌드 | `Ctrl+Shift+B` |
-| **계속 주행하며 튜닝** | `F5` (무작위 코스) 또는 작업 **LineSim: 3D session** → 코스 선택(`random` / figure8 / practice_board / oval) → 기본 속도, 최고 속도, 가속도, 감속도 입력 |
+| **계속 주행하며 튜닝** | `F5` (무작위 코스) 또는 작업 **LineSim: 3D session** → 코스 선택(`random` / figure8 / oval) → 기본 속도, 최고 속도, 가속도, 감속도 입력 |
 | 시나리오 그대로 보기 | 작업 **LineSim: 3D scenario** |
 | 펌웨어 메뉴를 키보드로 | 작업 **LineSim: 3D interactive firmware menu** |
 | 무작위 코스 파일 만들기 | 작업 **LineSim: Generate random course** (`tracks/random_<seed>.json`) |
