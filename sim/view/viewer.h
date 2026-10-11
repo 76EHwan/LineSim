@@ -32,7 +32,10 @@ public:
 	bool pump();                        // handle window messages; false once the window is closed
 	void render(const ViewerHud& hud);
 	void add_trail(double x, double y, double speed);
-	void clear_trail() { trail_.clear(); }
+	void clear_trail() {
+		trail_.clear();
+		trail_vmax_ = 1.0;
+	}
 	// Saves the next rendered frame as a 24-bit BMP.
 	void request_screenshot(const std::string& path) { shot_path_ = path; }
 

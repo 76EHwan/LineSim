@@ -14,6 +14,13 @@
 #include "world/sensors.h"
 #include "world/track.h"
 
+// Period of the firmware's steering loop (TIM14 -> Ramp_TIM_IRQ_Handler -> Steer_Motor) [s].
+// steer_pid is CMSIS arm_pid_f32 called once per period: its Kd multiplies the error change per
+// call, so a derivative gain in seconds (de/dt) is Kd_fw = kd_s / fw_steer_dt().
+double fw_steer_dt();
+// Non-null when the firmware's RAMP_DT does not match its own TIM14 setup.
+const char* fw_timing_warning();
+
 class Simulation {
 public:
 	enum class Stop { Predicate, FirmwareDone, Halted, TimeLimit };

@@ -8,7 +8,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
+#include "core/simulation.h"
 #include "fw_bridge.h"
 #include "sim_mcu.h"
 
@@ -22,21 +24,30 @@ double wall() {
 struct ParamRow {
 	const char* name;
 	float FwDriveParams::*field;
-	float step, lo, hi;
+	float step, lo, hi;   // in the shown unit
 	const char* fmt;
+	bool per_dt = false;  // shown in seconds, stored as the firmware's CMSIS Kd (= seconds / control period)
 };
 const ParamRow kRows[] = {
-	{"base speed", &FwDriveParams::base_mps, 0.1f, 0.1f, 6.0f, "%.2f m/s"},
-	{"max speed", &FwDriveParams::max_mps, 0.25f, 0.5f, 12.0f, "%.2f m/s"},
+	{"base speed", &FwDriveParams::base_mps, 0.01f, 0.1f, 6.0f, "%.3f m/s"},
+	{"max speed", &FwDriveParams::max_mps, 0.01f, 0.5f, 12.0f, "%.3f m/s"},
 	{"accel", &FwDriveParams::accel, 0.5f, 0.5f, 30.0f, "%.1f m/s2"},
 	{"decel", &FwDriveParams::decel, 0.5f, 0.5f, 30.0f, "%.1f m/s2"},
 	{"steer kp", &FwDriveParams::steer_kp, 0.2f, 0.0f, 200.0f, "%.2f"},
-	{"steer kd", &FwDriveParams::steer_kd, 0.1f, 0.0f, 2000.0f, "%.2f"},
+	{"steer kd", &FwDriveParams::steer_kd, 0.01f, 0.0f, 2.0f, "%.3f s", true},
 	{"pos atten gain", &FwDriveParams::pos_atten_gain, 0.05f, 0.0f, 2.0f, "%.2f"},
 	{"target shift", &FwDriveParams::target_shift, 0.05f, 0.0f, 1.0f, "%.2f"},
 	{"pit-in dist", &FwDriveParams::pit_in_m, 0.01f, 0.0f, 1.0f, "%.2f m"},
 };
 constexpr int kRowCount = sizeof kRows / sizeof kRows[0];
+
+float shown(const FwDriveParams& p, const ParamRow& r) {
+	const float v = p.*(r.field);
+	return r.per_dt ? static_cast<float>(v * fw_steer_dt()) : v;
+}
+void store(FwDriveParams& p, const ParamRow& r, float v) {
+	p.*(r.field) = r.per_dt ? static_cast<float>(v / fw_steer_dt()) : v;
+}
 }  // namespace
 
 LiveView::LiveView(Viewer& viewer, Robot& robot, const Track& track, bool interactive, double speed)
@@ -62,7 +73,7 @@ void LiveView::handle_keys() {
 		case VK_SPACE: paused_ = !paused_; break;
 		case VK_OEM_PLUS:
 		case VK_ADD:
-			speed_ = std::min(16.0, speed_ * 2);
+			speed_ = std::min(256.0, speed_ * 2);
 			reanchor(last_t_);   // pace from now on; the time already played stays as it was
 			break;
 		case VK_OEM_MINUS:
@@ -71,7 +82,10 @@ void LiveView::handle_keys() {
 			reanchor(last_t_);
 			break;
 		case 'C': v_.set_cam_mode((v_.cam_mode() + 1) % Viewer::kCamModes); break;
-		case 'T': v_.clear_trail(); break;
+		case 'T':   // trail on/off; off also erases it
+			show_trail_ = !show_trail_;
+			v_.clear_trail();
+			break;
 		case 'S': v_.toggle_shadows(); break;
 		case 'V': v_.toggle_inset(); break;
 		case 'P': {
@@ -113,10 +127,11 @@ void LiveView::session_key(int k) {
 	case VK_LEFT:
 	case VK_RIGHT: {
 		const ParamRow& r = kRows[s.selected];
-		float& v = s.params.*(r.field);
+		float v = shown(s.params, r);
 		v += (k == VK_RIGHT ? 1 : -1) * r.step * (shift ? 10 : 1);
 		v = std::clamp(v, r.lo, r.hi);
 		v = std::round(v / (r.step / 10)) * (r.step / 10);   // no float drift
+		store(s.params, r, v);
 		break;
 	}
 	case VK_RETURN: {   // type the value of the selected row
@@ -143,6 +158,15 @@ void LiveView::session_key(int k) {
 	case 'X':
 		if (s.busy)
 			s.request_abort = true;
+		s.auto_tune = false;
+		break;
+	case 'A':   // endless auto-tune of steer kp / kd at the current base speed
+		if (s.auto_tune)
+			s.auto_tune = false;
+		else if (s.busy)
+			s.message = "wait for the drive to finish (X stops it)";
+		else
+			s.auto_tune = true;
 		break;
 	default: break;
 	}
@@ -176,7 +200,7 @@ void LiveView::edit_key(int k) {
 			break;
 		const ParamRow& r = kRows[s.selected];
 		const float v = static_cast<float>(std::atof(s.edit_buf.c_str()));
-		s.params.*(r.field) = std::clamp(v, r.lo, r.hi);
+		store(s.params, r, std::clamp(v, r.lo, r.hi));
 		if (v < r.lo || v > r.hi) {
 			char msg[96];
 			std::snprintf(msg, sizeof msg, "%s: kept within %g .. %g", r.name, r.lo, r.hi);
@@ -232,7 +256,7 @@ void LiveView::run_session_script() {
 	for (const auto& n : names)
 		if (k == n.first)
 			vk = n.second;
-	if (vk == VK_OEM_PLUS || vk == VK_OEM_MINUS || vk == 'V' || vk == 'C' || vk == 'S') {
+	if (vk == VK_OEM_PLUS || vk == VK_OEM_MINUS || vk == 'V' || vk == 'C' || vk == 'S' || vk == 'T') {
 		v_.inject_key(vk);   // playback / view keys go through the normal key handling
 		return;
 	}
@@ -253,16 +277,27 @@ std::string LiveView::session_panel() const {
 	t += "expected " + s.expected + "\n\n";
 	char buf[160];
 	for (int i = 0; i < kRowCount; i++) {
-		char val[48];
-		if (s.editing && i == s.selected)
+		char val[64];
+		if (s.editing && i == s.selected) {
 			std::snprintf(val, sizeof val, "[%s_]   Enter set, Esc cancel", s.edit_buf.c_str());
-		else
-			std::snprintf(val, sizeof val, kRows[i].fmt, s.params.*(kRows[i].field));
+		} else {
+			std::snprintf(val, sizeof val, kRows[i].fmt, shown(s.params, kRows[i]));
+			if (kRows[i].per_dt) {   // what goes into the robot's menu (driveData.steer_gain_d)
+				char fw[24];
+				std::snprintf(fw, sizeof fw, "  (fw %.0f)", s.params.*(kRows[i].field));
+				std::strncat(val, fw, sizeof val - std::strlen(val) - 1);
+			}
+		}
 		std::snprintf(buf, sizeof buf, "%s %-15s %s\n", i == s.selected ? ">" : "  ", kRows[i].name, val);
 		t += buf;
 	}
 	t += "\n";
-	size_t from = s.history.size() > 8 ? s.history.size() - 8 : 0;
+	if (!s.tune_lines.empty()) {
+		for (const std::string& l : s.tune_lines)
+			t += l + "\n";
+		t += "\n";
+	}
+	size_t from = s.history.size() > (s.tune_lines.empty() ? 8u : 3u) ? s.history.size() - (s.tune_lines.empty() ? 8 : 3) : 0;
 	for (size_t i = from; i < s.history.size(); i++)
 		t += s.history[i] + "\n";
 	if (!s.message.empty())
@@ -277,25 +312,33 @@ void LiveView::render(double t_sim, const std::string& phase) {
 	double lat = 0, s = 0;
 	const RobotParams& rp = robot_.params();
 	track_.nearest(robot_.body_to_ground(rp.sensor_x, 0.0), &lat, &s);
-	char buf[512];
+	// wheels: mean tread speed; slip: how much slower the body moves than the treads
+	const double v_body = robot_.forward_speed();
+	const double v_wheels = 0.5 * (robot_.wheel_speed(0) + robot_.wheel_speed(1)) * rp.wheel_radius;
+	const double slip = v_wheels > 0.1 ? 100.0 * (1.0 - v_body / v_wheels) : 0.0;
+	char actual[48] = "";
+	if (achieved_ > 0 && achieved_ < 0.9 * speed_)   // the simulation cannot keep up with the request
+		std::snprintf(actual, sizeof actual, " (running x%.2g)", achieved_);
+	char buf[600];
 	std::snprintf(buf, sizeof buf,
 		"%s\n"
-		"sim speed x%.3g%s\n"
-		"speed     %.2f m/s   fw base %.2f / target %.2f\n"
+		"sim speed x%.3g%s%s%s\n"
+		"speed     %.2f m/s   wheels %.2f m/s   slip %.0f %%\n"
+		"fw base   %.2f / target %.2f m/s\n"
 		"line      %+.1f mm (sensor bar)   target_pos %+.2f\n"
 		"yaw (fw)  %+.1f deg   markers %d%s\n"
 		"iq        L %+.2f A   R %+.2f A",
-		phase.c_str(), speed_, paused_ ? ", PAUSED" : "", robot_.forward_speed(), tm.current_base_mps,
-		tm.target_base_mps, lat * 1000, tm.target_pos, tm.yaw_deg, tm.marker_count, tm.lost ? "   LINE LOST" : "",
-		robot_.iq(0), robot_.iq(1));
+		phase.c_str(), speed_, actual, paused_ ? ", PAUSED" : "", show_trail_ ? "" : "   (trail off)", v_body, v_wheels,
+		slip, tm.current_base_mps, tm.target_base_mps, lat * 1000, tm.target_pos, tm.yaw_deg, tm.marker_count,
+		tm.lost ? "   LINE LOST" : "", robot_.iq(0), robot_.iq(1));
 	hud.status = buf;
-	hud.help = "Space pause   +/- sim speed   C camera   V sensor view   S shadows   T clear trail   P screenshot   Esc quit\n"
+	hud.help = "Space pause   +/- sim speed   C camera   V sensor view   S shadows   T trail on/off   P screenshot   Esc quit\n"
 	           "mouse: left drag rotate, right drag pan, wheel zoom";
 	if (interactive_)
 		hud.help = "Arrows: U/D/L/R buttons   Enter: K button   R: robot back to start\n" + hud.help;
 	if (session) {
 		hud.help = "1-4: run drive 1-4   N: new random course   X: stop the robot   R: robot to start\n"
-		           "Up/Down: pick parameter   Left/Right: change it (Shift: x10)   Enter: type a value\n" + hud.help;
+		           "Up/Down: pick parameter   Left/Right: change it (Shift: x10)   Enter: type a value   A: auto-tune speed + kp/kd (endless)\n" + hud.help;
 		hud.panel = session_panel();
 	}
 
@@ -319,6 +362,7 @@ void LiveView::render(double t_sim, const std::string& phase) {
 	static int frames = 0;
 	double t0 = wall();
 	v_.render(hud);
+	last_render_ = wall() - t0;
 	if (prof) {
 		acc += wall() - t0;
 		if (++frames % 30 == 0) {
@@ -340,7 +384,7 @@ void LiveView::tick(double t_sim, bool fast_forward, const std::string& phase) {
 	if (++trail_div_ >= 10) {
 		trail_div_ = 0;
 		Pose2 p = robot_.pose();
-		if (robot_.forward_speed() > 0.02)
+		if (show_trail_ && robot_.forward_speed() > 0.02)
 			v_.add_trail(p.x, p.y, robot_.forward_speed());
 	}
 	last_t_ = t_sim;
@@ -359,6 +403,7 @@ void LiveView::tick(double t_sim, bool fast_forward, const std::string& phase) {
 			last_frame_ = wall();
 		}
 		reanchor(t_sim);
+		rate_wall_ = 0;
 		return;
 	}
 	if (paused_) {
@@ -372,6 +417,7 @@ void LiveView::tick(double t_sim, bool fast_forward, const std::string& phase) {
 			Sleep(15);
 		}
 		reanchor(t_sim);
+		rate_wall_ = 0;
 		return;
 	}
 	double target = anchor_wall_ + (t_sim - anchor_sim_) / speed_;
@@ -380,15 +426,27 @@ void LiveView::tick(double t_sim, bool fast_forward, const std::string& phase) {
 		reanchor(t_sim);
 		target = now;
 	}
+	// Fast playback: fewer frames, so the simulation gets the CPU (x4: 60 fps ... x256: 4 fps), and
+	// above x1 drawing never takes more than a third of the time (slow GPU, laptop on battery).
+	const double frame_dt = std::min(0.5, std::max(std::min(0.25, std::max(1.0, speed_ / 4) / fps_),
+	                                               speed_ > 1 ? 2 * last_render_ : 0.0));
 	for (;;) {
 		now = wall();
-		if (now - last_frame_ >= 1.0 / fps_) {
+		if (now - last_frame_ >= frame_dt) {
+			if (rate_wall_ > 0 && now - rate_wall_ >= 0.5) {   // simulated seconds per wall second
+				achieved_ = (t_sim - rate_sim_) / (now - rate_wall_);
+				rate_wall_ = 0;
+			}
+			if (rate_wall_ <= 0) {
+				rate_wall_ = now;
+				rate_sim_ = t_sim;
+			}
 			render(t_sim, phase);
 			last_frame_ = wall();   // from the end of the frame: slow frames must not starve the simulation
 		}
 		if (now >= target)
 			break;
-		double wait = std::min(target - now, 1.0 / fps_);
+		double wait = std::min(target - now, frame_dt);
 		if (wait > 0.002)
 			Sleep(static_cast<DWORD>(wait * 1000));
 		else

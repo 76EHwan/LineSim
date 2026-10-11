@@ -8,7 +8,20 @@
 #include <limits>
 
 #include "fw_bridge.h"
+#include "fw_timing.h"
 #include "sim_mcu.h"
+
+double fw_steer_dt() { return static_cast<double>(FW_TIM14_NS) * 1e-9; }
+
+const char* fw_timing_warning() {
+	static char msg[160];
+	const double dt = fw_steer_dt();
+	if (FW_RAMP_DT > 0 && std::fabs(FW_RAMP_DT - dt) > 0.01 * dt) {
+		std::snprintf(msg, sizeof msg, "firmware: RAMP_DT %.6f s but TIM14 (Ramp_TIM) runs every %.6f s", (double) FW_RAMP_DT, dt);
+		return msg;
+	}
+	return nullptr;
+}
 
 namespace {
 constexpr uint64_t kNever = std::numeric_limits<uint64_t>::max();
@@ -16,12 +29,12 @@ constexpr uint64_t kUs = 1000;
 constexpr uint64_t kMs = 1000000;
 constexpr double kTwoPi = 6.283185307179586;
 
-// Firmware timer configuration (Core/Src/tim.c, 240 MHz timer clock):
-constexpr uint64_t kTim7Period = 25 * kUs;     // PSC 240, ARR 25  -> IR scan slot
-constexpr uint64_t kTim2Delay = 5 * kUs;       // PSC 240, ARR 5, one pulse -> ADC3 trigger
-constexpr uint64_t kAdc3Conv = 500;            // 12-bit conversion + BDMA
-constexpr uint64_t kTim13Period = 500 * kUs;   // PSC 240, ARR 500 -> speed loop
-constexpr uint64_t kTim14Period = 500 * kUs;   // PSC 240, ARR 500 -> ramp / steering
+// Firmware timer configuration, read from Core/Src/tim.c at build time (240 MHz timer clock):
+constexpr uint64_t kTim7Period = FW_TIM7_NS;     // IR scan slot (PSC 240, ARR 25: 25 us)
+constexpr uint64_t kTim2Delay = FW_TIM2_NS;      // one pulse -> ADC3 trigger (5 us)
+constexpr uint64_t kAdc3Conv = 500;              // 12-bit conversion + BDMA
+constexpr uint64_t kTim13Period = FW_TIM13_NS;   // speed loop (500 us)
+constexpr uint64_t kTim14Period = FW_TIM14_NS;   // ramp / steering (500 us)
 constexpr uint64_t kLptim3Period = 1 * kMs;    // buzzer countdown (LPTIM_TICK_DT)
 constexpr uint64_t kI2cRead2 = 115 * kUs;      // 400 kHz: addr+reg+addr+2 bytes
 constexpr double kEncoderCounts = 2048.0;      // foc.h ENCODER_RESOLUTION

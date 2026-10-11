@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include <mujoco/mujoco.h>
@@ -84,12 +85,17 @@ bool Viewer::open(int width, int height, const char* title, std::string* err) {
 	MultiByteToWideChar(CP_UTF8, 0, title, -1, wtitle, 256);
 	RECT r{0, 0, width, height};
 	AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
-	HWND hwnd = CreateWindowW(kClass, wtitle, WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT,
-		r.right - r.left, r.bottom - r.top, nullptr, nullptr, inst, nullptr);
+	// LINESIM_NOACTIVATE: automated test windows must not take the keyboard from the user
+	const bool no_activate = std::getenv("LINESIM_NOACTIVATE") != nullptr;
+	HWND hwnd = CreateWindowExW(no_activate ? WS_EX_NOACTIVATE : 0, kClass, wtitle,
+		WS_OVERLAPPEDWINDOW | (no_activate ? 0 : WS_VISIBLE), CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left,
+		r.bottom - r.top, nullptr, nullptr, inst, nullptr);
 	if (!hwnd) {
 		*err = "CreateWindow failed";
 		return false;
 	}
+	if (no_activate)
+		ShowWindow(hwnd, SW_SHOWNOACTIVATE);
 	hwnd_ = hwnd;
 	SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
 	HDC dc = GetDC(hwnd);

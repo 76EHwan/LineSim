@@ -22,6 +22,8 @@ struct SessionState {
 	bool request_abort = false;
 	bool busy = false;              // a drive is running
 	bool ready = false;             // firmware booted, params loaded
+	bool auto_tune = false;         // A: drive 1 over and over, adjusting steer kp / kd
+	std::vector<std::string> tune_lines;   // auto-tune status for the panel
 	std::string map_name, expected; // expected marker sequence (U L R C)
 	std::vector<std::string> history;
 	std::string message;
@@ -39,6 +41,8 @@ public:
 	// Keeps the window alive after the run has ended, until the user closes it.
 	void hold_until_closed();
 	bool stop_requested() const { return stop_; }
+	// A drive is starting: the trail shows this drive only.
+	void drive_started() { v_.clear_trail(); }
 
 	std::function<void()> on_reset;   // R key (interactive): put the robot back on the start line
 
@@ -57,12 +61,15 @@ private:
 	bool interactive_;
 	double speed_;
 	bool paused_ = false;
+	bool show_trail_ = true;
 	bool stop_ = false;
 	double anchor_wall_ = 0, anchor_sim_ = 0;
 	double last_frame_ = -1;
 	double last_t_ = 0;
 	int trail_div_ = 0;
 	double fps_ = 60;
+	double achieved_ = 0, rate_wall_ = 0, rate_sim_ = 0;   // measured playback speed
+	double last_render_ = 0;                               // wall time of the last frame [s]
 	int shot_no_ = 0;
 	bool script_loaded_ = false, script_active_ = false, script_waiting_drive_ = false, script_saw_busy_ = false;
 	std::vector<std::string> script_;

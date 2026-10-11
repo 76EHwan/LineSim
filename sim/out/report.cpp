@@ -299,7 +299,7 @@ void write_reports(const ScenarioOptions& opt, const ScenarioResult& res, const 
 		  << d.rms_lat_mm << ", \"markers\": \"";
 		for (const FwMarker& m : d.markers)
 			j << marker_name(m.type) << " ";
-		j << "\", \"lcd\": \"" << esc(d.lcd) << "\"}" << (i + 1 < res.drives.size() ? "," : "") << "\n";
+		j << "\", \"marker_check\": \"" << esc(d.marker_check) << "\", \"lcd\": \"" << esc(d.lcd) << "\"}" << (i + 1 < res.drives.size() ? "," : "") << "\n";
 	}
 	j << "  ]\n}\n";
 }

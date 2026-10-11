@@ -2,6 +2,8 @@
 
 #include <windows.h>
 
+#include <algorithm>
+#include <cstdarg>
 #include <chrono>
 #include <ctime>
 #include <cmath>
@@ -59,6 +61,235 @@ double parse_lap_time(const std::string& lcd) {
 		return -1;
 	return std::atof(lcd.c_str() + p + 2);
 }
+
+// rms of the yaw rate minus its 60 ms moving average (1 ms samples): the fast steering weave
+double weave_dps(const std::vector<Sample>& smp) {
+	std::vector<double> wz;
+	for (const Sample& s : smp)
+		if (s.v > 0.3f)
+			wz.push_back(s.wz_dps);
+	const size_t k = 60;
+	if (wz.size() < 2 * k)
+		return 0.0;
+	double acc = 0, sq = 0;
+	for (size_t i = 0; i < k; i++)
+		acc += wz[i];
+	for (size_t i = k; i < wz.size(); i++) {
+		double hp = wz[i - k / 2] - acc / k;
+		sq += hp * hp;
+		acc += wz[i] - wz[i - k];
+	}
+	return std::sqrt(sq / (wz.size() - k));
+}
+
+// mean wheel slip [%]: how much slower the body moved than the treads (odometry reads long by that)
+double slip_pct(const std::vector<Sample>& smp) {
+	double sum = 0;
+	int n = 0;
+	for (const Sample& s : smp) {
+		const double w = 0.5 * (s.wheel_v[0] + s.wheel_v[1]);
+		if (w > 0.3) {
+			sum += std::fabs(1.0 - s.v / w);
+			n++;
+		}
+	}
+	return n ? 100.0 * sum / n : 0.0;
+}
+
+// Session auto-tune (A key): base speed and steer kp / kd (seconds) for the race on the course in
+// the window. Endless, until A is pressed again.
+//
+// A trial is drive 1 (learning: markers and distances must come out clean) followed by drive 2
+// (accelerates on the straights from that data; max speed, accel, decel as set in the panel). It
+// passes when both finish, never more than 70 mm off the line, with every marker read right. Its
+// score is drive 2's lap time, then drive 1's cleanliness (line error, weave, wheel slip).
+// A round tries the gain center and its four neighbours (kp +-dkp, kd +-dkd) at the test speed.
+// The gains move to the best neighbour, back off one step from a neighbour that lost the line
+// (stability margin), or take smaller steps when the center stays best. When the center passes
+// and no neighbour lost the line, that base speed is the new best and the next round tries dv
+// faster. Three rounds without that: back to the best speed + dv/2 (down to 0.01 m/s steps).
+class GainTuner {
+public:
+	bool active = false;
+
+	void start(double v, double kp, double kd_s) {
+		active = true;
+		v_ = std::max(0.3, v);
+		dv_ = 0.2;
+		best_v_ = 0;
+		best_lap_ = 0;
+		best_kp_ = kp_ = std::max(1.0, kp);
+		best_kd_ = kd_ = std::max(0.0, kd_s);
+		dkp_ = std::max(2.0, std::round(kp_ * 0.2));
+		dkd_ = 0.1;
+		round_ = 0;
+		misses_ = 0;
+		last_.clear();
+		log_.clear();
+		plan();
+	}
+	double speed() const { return v_; }
+	bool has_best() const { return best_v_ > 0; }
+	double best_v() const { return best_v_; }
+	double best_kp() const { return has_best() ? best_kp_ : kp_; }
+	double best_kd() const { return has_best() ? best_kd_ : kd_; }
+	std::pair<double, double> next() const { return {queue_[done_.size()].kp, queue_[done_.size()].kd}; }
+	bool round_complete() const { return done_.size() == queue_.size(); }
+
+	// One trial = drive 1 (learning: its data must be clean) and, if that read every marker, drive 2.
+	// lost: the line was lost in either drive. pass: both drives finished with every marker right.
+	// score (lower is better): drive 2 lap time first, then how clean drive 1 was.
+	void record(bool lost, bool pass, double score, double lap2, const std::string& text) {
+		Trial t = queue_[done_.size()];
+		t.lost = lost;
+		t.pass = pass;
+		t.score = score;
+		t.lap2 = lap2;
+		char buf[200];
+		std::snprintf(buf, sizeof buf, "%.3f kp %4.1f kd %.3f  %s", v_, t.kp, t.kd, text.c_str());
+		log_.push_back(buf);
+		if (log_.size() > 7)
+			log_.erase(log_.begin());
+		done_.push_back(t);
+	}
+
+	void finish_round() {
+		round_++;
+		auto at = [&](int dir) -> const Trial* {
+			for (const Trial& t : done_)
+				if (t.dir == dir)
+					return &t;
+			return nullptr;
+		};
+		const Trial c = *at(0);
+		bool neighbour_lost = false;
+		for (const Trial& t : done_)
+			neighbour_lost |= t.dir != 0 && t.lost;
+
+		if (c.pass && !neighbour_lost) {   // this speed works with margin: keep it, go faster
+			if (v_ > best_v_ + 1e-9) {
+				best_v_ = v_;
+				best_kp_ = c.kp;
+				best_kd_ = c.kd;
+				best_lap_ = c.lap2;
+			}
+			last_ = fmt("%.3f m/s passed: try %.3f m/s", v_, v_ + dv_);
+			v_ += dv_;
+			misses_ = 0;
+			dkp_ = std::max(dkp_, std::max(1.0, std::round(kp_ * 0.1)));
+			dkd_ = std::max(dkd_, 0.03);
+			plan();
+			return;
+		}
+
+		// the gains: best neighbour / back off from the edge / smaller steps
+		const Trial* best = nullptr;
+		for (const Trial& t : done_)
+			if (!t.lost && (!best || t.score < best->score))
+				best = &t;
+		std::string what;
+		if (c.lost) {
+			if (best) {
+				move_to(*best);
+				what = "center lost the line: best neighbour";
+			} else {
+				kp_ = std::max(1.0, std::round(kp_ * 0.7 * 10) / 10);
+				kd_ += dkd_;
+				what = "all lost the line: kp -30 %, kd up";
+			}
+		} else if (best->dir != 0 && best->score < c.score - 0.2) {
+			move_to(*best);
+			what = "better neighbour";
+		} else {
+			const int opposite[5] = {0, 2, 1, 4, 3};
+			int edge = 0;
+			for (int d = 1; d <= 4 && !edge; d++)
+				if (at(d) && at(d)->lost)
+					edge = d;
+			if (edge && at(opposite[edge]) && !at(opposite[edge])->lost) {
+				move_to(*at(opposite[edge]));
+				what = "neighbour lost the line: backed off";
+			} else {
+				dkp_ = std::max(0.5, dkp_ * 0.5);
+				dkd_ = std::max(0.01, dkd_ * 0.5);
+				what = "center best: smaller steps";
+			}
+		}
+		// the speed: three rounds without a pass here -> back to the best speed, smaller step
+		if (++misses_ >= 3) {
+			misses_ = 0;
+			if (best_v_ > 0) {
+				dv_ = std::max(0.01, dv_ * 0.5);
+				v_ = best_v_ + dv_;
+				kp_ = best_kp_;
+				kd_ = best_kd_;
+				what = fmt("no pass at this speed: best %.3f + %.3f", best_v_, dv_);
+			} else {
+				v_ = std::max(0.3, v_ - 0.2);
+				what = fmt("no pass yet: slower, %.3f m/s", v_);
+			}
+		}
+		last_ = what;
+		plan();
+	}
+
+	std::vector<std::string> status(double dt) const {
+		std::vector<std::string> v;
+		v.push_back(fmt("AUTO-TUNE  round %d   (A: stop and keep the best)", round_ + 1));
+		v.push_back(fmt("testing  %.3f m/s  kp %.1f  kd %.3f s (fw %.0f)", v_, kp_, kd_, kd_ / dt));
+		v.push_back(fmt("         steps kp +-%.1f  kd +-%.3f  speed +%.3f", dkp_, dkd_, dv_));
+		if (best_v_ > 0)
+			v.push_back(fmt("BEST     %.3f m/s  kp %.1f  kd %.3f s (fw %.0f)  drive 2: %.2f s", best_v_, best_kp_, best_kd_,
+				best_kd_ / dt, best_lap_));
+		else
+			v.push_back("BEST     none yet (finish + every marker right)");
+		if (!last_.empty())
+			v.push_back(last_);
+		v.push_back("");
+		for (const std::string& l : log_)
+			v.push_back(l);
+		return v;
+	}
+
+private:
+	struct Trial {
+		double kp = 0, kd = 0;
+		int dir = 0;   // 0 center, 1 kp+, 2 kp-, 3 kd+, 4 kd-
+		bool lost = false, pass = false;
+		double lap2 = 0;   // drive 2 lap time [s] when passed
+		double score = 0;
+	};
+	static std::string fmt(const char* f, ...) {
+		char buf[160];
+		va_list ap;
+		va_start(ap, f);
+		std::vsnprintf(buf, sizeof buf, f, ap);
+		va_end(ap);
+		return buf;
+	}
+	void move_to(const Trial& t) {
+		kp_ = t.kp;
+		kd_ = t.kd;
+	}
+	void plan() {
+		queue_.clear();
+		done_.clear();
+		queue_.push_back({kp_, kd_, 0});
+		queue_.push_back({kp_ + dkp_, kd_, 1});
+		if (kp_ - dkp_ >= 1.0)
+			queue_.push_back({kp_ - dkp_, kd_, 2});
+		queue_.push_back({kp_, kd_ + dkd_, 3});
+		if (kd_ > 1e-9)
+			queue_.push_back({kp_, std::max(0.0, kd_ - dkd_), 4});
+	}
+
+	double v_ = 1.5, dv_ = 0.2, best_v_ = 0, best_kp_ = 0, best_kd_ = 0, best_lap_ = 0;
+	double kp_ = 20, kd_ = 0.3, dkp_ = 4, dkd_ = 0.1;
+	int round_ = 0, misses_ = 0;
+	std::string last_;
+	std::vector<Trial> queue_, done_;
+	std::vector<std::string> log_;
+};
 }  // namespace
 
 bool apply_param(FwDriveParams* p, const std::string& key, double v) {
@@ -67,7 +298,8 @@ bool apply_param(FwDriveParams* p, const std::string& key, double v) {
 	else if (key == "accel") p->accel = (float) v;
 	else if (key == "decel") p->decel = (float) v;
 	else if (key == "steer_kp") p->steer_kp = (float) v;
-	else if (key == "steer_kd") p->steer_kd = (float) v;
+	else if (key == "steer_kd") p->steer_kd = (float) v;              // firmware value (CMSIS Kd per 2 kHz call)
+	else if (key == "steer_kd_s") p->steer_kd = (float) (v / fw_steer_dt());   // derivative gain in seconds
 	else if (key == "pos_atten_gain") p->pos_atten_gain = (float) v;
 	else if (key == "pit_in_m") p->pit_in_m = (float) v;
 	else if (key == "target_shift") p->target_shift = (float) v;
@@ -192,6 +424,8 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 	imu.init(rp, opt.seed + 101);
 
 	auto sim = std::make_unique<Simulation>(*robot, ir, imu, track, sd.generic_string());
+	if (const char* w = fw_timing_warning())
+		std::fprintf(stderr, "warning: %s\n", w);
 	// Sensor bar 8 cm behind the start line unless the track fixes the start position.
 	auto start_pose = [&]() {
 		return track.pose_at(track.has_robot_start() ? track.robot_start_s() : track.start_s() - rp.sensor_x - 0.08);
@@ -368,6 +602,8 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 		lat_sq = 0;
 		current = n;
 		cur->t_start = sim->t();
+		if (live)
+			live->drive_started();
 		if (!opt.quiet)
 			std::printf("[%8.3f s] drive %d start\n", sim->t(), n);
 		auto w0 = std::chrono::steady_clock::now();
@@ -482,7 +718,91 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 				run_one(n);
 				session.busy = false;
 			}
+			GainTuner tuner;
+			const double dt = fw_steer_dt();
 			for (;;) {
+				if (session.auto_tune) {   // endless: drive 1 on this course, score, adjust speed and gains
+					session.request_drive = 0;
+					session.request_new_map = false;
+					if (!tuner.active) {
+						tuner.start(session.params.base_mps, session.params.steer_kp, session.params.steer_kd * dt);
+						session.busy = true;
+						session.message.clear();
+					}
+					auto [kp, kd] = tuner.next();
+					session.params.base_mps = static_cast<float>(tuner.speed());
+					session.params.steer_kp = static_cast<float>(kp);
+					session.params.steer_kd = static_cast<float>(kd / dt);
+					fwb_set_drive_params(&session.params);
+					res.params = session.params;
+					session.tune_lines = tuner.status(dt);
+					// drive 1 learns the course; drive 2 accelerates on its straights from that data
+					auto drive = [&](int n) {
+						run_one(n);
+						DriveResult d = std::move(res.drives.back());
+						res.drives.pop_back();   // endless: keep the scores, not every drive's samples
+						return d;
+					};
+					auto lost_line = [](const DriveResult& d) { return d.outcome != "finished" || d.max_lat_mm > 70.0; };
+					const DriveResult d1 = drive(1);
+					if (!session.auto_tune)   // stopped (A or X) during this drive: not a fair trial
+						continue;
+					const double weave1 = weave_dps(d1.samples), slip1 = slip_pct(d1.samples);
+					const double clean1 = d1.rms_lat_mm + weave1 / 20.0 + slip1 / 2.0;   // drive 1 data quality
+					char text[200];
+					bool lost = lost_line(d1), pass = false;
+					double score = 0, lap2 = 0;
+					if (lost) {
+						score = 1000;
+						std::snprintf(text, sizeof text, "1: %s", d1.outcome.c_str());
+					} else if (d1.marker_check != "OK") {
+						score = 500 + clean1;
+						std::snprintf(text, sizeof text, "1: markers %s", d1.marker_check.c_str());
+					} else {
+						const DriveResult d2 = drive(2);
+						if (!session.auto_tune)
+							continue;
+						const bool ok2 = !lost_line(d2) && d2.marker_check == "OK" && d2.lap_time_fw > 0;
+						lost = lost_line(d2);
+						pass = ok2;
+						lap2 = d2.lap_time_fw;
+						score = ok2 ? 5.0 * lap2 + clean1 : (lost ? 300.0 : 200.0) + clean1;
+						std::snprintf(text, sizeof text, "1: lat %.1f w %.0f slip %.0f%% | 2: %s", d1.rms_lat_mm, weave1, slip1,
+							ok2 ? (std::to_string(lap2).substr(0, 5) + " s").c_str()
+							    : (lost ? d2.outcome.c_str() : ("markers " + d2.marker_check).c_str()));
+					}
+					tuner.record(lost, pass, score, lap2, text);
+					if (tuner.round_complete()) {
+						tuner.finish_round();
+						if (!opt.quiet) {
+							const std::vector<std::string> st = tuner.status(dt);
+							std::printf("[%8.3f s] auto-tune %s | %s | %s\n", sim->t(), st[0].c_str() + 11, st[3].c_str(),
+								st.size() > 4 ? st[4].c_str() : "");
+							std::fflush(stdout);
+						}
+					}
+					session.tune_lines = tuner.status(dt);
+					continue;
+				}
+				if (tuner.active) {   // A pressed again: keep the best speed and gains found
+					tuner.active = false;
+					if (tuner.has_best())
+						session.params.base_mps = static_cast<float>(tuner.best_v());
+					session.params.steer_kp = static_cast<float>(tuner.best_kp());
+					session.params.steer_kd = static_cast<float>(tuner.best_kd() / dt);
+					fwb_set_drive_params(&session.params);
+					session.busy = false;
+					char line[200];
+					if (tuner.has_best())
+						std::snprintf(line, sizeof line, "auto-tune: best %.3f m/s, steer kp %.1f, kd %.3f s (fw steer_gain_d %.0f)",
+							tuner.best_v(), tuner.best_kp(), tuner.best_kd(), tuner.best_kd() / dt);
+					else
+						std::snprintf(line, sizeof line, "auto-tune: no speed passed yet (kept kp %.1f, kd %.3f s)",
+							tuner.best_kp(), tuner.best_kd());
+					session.history.push_back(line);
+					session.message = "kept the best found (drive 1-4 to try it)";
+					session.tune_lines.clear();
+				}
 				if (session.request_new_map) {
 					session.request_new_map = false;
 					new_map();

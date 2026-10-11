@@ -1,6 +1,6 @@
 """Full.step -> LineSim robot (meshes + geometry).
 
-    tools\\.venv\\Scripts\\python.exe tools\\step_import.py robots\\Full.step
+    tools\\.venv\\Scripts\\python.exe tools\\step_import.py robots\\Full.step [--total-mass 0.4] [--view-cell 0.6]
 
 Writes
   robots/mesh/<part group>.stl   visual meshes in the simulator's robot frame
@@ -47,6 +47,23 @@ def group_of(name):
         if re.search(pat, name):
             return g, rgba
     return "parts", GROUPS[-1][2]
+
+
+def simplify(m, cell):
+    """Vertex clustering: snap vertices to a `cell` grid, merge each cell, drop collapsed faces.
+    Only for the visual meshes: the viewer draws them every frame (twice with the sensor view)."""
+    q = np.floor(m.vertices / cell).astype(np.int64)
+    _, inv, cnt = np.unique(q, axis=0, return_inverse=True, return_counts=True)
+    inv = inv.ravel()
+    v = np.zeros((len(cnt), 3))
+    np.add.at(v, inv, m.vertices)
+    v /= cnt[:, None]
+    f = inv[m.faces]
+    f = f[(f[:, 0] != f[:, 1]) & (f[:, 1] != f[:, 2]) & (f[:, 0] != f[:, 2])]
+    f = f[np.unique(np.sort(f, axis=1), axis=0, return_index=True)[1]]   # same triangle twice
+    out = trimesh.Trimesh(v, f, process=False)
+    out.remove_unreferenced_vertices()
+    return out
 
 
 def clusters(points, tol):
@@ -132,6 +149,7 @@ def main(step_path):
         if old.endswith(".stl"):
             os.remove(os.path.join(mesh_dir, old))
     visual = []
+    total_drawn = 0
     MAX_FACES = 150000   # MuJoCo's STL reader accepts up to 200k faces per file
     for g, ms in grouped.items():
         chunks, cur, nf = [], [], 0
@@ -142,13 +160,20 @@ def main(step_path):
             cur.append(m)
             nf += len(m.faces)
         chunks.append(cur)
+        shown = 0
         for k, ch in enumerate(chunks):
             merged = trimesh.util.concatenate(ch)
+            if VIEW_CELL > 0:
+                merged = simplify(merged, VIEW_CELL)
             f = os.path.join(mesh_dir, g + (f"_{k}" if len(chunks) > 1 else "") + ".stl")
             merged.export(f)
+            shown += len(merged.faces)
             visual.append({"file": os.path.relpath(f, os.path.join(ROOT, "robots")).replace("\\", "/"), "rgba": rgba_of[g]})
-        print(f"  mesh {g:11s} {len(ms):4d} parts {sum(len(m.faces) for m in ms):7d} faces in {len(chunks)} file(s)")
-    print(f"  ({skipped} tiny chip parts left out of the visual mesh)")
+        print(f"  mesh {g:11s} {len(ms):4d} parts {sum(len(m.faces) for m in ms):7d} faces in {len(chunks)} file(s), "
+              f"{shown} drawn")
+        total_drawn += shown
+    print(f"  ({skipped} tiny chip parts left out of the visual mesh; {total_drawn} faces drawn, "
+          f"--view-cell {VIEW_CELL * 1000:g} mm)")
 
     # ---- collision boxes for parts that can touch the floor ----
     def box_of(pred):
@@ -238,10 +263,14 @@ def main(step_path):
 
 
 TOTAL_MASS = None
+VIEW_CELL = 0.0006   # visual mesh simplification grid [m]; 0 keeps the full tessellation
 
 if __name__ == "__main__":
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     if "--total-mass" in sys.argv:   # measured robot mass in kg, e.g. --total-mass 0.4
         TOTAL_MASS = float(sys.argv[sys.argv.index("--total-mass") + 1])
         args = [a for a in args if a != sys.argv[sys.argv.index("--total-mass") + 1]]
+    if "--view-cell" in sys.argv:    # mm, e.g. --view-cell 0.4 (finer) or 0 (full detail)
+        VIEW_CELL = float(sys.argv[sys.argv.index("--view-cell") + 1]) / 1000
+        args = [a for a in args if a != sys.argv[sys.argv.index("--view-cell") + 1]]
     main(args[0] if args else os.path.join(ROOT, "robots", "Full.step"))
