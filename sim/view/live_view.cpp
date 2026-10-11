@@ -54,12 +54,22 @@ void LiveView::reanchor(double t_sim) {
 
 void LiveView::handle_keys() {
 	for (int k; (k = v_.pop_key()) != 0;) {
+		if (session && session->editing) {   // typing a value: every key belongs to the entry
+			edit_key(k);
+			continue;
+		}
 		switch (k) {
 		case VK_SPACE: paused_ = !paused_; break;
 		case VK_OEM_PLUS:
-		case VK_ADD: speed_ = std::min(16.0, speed_ * 2); break;
+		case VK_ADD:
+			speed_ = std::min(16.0, speed_ * 2);
+			reanchor(last_t_);   // pace from now on; the time already played stays as it was
+			break;
 		case VK_OEM_MINUS:
-		case VK_SUBTRACT: speed_ = std::max(1.0 / 16, speed_ / 2); break;
+		case VK_SUBTRACT:
+			speed_ = std::max(1.0 / 16, speed_ / 2);
+			reanchor(last_t_);
+			break;
 		case 'C': v_.set_cam_mode((v_.cam_mode() + 1) % Viewer::kCamModes); break;
 		case 'T': v_.clear_trail(); break;
 		case 'S': v_.toggle_shadows(); break;
@@ -109,6 +119,12 @@ void LiveView::session_key(int k) {
 		v = std::round(v / (r.step / 10)) * (r.step / 10);   // no float drift
 		break;
 	}
+	case VK_RETURN: {   // type the value of the selected row
+		s.editing = true;
+		s.edit_buf.clear();
+		s.message.clear();
+		break;
+	}
 	case '1':
 	case '2':
 	case '3':
@@ -128,6 +144,46 @@ void LiveView::session_key(int k) {
 		if (s.busy)
 			s.request_abort = true;
 		break;
+	default: break;
+	}
+}
+
+void LiveView::edit_key(int k) {
+	SessionState& s = *session;
+	char c = 0;
+	if (k >= '0' && k <= '9')
+		c = static_cast<char>(k);
+	else if (k >= VK_NUMPAD0 && k <= VK_NUMPAD9)
+		c = static_cast<char>('0' + (k - VK_NUMPAD0));
+	else if (k == VK_OEM_PERIOD || k == VK_DECIMAL)
+		c = '.';
+	if (c) {
+		if (s.edit_buf.size() < 12 && !(c == '.' && s.edit_buf.find('.') != std::string::npos))
+			s.edit_buf += c;
+		return;
+	}
+	switch (k) {
+	case VK_BACK:
+		if (!s.edit_buf.empty())
+			s.edit_buf.pop_back();
+		break;
+	case VK_ESCAPE:
+		s.editing = false;
+		break;
+	case VK_RETURN: {
+		s.editing = false;
+		if (s.edit_buf.empty() || s.edit_buf == ".")
+			break;
+		const ParamRow& r = kRows[s.selected];
+		const float v = static_cast<float>(std::atof(s.edit_buf.c_str()));
+		s.params.*(r.field) = std::clamp(v, r.lo, r.hi);
+		if (v < r.lo || v > r.hi) {
+			char msg[96];
+			std::snprintf(msg, sizeof msg, "%s: kept within %g .. %g", r.name, r.lo, r.hi);
+			s.message = msg;
+		}
+		break;
+	}
 	default: break;
 	}
 }
@@ -169,11 +225,21 @@ void LiveView::run_session_script() {
 	}
 	std::string k = script_.front();
 	script_.erase(script_.begin());
-	const std::pair<const char*, int> names[] = {{"UP", VK_UP}, {"DOWN", VK_DOWN}, {"LEFT", VK_LEFT}, {"RIGHT", VK_RIGHT}};
+	const std::pair<const char*, int> names[] = {{"UP", VK_UP}, {"DOWN", VK_DOWN}, {"LEFT", VK_LEFT}, {"RIGHT", VK_RIGHT},
+		{"PLUS", VK_OEM_PLUS}, {"MINUS", VK_OEM_MINUS}, {"ENTER", VK_RETURN}, {"ESC", VK_ESCAPE}, {"BACK", VK_BACK},
+		{"DOT", VK_OEM_PERIOD}};
 	int vk = k.size() == 1 ? static_cast<unsigned char>(k[0]) : 0;
 	for (const auto& n : names)
 		if (k == n.first)
 			vk = n.second;
+	if (vk == VK_OEM_PLUS || vk == VK_OEM_MINUS || vk == 'V' || vk == 'C' || vk == 'S') {
+		v_.inject_key(vk);   // playback / view keys go through the normal key handling
+		return;
+	}
+	if (s.editing) {
+		edit_key(vk);
+		return;
+	}
 	session_key(vk);
 	if (vk >= '1' && vk <= '4') {
 		script_waiting_drive_ = true;
@@ -188,7 +254,10 @@ std::string LiveView::session_panel() const {
 	char buf[160];
 	for (int i = 0; i < kRowCount; i++) {
 		char val[48];
-		std::snprintf(val, sizeof val, kRows[i].fmt, s.params.*(kRows[i].field));
+		if (s.editing && i == s.selected)
+			std::snprintf(val, sizeof val, "[%s_]   Enter set, Esc cancel", s.edit_buf.c_str());
+		else
+			std::snprintf(val, sizeof val, kRows[i].fmt, s.params.*(kRows[i].field));
 		std::snprintf(buf, sizeof buf, "%s %-15s %s\n", i == s.selected ? ">" : "  ", kRows[i].name, val);
 		t += buf;
 	}
@@ -211,12 +280,12 @@ void LiveView::render(double t_sim, const std::string& phase) {
 	char buf[512];
 	std::snprintf(buf, sizeof buf,
 		"%s\n"
-		"sim time  %.2f s   (x%.3g%s)\n"
+		"sim speed x%.3g%s\n"
 		"speed     %.2f m/s   fw base %.2f / target %.2f\n"
 		"line      %+.1f mm (sensor bar)   target_pos %+.2f\n"
 		"yaw (fw)  %+.1f deg   markers %d%s\n"
 		"iq        L %+.2f A   R %+.2f A",
-		phase.c_str(), t_sim, speed_, paused_ ? ", PAUSED" : "", robot_.forward_speed(), tm.current_base_mps,
+		phase.c_str(), speed_, paused_ ? ", PAUSED" : "", robot_.forward_speed(), tm.current_base_mps,
 		tm.target_base_mps, lat * 1000, tm.target_pos, tm.yaw_deg, tm.marker_count, tm.lost ? "   LINE LOST" : "",
 		robot_.iq(0), robot_.iq(1));
 	hud.status = buf;
@@ -226,7 +295,7 @@ void LiveView::render(double t_sim, const std::string& phase) {
 		hud.help = "Arrows: U/D/L/R buttons   Enter: K button   R: robot back to start\n" + hud.help;
 	if (session) {
 		hud.help = "1-4: run drive 1-4   N: new random course   X: stop the robot   R: robot to start\n"
-		           "Up/Down: pick parameter   Left/Right: change it (Shift: x10)\n" + hud.help;
+		           "Up/Down: pick parameter   Left/Right: change it (Shift: x10)   Enter: type a value\n" + hud.help;
 		hud.panel = session_panel();
 	}
 
@@ -306,7 +375,8 @@ void LiveView::tick(double t_sim, bool fast_forward, const std::string& phase) {
 		return;
 	}
 	double target = anchor_wall_ + (t_sim - anchor_sim_) / speed_;
-	if (now - target > 0.25) {   // can't keep up (or speed changed): don't try to catch up
+	// Behind: don't try to catch up. Far ahead: the anchor is stale, never sleep on it.
+	if (now - target > 0.25 || target - now > 0.5 + 0.002 / speed_) {
 		reanchor(t_sim);
 		target = now;
 	}

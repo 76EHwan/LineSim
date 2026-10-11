@@ -27,6 +27,15 @@ void RobotParams::load(const json::Value& j, const std::string& base_dir) {
 	track = j.num("track", track);
 	wheel_mass = j.num("wheel_mass", wheel_mass);
 	tire_mu = j.num("tire_mu", tire_mu);
+	if (const json::Value* t = j.get("tire")) {
+		tire.model = t->str("model", tire.model);
+		tire.mu = t->num("mu", tire.mu);
+		tire.slip_stiffness = t->num("slip_stiffness", tire.slip_stiffness);
+		tire.relaxation_length = t->num("relaxation_length", tire.relaxation_length);
+		tire.damping_ratio = t->num("damping_ratio", tire.damping_ratio);
+	} else {
+		tire.model = "mujoco";   // older robot files: MuJoCo friction with tire_mu
+	}
 	if (const json::Value* s = j.get("skids"); s && s->is_arr()) {
 		skids.clear();
 		for (const json::Value& e : s->a)
@@ -73,6 +82,7 @@ void RobotParams::load(const json::Value& j, const std::string& base_dir) {
 	sensor_half_width = j.num("sensor_half_width", sensor_half_width);
 	marker_sensor_y = j.num("marker_sensor_y", marker_sensor_y);
 	sensor_sigma = j.num("sensor_sigma", sensor_sigma);
+	sensor_delay = j.num("sensor_delay", sensor_delay);
 	ir_white = j.num("ir_white", ir_white);
 	ir_black = j.num("ir_black", ir_black);
 	ir_noise = j.num("ir_noise", ir_noise);
@@ -92,6 +102,7 @@ void RobotParams::load(const json::Value& j, const std::string& base_dir) {
 		motor.viscous = m->num("viscous", motor.viscous);
 		motor.current_tau = m->num("current_tau", motor.current_tau);
 		motor.voltage_ratio = m->num("voltage_ratio", motor.voltage_ratio);
+		motor.drive_lag = m->num("drive_lag", motor.drive_lag);
 	}
 }
 
@@ -183,7 +194,9 @@ std::string Robot::build_mjcf() const {
 		  << "        <inertial pos=\"0 0 0\" mass=\"" << p.wheel_mass << "\" diaginertia=\"" << iw_side << " " << iw_spin
 		  << " " << iw_side << "\"/>\n"
 		  << "        <geom name=\"tire_" << name << "\" type=\"cylinder\" mass=\"0\" size=\"" << R << " "
-		  << p.wheel_width / 2 << "\" zaxis=\"0 1 0\" friction=\"" << p.tire_mu << " 0.005 0.0001\" rgba=\""
+		  << p.wheel_width / 2 << "\" zaxis=\"0 1 0\" friction=\"" << p.tire_mu << " 0.005 0.0001\""
+		  // brush model: frictionless contact here (normal force only), tread forces added in tire_forces()
+		  << (p.tire.model == "brush" ? " condim=\"1\" priority=\"1\"" : "") << " rgba=\""
 		  << (cad ? "0 0 0 0" : "0.1 0.1 0.1 1") << "\"/>\n"
 		  << "      </body>\n";
 		coupled[s].push_back(name);
@@ -231,6 +244,16 @@ bool Robot::init(const RobotParams& p, const std::string& mjcf_out_path, std::st
 		if (n && std::strncmp(n, "body", 4) == 0)
 			box_geoms_.push_back(g);
 	}
+	wheels_.clear();
+	for (int b = 0; b < m_->nbody; b++) {
+		const char* n = mj_id2name(m_, mjOBJ_BODY, b);
+		if (!n || std::strncmp(n, "wheel_", 6) != 0)
+			continue;
+		Wheel w;
+		w.body = b;
+		w.geom = mj_name2id(m_, mjOBJ_GEOM, (std::string("tire_") + n).c_str());
+		wheels_.push_back(w);
+	}
 	const char* jn[2] = {"wheel_l0", "wheel_r0"};
 	const char* an[2] = {"m_l", "m_r"};
 	for (int s = 0; s < 2; s++) {
@@ -252,6 +275,9 @@ void Robot::place(const Pose2& pose) {
 	d_->qpos[5] = 0;
 	d_->qpos[6] = std::sin(pose.th / 2);
 	iq_[0] = iq_[1] = 0;
+	torque_[0] = torque_[1] = 0;
+	for (Wheel& w : wheels_)
+		w.ux = w.uy = w.fx = w.fy = w.fz = 0;
 	mj_forward(m_, d_);
 }
 
@@ -283,12 +309,96 @@ void Robot::step() {
 		}
 		double t_fw = mo.kt * iq_[s];
 		double t_wheel = t_fw * mo.gear * mo.efficiency;
-		d_->ctrl[act_[s]] = (s == 0) ? t_wheel : -t_wheel;
+		if (mo.drive_lag > 0)
+			torque_[s] += (t_wheel - torque_[s]) * (1.0 - std::exp(-p_.timestep / mo.drive_lag));
+		else
+			torque_[s] = t_wheel;
+		d_->ctrl[act_[s]] = (s == 0) ? torque_[s] : -torque_[s];
 	}
 	double* f = d_->xfrc_applied + 6 * body_;
 	f[0] = f[1] = 0;
 	f[2] = -p_.fan_force * fan_duty_;
+	mju_zero(d_->qfrc_applied, static_cast<int>(m_->nv));
+	if (p_.tire.model == "brush")
+		tire_forces();
 	mj_step(m_, d_);
+}
+
+void Robot::tire_forces() {
+	const TireParams& tp = p_.tire;
+	const double dt = p_.timestep;
+	const double sigma = std::max(1e-4, tp.relaxation_length);
+	// effective mass of the tread mode: wheel + reflected rotor inertia at the contact radius
+	const double r = p_.wheel_radius;
+	const double m_eff = p_.wheel_mass + p_.motor.j_rotor * p_.motor.gear * p_.motor.gear / (r * r);
+	for (Wheel& w : wheels_) {
+		// normal force and contact point from the contacts of the last step
+		double fz = 0, px = 0, py = 0, pz = 0, nx = 0, ny = 0, nz = 0;
+		for (int i = 0; i < d_->ncon; i++) {
+			const mjContact& c = d_->contact[i];
+			if (c.geom[0] != w.geom && c.geom[1] != w.geom)
+				continue;
+			mjtNum cf[6];
+			mj_contactForce(m_, d_, i, cf);
+			if (cf[0] <= 0)
+				continue;
+			double sgn = (c.geom[0] == w.geom) ? -1.0 : 1.0;   // normal pointing from the floor to the tire
+			fz += cf[0];
+			px += cf[0] * c.pos[0];
+			py += cf[0] * c.pos[1];
+			pz += cf[0] * c.pos[2];
+			nx += cf[0] * sgn * c.frame[0];
+			ny += cf[0] * sgn * c.frame[1];
+			nz += cf[0] * sgn * c.frame[2];
+		}
+		w.fz = fz;
+		if (fz <= 1e-6) {   // wheel in the air: tread relaxes
+			w.ux = w.uy = w.fx = w.fy = 0;
+			continue;
+		}
+		mjtNum p[3] = {px / fz, py / fz, pz / fz};
+		double nn = std::sqrt(nx * nx + ny * ny + nz * nz);
+		mjtNum n[3] = {nx / nn, ny / nn, nz / nn};
+		// wheel axle (body y axis), forward tangent t = axle x normal, lateral a = n x t
+		const mjtNum* xm = d_->xmat + 9 * w.body;
+		mjtNum axle[3] = {xm[1], xm[4], xm[7]};
+		mjtNum t[3], a[3];
+		mju_cross(t, axle, n);
+		mju_normalize3(t);
+		mju_cross(a, n, t);
+		// velocity of the tread material at the contact point (ground is at rest)
+		mjtNum v6[6];
+		mj_objectVelocity(m_, d_, mjOBJ_XBODY, w.body, v6, 0);
+		const mjtNum* c0 = d_->xpos + 3 * w.body;
+		mjtNum rr[3] = {p[0] - c0[0], p[1] - c0[1], p[2] - c0[2]};
+		mjtNum wxr[3];
+		mju_cross(wxr, v6, rr);
+		mjtNum vp[3] = {v6[3] + wxr[0], v6[4] + wxr[1], v6[5] + wxr[2]};
+		mjtNum vroll = mju_dot3(v6 + 3, t);   // travel speed of the wheel center
+		double vsx = mju_dot3(vp, t), vsy = mju_dot3(vp, a);   // sliding velocity of the tread
+
+		// bristle deflection: grows with sliding, relaxes while rolling
+		const double k = tp.slip_stiffness * fz / sigma;
+		const double c = 2.0 * tp.damping_ratio * std::sqrt(k * m_eff);
+		const double relax = std::fabs(vroll) / sigma;
+		double dux = vsx - relax * w.ux, duy = vsy - relax * w.uy;
+		w.ux += dux * dt;
+		w.uy += duy * dt;
+		double fx = -k * w.ux - c * dux, fy = -k * w.uy - c * duy;
+		const double fmax = tp.mu * fz;
+		double fm = std::sqrt(fx * fx + fy * fy);
+		if (fm > fmax) {   // sliding: the tread holds the friction limit
+			fx *= fmax / fm;
+			fy *= fmax / fm;
+			w.ux = -fx / k;
+			w.uy = -fy / k;
+		}
+		w.fx = fx;
+		w.fy = fy;
+		mjtNum force[3] = {fx * t[0] + fy * a[0], fx * t[1] + fy * a[1], fx * t[2] + fy * a[2]};
+		mjtNum torque[3] = {0, 0, 0};
+		mj_applyFT(m_, d_, force, torque, p, w.body, d_->qfrc_applied);
+	}
 }
 
 double Robot::time() const { return d_->time; }
@@ -325,6 +435,17 @@ Vec2 Robot::body_to_ground(double bx, double by) const {
 	const double* xm = d_->xmat + 9 * body_;
 	double bz = -p_.wheel_radius;
 	return {xp[0] + xm[0] * bx + xm[1] * by + xm[2] * bz, xp[1] + xm[3] * bx + xm[4] * by + xm[5] * bz};
+}
+
+void Robot::ground_frame(double f[8]) const {
+	const double* xp = d_->xpos + 3 * body_;
+	const double* xm = d_->xmat + 9 * body_;
+	f[0] = xp[0];
+	f[1] = xp[1];
+	for (int i = 0; i < 3; i++) {
+		f[2 + i] = xm[i];
+		f[5 + i] = xm[3 + i];
+	}
 }
 
 bool Robot::chassis_contact() const {

@@ -1,7 +1,9 @@
 // Sensor models: the 18-channel reflective IR bar and the LSM6DS3TR-C gyro (register level).
 #pragma once
+#include <array>
 #include <cstdint>
 #include <random>
+#include <vector>
 
 #include "world/robot.h"
 #include "world/track.h"
@@ -11,7 +13,9 @@ public:
 	static constexpr int kChannels = 18;   // 16 line + left/right marker (sensor.h NUM_SENSORS)
 
 	void init(const RobotParams& p, uint32_t seed);
-	// 12-bit ADC reading of `channel` for the robot's current pose.
+	// Call after every physics step: keeps the poses the bar sees with `sensor_delay`.
+	void record(const Robot& robot);
+	// 12-bit ADC reading of `channel` for the robot's pose `sensor_delay` ago.
 	uint16_t sample(int channel, const Robot& robot, const Track& track);
 	// What the firmware's own white/black sweep calibration would record.
 	void calibration(uint16_t white[kChannels], uint16_t black[kChannels]) const;
@@ -24,6 +28,8 @@ private:
 	double x_[kChannels]{}, y_[kChannels]{};
 	double white_[kChannels]{}, black_[kChannels]{};
 	bool lifted_ = false;
+	std::vector<std::array<double, 8>> hist_;   // ring of ground frames, one per physics step
+	size_t head_ = 0, filled_ = 0;
 	std::mt19937 rng_;
 	std::normal_distribution<double> noise_{0.0, 1.0};
 };

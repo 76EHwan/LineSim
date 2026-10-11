@@ -194,6 +194,7 @@ void Simulation::fire(int src) {
 			robot_.set_drive(s, fwb_motor_powered(s) != 0, fwb_motor_iq_cmd(s));
 		robot_.set_fan_duty(fwb_fan_duty());
 		robot_.step();
+		ir_.record(robot_);
 		imu_.accumulate(robot_.yaw_rate(), robot_.params().timestep);
 		phys_t_ = now_;
 		next_[src] += period_[src];

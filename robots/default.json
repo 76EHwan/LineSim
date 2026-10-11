@@ -12,7 +12,19 @@
   "wheel_width": 0.008,
   "track": 0.186,                     // (fw) THREAD
   "wheel_mass": 0.006,
-  "tire_mu": 1.3,
+  "tire_mu": 1.3,                     // only for "model": "mujoco"
+
+  // Tread: polyurethane Shore A30 (soft). Brush model, see TireParams in sim/world/robot.h.
+  // mu 1.3 together with sensor_delay 7 ms: practice-board logs read the markers right/wrong
+  // like the robot did for 41 of 46 parameter sets (tools/compare_logs.py).
+  // Slip stiffness and relaxation length are still estimates.
+  "tire": {
+    "model": "brush",
+    "mu": 1.3,
+    "slip_stiffness": 8.0,
+    "relaxation_length": 0.004,
+    "damping_ratio": 0.7
+  },
 
   "skids": [[0.125, 0.05], [0.125, -0.05]],
   "skid_radius": 0.0025,
@@ -24,6 +36,10 @@
   "marker_sensor_y": 0.09,
   "sensor_sigma": 0.0025,
   "ir_white": 3300, "ir_black": 350, "ir_noise": 6, "ir_spread": 0.06,
+  // Lumped lag of the steering path (the bar sees the floor this long ago). Fitted to the robot at
+  // 2.0 m/s, kd 0: kp 33 keeps weaving on the straights (Vibe Test gyro log, ~10 Hz), kp 16.4 does not.
+  // A lag on the wheel torque instead (motor.drive_lag) makes the firmware's speed loop ring at any kp.
+  "sensor_delay": 0.007,
 
   "fan_force": 0.0,                   // downforce at 100 % duty [N]
   "vbat": 16.8,                       // (fw) MOTOR_RATED_VOLTAGE
@@ -41,6 +57,7 @@
     "friction": 0.25e-3,
     "viscous": 2.0e-8,
     "current_tau": 1.3e-4,
-    "voltage_ratio": 0.40
+    "voltage_ratio": 0.40,
+    "drive_lag": 0.0                  // first-order lag on the wheel torque [s] (see sensor_delay)
   }
 }

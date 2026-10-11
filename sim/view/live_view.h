@@ -15,6 +15,8 @@
 struct SessionState {
 	FwDriveParams params{};
 	int selected = 0;               // parameter row under the cursor
+	bool editing = false;           // typing a value for the selected row
+	std::string edit_buf;
 	int request_drive = 0;          // 1..4
 	bool request_new_map = false;
 	bool request_abort = false;
@@ -44,6 +46,7 @@ private:
 	void render(double t_sim, const std::string& phase);
 	void handle_keys();
 	void session_key(int vk);
+	void edit_key(int vk);   // session: typing a parameter value
 	std::string session_panel() const;
 	void run_session_script();
 	void reanchor(double t_sim);

@@ -26,12 +26,37 @@ void IrBar::init(const RobotParams& p, uint32_t seed) {
 		white_[i] = p.ir_white * g;
 		black_[i] = p.ir_black * std::max(0.5, spread(rng_));
 	}
+	size_t n = static_cast<size_t>(std::lround(p.sensor_delay / p.timestep));
+	hist_.assign(n > 0 ? n + 1 : 0, {});
+	head_ = filled_ = 0;
+}
+
+void IrBar::record(const Robot& robot) {
+	if (hist_.empty())
+		return;
+	std::array<double, 8> f;
+	robot.ground_frame(f.data());
+	const auto& last = hist_[head_];
+	// first step, or the robot was placed somewhere else: the bar has seen nothing else yet
+	if (filled_ == 0 || std::hypot(f[0] - last[0], f[1] - last[1]) > 0.02) {
+		std::fill(hist_.begin(), hist_.end(), f);
+		filled_ = hist_.size();
+	}
+	head_ = (head_ + 1) % hist_.size();
+	hist_[head_] = f;
 }
 
 uint16_t IrBar::sample(int channel, const Robot& robot, const Track& track) {
 	if (channel < 0 || channel >= kChannels)
 		return 0;
-	Vec2 g = robot.body_to_ground(x_[channel], y_[channel]);
+	Vec2 g;
+	if (filled_ > 0) {   // oldest frame in the ring: sensor_delay ago
+		const auto& f = hist_[(head_ + 1) % hist_.size()];
+		const double bx = x_[channel], by = y_[channel], bz = -p_.wheel_radius;
+		g = {f[0] + f[2] * bx + f[3] * by + f[4] * bz, f[1] + f[5] * bx + f[6] * by + f[7] * bz};
+	} else {
+		g = robot.body_to_ground(x_[channel], y_[channel]);
+	}
 	double c = lifted_ ? 0.0 : track.coverage(g, p_.sensor_sigma);
 	double v = black_[channel] + (white_[channel] - black_[channel]) * c + p_.ir_noise * noise_(rng_);
 	return static_cast<uint16_t>(std::clamp(v, 0.0, 4095.0));

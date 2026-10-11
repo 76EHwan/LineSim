@@ -38,6 +38,7 @@ public:
 
 	bool key_held(int vk) const;        // VK_* code currently down
 	int pop_key();                      // next key press (VK_* code), 0 if none
+	void inject_key(int vk) { keys_.push_back(vk); }   // as if pressed (test scripts)
 	bool closed() const { return closed_; }
 	int cam_mode() const { return cam_mode_; }
 	void set_cam_mode(int m);
