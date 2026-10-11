@@ -81,7 +81,8 @@ static void usage() {
 		"  --drives 1,2,3,4     drives to run in order (default from scenario, else 1)\n"
 		"  --set key=value      override a firmware drive parameter (repeatable):\n"
 		"                       base_mps max_mps accel decel steer_kp steer_kd pos_atten_gain\n"
-		"                       pit_in_m target_shift fan_en\n"
+		"                       pit_in_m target_shift fan_en, steer_kd_s (kd in seconds)\n"
+		"  --robot-param k=v    override a robot model value: sensor_delay tire_mu drive_lag fan_force\n"
 		"  --seed <n>           sensor noise / gain spread seed\n"
 		"  --max-time <s>       per-drive time limit before the robot is lifted\n"
 		"  --quiet              no progress lines\n"
@@ -166,6 +167,14 @@ int main(int argc_in, char** argv_in) {
 				return 2;
 			}
 			sets.emplace_back(kv.substr(0, eq), std::atof(kv.c_str() + eq + 1));
+		} else if (a == "--robot-param") {
+			std::string kv = next();
+			size_t eq = kv.find('=');
+			if (eq == std::string::npos) {
+				std::fprintf(stderr, "--robot-param expects key=value\n");
+				return 2;
+			}
+			opt.robot_params[kv.substr(0, eq)] = std::atof(kv.c_str() + eq + 1);
 		} else if (a == "--seed") {
 			opt.seed = static_cast<unsigned>(std::atoi(next().c_str()));
 		} else if (a == "--max-time") {

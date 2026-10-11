@@ -82,6 +82,10 @@ double weave_dps(const std::vector<Sample>& smp) {
 	return std::sqrt(sq / (wz.size() - k));
 }
 
+// Auto-tune stress test: steering lag (sensor_delay) factors. With the first, the weave may grow at
+// most to 1.5 x the nominal drive's + 10 dps (a weave that keeps going reads 3x and more).
+constexpr double kStressLag[2] = {1.4, 1.85};
+
 // mean wheel slip [%]: how much slower the body moved than the treads (odometry reads long by that)
 double slip_pct(const std::vector<Sample>& smp) {
 	double sum = 0;
@@ -97,33 +101,29 @@ double slip_pct(const std::vector<Sample>& smp) {
 }
 
 // Session auto-tune (A key): base speed and steer kp / kd (seconds) for the race on the course in
-// the window. Endless, until A is pressed again.
+// the window. Endless, until A is pressed again. Same rules as tools/autotune.py, coarser grid.
 //
 // A trial is drive 1 (learning: markers and distances must come out clean) followed by drive 2
 // (accelerates on the straights from that data; max speed, accel, decel as set in the panel). It
-// passes when both finish, never more than 70 mm off the line, with every marker read right. Its
-// score is drive 2's lap time, then drive 1's cleanliness (line error, weave, wheel slip).
-// A round tries the gain center and its four neighbours (kp +-dkp, kd +-dkd) at the test speed.
-// The gains move to the best neighbour, back off one step from a neighbour that lost the line
-// (stability margin), or take smaller steps when the center stays best. When the center passes
-// and no neighbour lost the line, that base speed is the new best and the next round tries dv
-// faster. Three rounds without that: back to the best speed + dv/2 (down to 0.01 m/s steps).
+// passes when both finish, never more than 70 mm off the line, with every marker read right, and
+// drive 1 still holds with more steering lag than the model has (kStressLag: the lag was fitted to
+// one gyro log). Score (lower is better): 5 x drive 2 lap + drive 1 cleanliness (line error, weave,
+// wheel slip).
+// A round runs the whole kp x kd grid at the test speed. Of the pairs that pass and whose grid
+// neighbours are stable too, the gentlest within 1 % of the best score wins (lower kp, then lower
+// kd). Something passed: that speed is the new best, the next round tries dv faster. Nothing
+// passed: back to the best speed + dv/2 (down to 0.01 m/s steps; below that it re-checks).
 class GainTuner {
 public:
 	bool active = false;
 
-	void start(double v, double kp, double kd_s) {
+	void start(double v, double /*kp*/, double /*kd_s*/) {
 		active = true;
 		v_ = std::max(0.3, v);
 		dv_ = 0.2;
 		best_v_ = 0;
-		best_lap_ = 0;
-		best_kp_ = kp_ = std::max(1.0, kp);
-		best_kd_ = kd_ = std::max(0.0, kd_s);
-		dkp_ = std::max(2.0, std::round(kp_ * 0.2));
-		dkd_ = 0.1;
+		best_kp_ = best_kd_ = best_lap_ = 0;
 		round_ = 0;
-		misses_ = 0;
 		last_.clear();
 		log_.clear();
 		plan();
@@ -131,163 +131,129 @@ public:
 	double speed() const { return v_; }
 	bool has_best() const { return best_v_ > 0; }
 	double best_v() const { return best_v_; }
-	double best_kp() const { return has_best() ? best_kp_ : kp_; }
-	double best_kd() const { return has_best() ? best_kd_ : kd_; }
-	std::pair<double, double> next() const { return {queue_[done_.size()].kp, queue_[done_.size()].kd}; }
-	bool round_complete() const { return done_.size() == queue_.size(); }
+	double best_kp() const { return best_kp_; }
+	double best_kd() const { return best_kd_; }
+	std::pair<double, double> next() const {
+		const Cell& c = cells_[done_];
+		return {c.kp, c.kd};
+	}
+	bool round_complete() const { return done_ == cells_.size(); }
 
-	// One trial = drive 1 (learning: its data must be clean) and, if that read every marker, drive 2.
-	// lost: the line was lost in either drive. pass: both drives finished with every marker right.
-	// score (lower is better): drive 2 lap time first, then how clean drive 1 was.
+	// lost: lost the line or unstable with more lag. pass: both drives right and stable.
 	void record(bool lost, bool pass, double score, double lap2, const std::string& text) {
-		Trial t = queue_[done_.size()];
-		t.lost = lost;
-		t.pass = pass;
-		t.score = score;
-		t.lap2 = lap2;
-		char buf[200];
-		std::snprintf(buf, sizeof buf, "%.3f kp %4.1f kd %.3f  %s", v_, t.kp, t.kd, text.c_str());
-		log_.push_back(buf);
-		if (log_.size() > 7)
+		Cell& c = cells_[done_];
+		c.state = pass ? 3 : lost ? 1 : 2;
+		c.score = score;
+		c.lap2 = lap2;
+		log_.push_back(fmt("%.3f kp %4.1f kd %.3f  %s", v_, c.kp, c.kd, text.c_str()));
+		if (log_.size() > 4)
 			log_.erase(log_.begin());
-		done_.push_back(t);
+		done_++;
 	}
 
 	void finish_round() {
 		round_++;
-		auto at = [&](int dir) -> const Trial* {
-			for (const Trial& t : done_)
-				if (t.dir == dir)
-					return &t;
-			return nullptr;
+		const int nkp = static_cast<int>(sizeof kKp / sizeof kKp[0]), nkd = static_cast<int>(sizeof kKd / sizeof kKd[0]);
+		auto cell = [&](int i, int j) -> const Cell& { return cells_[i * nkd + j]; };
+		auto stable = [&](int i, int j) {   // no grid neighbour lost the line / was unstable
+			const int d[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+			for (const auto& o : d) {
+				int a = i + o[0], b = j + o[1];
+				if (a >= 0 && a < nkp && b >= 0 && b < nkd && cell(a, b).state == 1)
+					return false;
+			}
+			return true;
 		};
-		const Trial c = *at(0);
-		bool neighbour_lost = false;
-		for (const Trial& t : done_)
-			neighbour_lost |= t.dir != 0 && t.lost;
-
-		if (c.pass && !neighbour_lost) {   // this speed works with margin: keep it, go faster
-			if (v_ > best_v_ + 1e-9) {
+		double best = 1e9;
+		for (int i = 0; i < nkp; i++)
+			for (int j = 0; j < nkd; j++)
+				if (cell(i, j).state == 3 && stable(i, j))
+					best = std::min(best, cell(i, j).score);
+		const Cell* pick = nullptr;
+		for (int i = 0; i < nkp && !pick; i++)   // lowest kp first, then lowest kd
+			for (int j = 0; j < nkd && !pick; j++)
+				if (cell(i, j).state == 3 && stable(i, j) && cell(i, j).score <= best * 1.01)
+					pick = &cell(i, j);
+		if (pick) {
+			if (v_ > best_v_ + 1e-9 || (std::fabs(v_ - best_v_) < 1e-9 && pick->lap2 < best_lap_)) {
 				best_v_ = v_;
-				best_kp_ = c.kp;
-				best_kd_ = c.kd;
-				best_lap_ = c.lap2;
+				best_kp_ = pick->kp;
+				best_kd_ = pick->kd;
+				best_lap_ = pick->lap2;
 			}
-			last_ = fmt("%.3f m/s passed: try %.3f m/s", v_, v_ + dv_);
+			last_ = fmt("%.3f m/s passed (kp %.0f kd %.3f): try %.3f", v_, pick->kp, pick->kd, v_ + dv_);
 			v_ += dv_;
-			misses_ = 0;
-			dkp_ = std::max(dkp_, std::max(1.0, std::round(kp_ * 0.1)));
-			dkd_ = std::max(dkd_, 0.03);
-			plan();
-			return;
-		}
-
-		// the gains: best neighbour / back off from the edge / smaller steps
-		const Trial* best = nullptr;
-		for (const Trial& t : done_)
-			if (!t.lost && (!best || t.score < best->score))
-				best = &t;
-		std::string what;
-		if (c.lost) {
-			if (best) {
-				move_to(*best);
-				what = "center lost the line: best neighbour";
-			} else {
-				kp_ = std::max(1.0, std::round(kp_ * 0.7 * 10) / 10);
-				kd_ += dkd_;
-				what = "all lost the line: kp -30 %, kd up";
-			}
-		} else if (best->dir != 0 && best->score < c.score - 0.2) {
-			move_to(*best);
-			what = "better neighbour";
-		} else {
-			const int opposite[5] = {0, 2, 1, 4, 3};
-			int edge = 0;
-			for (int d = 1; d <= 4 && !edge; d++)
-				if (at(d) && at(d)->lost)
-					edge = d;
-			if (edge && at(opposite[edge]) && !at(opposite[edge])->lost) {
-				move_to(*at(opposite[edge]));
-				what = "neighbour lost the line: backed off";
-			} else {
-				dkp_ = std::max(0.5, dkp_ * 0.5);
-				dkd_ = std::max(0.01, dkd_ * 0.5);
-				what = "center best: smaller steps";
-			}
-		}
-		// the speed: three rounds without a pass here -> back to the best speed, smaller step
-		if (++misses_ >= 3) {
-			misses_ = 0;
-			if (best_v_ > 0) {
+		} else if (best_v_ > 0) {
+			if (dv_ > 0.01 + 1e-9)
 				dv_ = std::max(0.01, dv_ * 0.5);
-				v_ = best_v_ + dv_;
-				kp_ = best_kp_;
-				kd_ = best_kd_;
-				what = fmt("no pass at this speed: best %.3f + %.3f", best_v_, dv_);
-			} else {
-				v_ = std::max(0.3, v_ - 0.2);
-				what = fmt("no pass yet: slower, %.3f m/s", v_);
-			}
+			last_ = fmt("%.3f m/s: no stable pass -> %.3f", v_, best_v_ + dv_);
+			v_ = best_v_ + dv_;
+		} else {
+			last_ = fmt("%.3f m/s: no stable pass -> slower", v_);
+			v_ = std::max(0.3, v_ - dv_);
 		}
-		last_ = what;
 		plan();
 	}
 
 	std::vector<std::string> status(double dt) const {
 		std::vector<std::string> v;
-		v.push_back(fmt("AUTO-TUNE  round %d   (A: stop and keep the best)", round_ + 1));
-		v.push_back(fmt("testing  %.3f m/s  kp %.1f  kd %.3f s (fw %.0f)", v_, kp_, kd_, kd_ / dt));
-		v.push_back(fmt("         steps kp +-%.1f  kd +-%.3f  speed +%.3f", dkp_, dkd_, dv_));
+		v.push_back(fmt("AUTO-TUNE  round %d  (A: stop, keep BEST)", round_ + 1));
+		v.push_back(fmt("testing  %.3f m/s   pair %zu / %zu", v_, std::min(done_ + 1, cells_.size()), cells_.size()));
+		v.push_back(fmt("lag stress x%.2g / x%.3g, speed step %.3f", kStressLag[0], kStressLag[1], dv_));
 		if (best_v_ > 0)
-			v.push_back(fmt("BEST     %.3f m/s  kp %.1f  kd %.3f s (fw %.0f)  drive 2: %.2f s", best_v_, best_kp_, best_kd_,
+			v.push_back(fmt("BEST  %.3f m/s  kp %.0f  kd %.3f s (fw %.0f)  2nd %.2f s", best_v_, best_kp_, best_kd_,
 				best_kd_ / dt, best_lap_));
 		else
-			v.push_back("BEST     none yet (finish + every marker right)");
-		if (!last_.empty())
-			v.push_back(last_);
-		v.push_back("");
+			v.push_back("BEST  none yet");
+		v.push_back(last_);
+		// the grid of this round: . pending, x lost / unstable, m markers, number = score
+		std::string h = "kp/kd ";
+		for (double kd : kKd)
+			h += fmt("%6.3g", kd);
+		v.push_back(h);
+		const int nkd = static_cast<int>(sizeof kKd / sizeof kKd[0]);
+		for (size_t i = 0; i < sizeof kKp / sizeof kKp[0]; i++) {
+			std::string r = fmt("%5.0f ", kKp[i]);
+			for (int j = 0; j < nkd; j++) {
+				const Cell& c = cells_[i * nkd + j];
+				r += c.state == 0 ? "     ." : c.state == 1 ? "     x" : c.state == 2 ? "     m" : fmt("%6.1f", c.score);
+			}
+			v.push_back(r);
+		}
 		for (const std::string& l : log_)
 			v.push_back(l);
 		return v;
 	}
 
 private:
-	struct Trial {
+	static constexpr double kKp[5] = {12, 16, 20, 25, 32};
+	static constexpr double kKd[6] = {0, 0.1, 0.15, 0.225, 0.3, 0.4};
+	struct Cell {
 		double kp = 0, kd = 0;
-		int dir = 0;   // 0 center, 1 kp+, 2 kp-, 3 kd+, 4 kd-
-		bool lost = false, pass = false;
-		double lap2 = 0;   // drive 2 lap time [s] when passed
-		double score = 0;
+		int state = 0;   // 0 pending, 1 lost / unstable, 2 markers wrong, 3 pass
+		double score = 0, lap2 = 0;
 	};
 	static std::string fmt(const char* f, ...) {
-		char buf[160];
+		char buf[200];
 		va_list ap;
 		va_start(ap, f);
 		std::vsnprintf(buf, sizeof buf, f, ap);
 		va_end(ap);
 		return buf;
 	}
-	void move_to(const Trial& t) {
-		kp_ = t.kp;
-		kd_ = t.kd;
-	}
-	void plan() {
-		queue_.clear();
-		done_.clear();
-		queue_.push_back({kp_, kd_, 0});
-		queue_.push_back({kp_ + dkp_, kd_, 1});
-		if (kp_ - dkp_ >= 1.0)
-			queue_.push_back({kp_ - dkp_, kd_, 2});
-		queue_.push_back({kp_, kd_ + dkd_, 3});
-		if (kd_ > 1e-9)
-			queue_.push_back({kp_, std::max(0.0, kd_ - dkd_), 4});
+	void plan() {   // row by row, gentle (low kp) first
+		cells_.clear();
+		for (double kp : kKp)
+			for (double kd : kKd)
+				cells_.push_back({kp, kd});
+		done_ = 0;
 	}
 
 	double v_ = 1.5, dv_ = 0.2, best_v_ = 0, best_kp_ = 0, best_kd_ = 0, best_lap_ = 0;
-	double kp_ = 20, kd_ = 0.3, dkp_ = 4, dkd_ = 0.1;
-	int round_ = 0, misses_ = 0;
+	int round_ = 0;
+	size_t done_ = 0;
 	std::string last_;
-	std::vector<Trial> queue_, done_;
+	std::vector<Cell> cells_;
 	std::vector<std::string> log_;
 };
 }  // namespace
@@ -374,6 +340,13 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 			return res;
 		}
 		rp.load(j, fs::absolute(robot_path).parent_path().generic_string());
+	}
+	for (const auto& [k, v] : opt.robot_params) {   // --robot-param (model-error stress tests)
+		if (k == "sensor_delay") rp.sensor_delay = v;
+		else if (k == "tire_mu") rp.tire.mu = v;
+		else if (k == "drive_lag") rp.motor.drive_lag = v;
+		else if (k == "fan_force") rp.fan_force = v;
+		else std::fprintf(stderr, "warning: unknown --robot-param %s\n", k.c_str());
 	}
 
 	fs::path out = opt.out_dir;
@@ -770,6 +743,34 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 						std::snprintf(text, sizeof text, "1: lat %.1f w %.0f slip %.0f%% | 2: %s", d1.rms_lat_mm, weave1, slip1,
 							ok2 ? (std::to_string(lap2).substr(0, 5) + " s").c_str()
 							    : (lost ? d2.outcome.c_str() : ("markers " + d2.marker_check).c_str()));
+						if (pass) {
+							// Model-error stress: the steering lag (sensor_delay, fitted to one gyro log) may be
+							// larger on the real robot. Drive 1 again with it x1.4 (must keep the line, weave at
+							// most 1.5 x nominal + 10 dps) and x1.85 (must keep the line). Failing counts as unstable.
+							const double nominal = ir.delay();
+							std::string why;
+							ir.set_delay(nominal * kStressLag[0]);
+							const DriveResult s1 = drive(1);
+							if (lost_line(s1))
+								why = "x1.4: " + s1.outcome;
+							else if (weave_dps(s1.samples) > 1.5 * weave1 + 10.0)
+								why = "x1.4: weave " + std::to_string(static_cast<int>(weave_dps(s1.samples))) + " dps";
+							if (why.empty() && session.auto_tune) {
+								ir.set_delay(nominal * kStressLag[1]);
+								const DriveResult s2 = drive(1);
+								if (lost_line(s2))
+									why = "x1.85: " + s2.outcome;
+							}
+							ir.set_delay(nominal);
+							if (!session.auto_tune)
+								continue;
+							if (!why.empty()) {
+								lost = true;   // unstable with a bit more lag: the search backs away from it
+								pass = false;
+								score = 250.0 + clean1;
+								std::snprintf(text, sizeof text, "2: %.2f s but lag %s", lap2, why.c_str());
+							}
+						}
 					}
 					tuner.record(lost, pass, score, lap2, text);
 					if (tuner.round_complete()) {

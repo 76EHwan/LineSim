@@ -14,8 +14,11 @@ and then drive 2 (accelerates on the straights from drive 1's data; max_mps / ac
 --set or the firmware defaults). A pair passes when on every course both drives finish, never more
 than MAX_LAT_MM off the line, with every marker read right. Score (lower is better): 5 x drive 2
 lap time [s] + drive 1 cleanliness (line rms [mm] + weave [dps] / 20 + wheel slip [%] / 2).
-The pick is the best passing pair whose grid neighbours do not lose the line (a pair at the edge
-of the stable region would start to oscillate on the real robot for a small model error).
+A pass must also hold with more steering lag than the model has: the lag (robot sensor_delay,
+fitted to one gyro log) is not known exactly, so drive 1 runs again with it x1.4 (must keep the
+line, weave at most 1.5 x nominal + 10 dps) and x1.85 (must keep the line). Gains that only work
+for the exact fitted lag count as unstable. The pick is among the passing pairs whose
+grid neighbours are stable too: within 1 % of the best score, the lowest kp, then the lowest kd.
 
 --max-speed raises the base speed while some pair passes (+0.2, then halving the step on a miss,
 down to 0.01 m/s) and reports the highest speed with its gains.
@@ -42,6 +45,7 @@ REAL_COURSE = os.path.join(ROOT, "tracks", "practice_board.json")
 KP = [8, 10, 12, 14, 16, 18, 20, 22, 25, 28, 32, 36, 40]
 KD = [0, 0.05, 0.1, 0.15, 0.225, 0.3, 0.4, 0.5]   # seconds (x 2000 = firmware steer_gain_d)
 SEEDS = [101, 102, 103, 104, 105, 106, 107, 108]
+STRESS_LAG = (1.4, 1.85)   # sensor_delay factors of the stress drives
 MAX_LAT_MM = 70.0   # sensor bar this far off counts as losing the line (bar half width 76 mm; 30-40 mm is normal in a curve)
 
 
@@ -72,24 +76,42 @@ def drive_metrics(csv_path):
     return weave, 100.0 * sum(slip) / len(slip) if slip else 0.0
 
 
-def lost_line(d):
-    return d["outcome"] != "finished" or d["max_lat_mm"] > MAX_LAT_MM
+def robot_delay(robot):
+    """sensor_delay of a robot file (the JSON may carry // comments)."""
+    import re
+    with open(robot, encoding="utf-8") as fh:
+        m = re.search(r'"sensor_delay"\s*:\s*([0-9.eE+-]+)', fh.read())
+    return float(m.group(1)) if m else 0.0
 
 
-def run(course, robot, speed, kp, kd, extra, out, reuse):
-    cmd = [EXE, "run", "--track", course, "--robot", robot, "--drives", "1,2", "--quiet", "--out", out,
+def sim(course, robot, drives, speed, kp, kd, extra, out, reuse, robot_params=()):
+    """Runs linesim, returns summary.json (or None)."""
+    cmd = [EXE, "run", "--track", course, "--robot", robot, "--drives", drives, "--quiet", "--out", out,
            "--set", f"base_mps={speed}", "--set", f"steer_kp={kp}", "--set", f"steer_kd_s={kd}", "--max-time", "60"]
     for e in extra:
         cmd += ["--set", e]
+    for rp in robot_params:
+        cmd += ["--robot-param", rp]
     if not (reuse and os.path.exists(os.path.join(out, "summary.json"))):
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         with open(os.path.join(out, "summary.json"), encoding="utf-8") as fh:
-            j = json.load(fh)
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def lost_line(d):
+    return d["outcome"] != "finished" or d["max_lat_mm"] > MAX_LAT_MM
+
+
+def run(course, robot, speed, kp, kd, extra, out, reuse, lag):
+    j = sim(course, robot, "1,2", speed, kp, kd, extra, out, reuse)
+    try:
         d1 = j["drives"][0]
         d2 = j["drives"][1] if len(j["drives"]) > 1 else None
         kd_fw = j["params"]["steer_kd"]
-    except (OSError, ValueError, IndexError, KeyError):
+    except (TypeError, IndexError, KeyError):
         return {"lost": True, "pass": False, "score": 1000.0, "why": "no result", "kd_fw": 0}
     weave, slip = drive_metrics(os.path.join(out, "drive1.csv"))
     clean1 = d1["rms_lat_mm"] + weave / 20.0 + slip / 2.0
@@ -107,10 +129,26 @@ def run(course, robot, speed, kp, kd, extra, out, reuse):
         r.update(score=200.0 + clean1, why=f"2: markers {d2.get('marker_check')}")
     else:
         r.update({"pass": True, "lap2": d2["lap_time_fw"], "score": 5.0 * d2["lap_time_fw"] + clean1, "why": ""})
+        why = ""
+        if lag > 0:   # model-error stress: more steering lag than fitted
+            for k, f in enumerate(STRESS_LAG):
+                sj = sim(course, robot, "1", speed, kp, kd, extra, f"{out}_lag{f:g}", reuse,
+                         [f"sensor_delay={lag * f:.6f}"])
+                if sj is None or lost_line(sj["drives"][0]):
+                    why = f"lag x{f:g}: " + (sj["drives"][0]["outcome"] if sj else "no result")
+                    break
+                if k == 0:
+                    sw, _ = drive_metrics(os.path.join(f"{out}_lag{f:g}", "drive1.csv"))
+                    if sw > 1.5 * weave + 10.0:
+                        why = f"lag x{f:g}: weave {sw:.0f} dps"
+                        break
+        if why:
+            r.update({"pass": False, "lost": True, "score": 250.0 + clean1, "why": why})
     return r
 
 
 def tune_at(speed, courses, robot, kps, kds, extra, jobs, reuse, quiet=False):
+    lag = robot_delay(robot)
     out_root = os.path.join(ROOT, "runs", "tune", f"{speed:g}")
     pairs = [(kp, kd) for kp in kps for kd in kds]
     total = len(pairs) * len(courses)
@@ -123,7 +161,7 @@ def tune_at(speed, courses, robot, kps, kds, extra, jobs, reuse, quiet=False):
         for kp, kd in pairs:
             for ci, c in enumerate(courses):
                 out = os.path.join(out_root, "runs", f"kp{kp:g}_kd{kd:g}s_c{ci}")
-                futs[ex.submit(run, c, robot, speed, kp, kd, extra, out, reuse)] = (kp, kd, ci)
+                futs[ex.submit(run, c, robot, speed, kp, kd, extra, out, reuse, lag)] = (kp, kd, ci)
         for f in concurrent.futures.as_completed(futs):
             kp, kd, ci = futs[f]
             results.setdefault((kp, kd), {})[ci] = f.result()
@@ -146,7 +184,13 @@ def tune_at(speed, courses, robot, kps, kds, extra, jobs, reuse, quiet=False):
 
     passing = [p for p in pairs if cell[p]["pass"]]
     safe = [p for p in passing if robust(*p)]
-    pick = min(safe or passing, key=lambda p: cell[p]["score"]) if passing else None
+    pick = None
+    if passing:
+        # Within 1 % of the best score (~0.1 s of drive 2 lap) the gentlest gains win: lower kp, then
+        # lower kd. A high kd also amplifies the real sensor's position steps, which the model smooths.
+        pool = safe or passing
+        best = min(cell[p]["score"] for p in pool)
+        pick = min((p for p in pool if cell[p]["score"] <= best * 1.01), key=lambda p: (p[0], p[1]))
     return {"speed": speed, "cell": cell, "pairs": pairs, "passing": passing, "safe": safe, "pick": pick,
             "out_root": out_root}
 
@@ -157,7 +201,7 @@ def report(t, courses, robot, kps, kds, extra):
              f"robot {os.path.basename(robot)}" + (f", --set {' '.join(extra)}" if extra else ""),
              "",
              "score = 5 x drive 2 lap [s] + drive 1 (line rms [mm] + weave/20 + slip%/2), lower is better",
-             "x = loses the line, m = misreads markers (drive 1 or 2), * = picked",
+             "x = loses the line or is unstable with more steering lag (x1.4 / x1.85), m = misreads markers, * = picked",
              "",
              "kp\\kd [s] " + "".join(f"{kd:>8g}" for kd in kds)]
     for kp in kps:

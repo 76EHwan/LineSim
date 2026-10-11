@@ -15,6 +15,9 @@ public:
 	void init(const RobotParams& p, uint32_t seed);
 	// Call after every physics step: keeps the poses the bar sees with `sensor_delay`.
 	void record(const Robot& robot);
+	// Change sensor_delay between drives (auto-tune stress test of the model's steering lag).
+	void set_delay(double seconds);
+	double delay() const { return p_.sensor_delay; }
 	// 12-bit ADC reading of `channel` for the robot's pose `sensor_delay` ago.
 	uint16_t sample(int channel, const Robot& robot, const Track& track);
 	// What the firmware's own white/black sweep calibration would record.

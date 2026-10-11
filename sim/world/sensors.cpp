@@ -26,9 +26,14 @@ void IrBar::init(const RobotParams& p, uint32_t seed) {
 		white_[i] = p.ir_white * g;
 		black_[i] = p.ir_black * std::max(0.5, spread(rng_));
 	}
-	size_t n = static_cast<size_t>(std::lround(p.sensor_delay / p.timestep));
+	set_delay(p.sensor_delay);
+}
+
+void IrBar::set_delay(double seconds) {
+	p_.sensor_delay = std::max(0.0, seconds);
+	size_t n = static_cast<size_t>(std::lround(p_.sensor_delay / p_.timestep));
 	hist_.assign(n > 0 ? n + 1 : 0, {});
-	head_ = filled_ = 0;
+	head_ = filled_ = 0;   // refilled with the current pose at the next physics step
 }
 
 void IrBar::record(const Robot& robot) {

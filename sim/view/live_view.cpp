@@ -276,7 +276,7 @@ std::string LiveView::session_panel() const {
 	std::string t = "course  " + s.map_name + "\n";
 	t += "expected " + s.expected + "\n\n";
 	char buf[160];
-	for (int i = 0; i < kRowCount; i++) {
+	for (int i = 0; i < kRowCount && s.tune_lines.empty(); i++) {   // auto-tune shows its own table instead
 		char val[64];
 		if (s.editing && i == s.selected) {
 			std::snprintf(val, sizeof val, "[%s_]   Enter set, Esc cancel", s.edit_buf.c_str());
