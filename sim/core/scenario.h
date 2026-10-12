@@ -14,6 +14,7 @@ struct Sample {
 	float wheel_v[2];       // wheel surface speed [m/s]
 	float iq[2];            // actual q-axis current [A]
 	float tgt_base, cur_base, tgt_pos, odom, yaw_fw;
+	float cmd_mps;          // firmware's commanded wheel speed (after pos_atten / lat_acc_max)
 	float omega_t[2], omega_m[2], iq_cmd[2];
 	int lost, markers, contact;
 };

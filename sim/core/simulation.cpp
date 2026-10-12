@@ -259,6 +259,7 @@ void Simulation::fire(int src) {
 		break;
 	case kImuOdr:
 		imu_.latch();
+		period_[src] = static_cast<uint64_t>(std::llround(imu_.odr_period() * 1e9));   // CTRL2_G as the firmware set it
 		next_[src] += period_[src];
 		break;
 	default:

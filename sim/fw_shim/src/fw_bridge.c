@@ -25,10 +25,14 @@ void LPTIM3_IRQ_Handler(void);  /* buzzer.c */
 /* ---------------- interrupt context ---------------- */
 
 void fwb_systick(void) {
-	/* stm32h7xx_it.c SysTick_Handler, USER CODE SysTick_IRQn 0: IMU read every 10 ms */
+	/* stm32h7xx_it.c SysTick_Handler, USER CODE SysTick_IRQn 0: IMU read every IMU_READ_DIV ms
+	   (lsm6ds3tr-c.h; firmware versions without the macro read every 10 ms) */
+#ifndef IMU_READ_DIV
+#define IMU_READ_DIV 10
+#endif
 	static uint8_t imu_trigger_tick = 0;
 	imu_trigger_tick++;
-	if (imu_trigger_tick >= 10) {
+	if (imu_trigger_tick >= IMU_READ_DIV) {
 		imu_trigger_tick = 0;
 		if (!imu_dma_busy) {
 			LSM6DS3_ReadGyroZ_DMA_Start();
@@ -190,6 +194,23 @@ void fwb_get_drive_params(FwDriveParams *p) {
 	p->pit_in_m = driveData.pit_in_distance_m;
 	p->target_shift = driveData.target_shift_val;
 	p->fan_en = driveData.fan_en;
+#ifdef DRIVE_HAS_CASCADE_STEER
+	p->yaw_kp = driveData.yaw_gain_p;
+	p->yaw_ki = driveData.yaw_gain_i;
+	p->lat_acc_max = driveData.lat_acc_max;
+#else
+	p->yaw_kp = p->yaw_ki = p->lat_acc_max = 0;
+#endif
+#ifdef DRIVE_HAS_TARGET_CURVE_GAIN
+	p->target_curve_gain = driveData.target_curve_gain;
+#else
+	p->target_curve_gain = 1.0f;
+#endif
+#ifdef DRIVE_HAS_SLALOM_RATIO
+	p->slalom_ratio = driveData.slalom_ratio;
+#else
+	p->slalom_ratio = 0.0f;
+#endif
 }
 
 void fwb_set_drive_params(const FwDriveParams *p) {
@@ -203,6 +224,17 @@ void fwb_set_drive_params(const FwDriveParams *p) {
 	driveData.pit_in_distance_m = p->pit_in_m;
 	driveData.target_shift_val = p->target_shift;
 	driveData.fan_en = (uint8_t) p->fan_en;
+#ifdef DRIVE_HAS_CASCADE_STEER
+	driveData.yaw_gain_p = p->yaw_kp;
+	driveData.yaw_gain_i = p->yaw_ki;
+	driveData.lat_acc_max = p->lat_acc_max;
+#endif
+#ifdef DRIVE_HAS_TARGET_CURVE_GAIN
+	driveData.target_curve_gain = p->target_curve_gain;
+#endif
+#ifdef DRIVE_HAS_SLALOM_RATIO
+	driveData.slalom_ratio = p->slalom_ratio;
+#endif
 }
 
 void fwb_telemetry(FwTelemetry *t) {
@@ -211,6 +243,7 @@ void fwb_telemetry(FwTelemetry *t) {
 	t->target_pos = IR_Sensor.data->target_pos;
 	t->odom_m = g_odom_distance_m;
 	t->yaw_deg = imu_data.Yaw_Angle;
+	t->cmd_mps = 0.5f * (foc_L.target_omega - foc_R.target_omega) / MPS_TO_OMEGA;   /* right is negated */
 	t->omega_target[0] = foc_L.target_omega;
 	t->omega_target[1] = foc_R.target_omega;
 	t->omega_meas[0] = foc_L.omega_e_meas;

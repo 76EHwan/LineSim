@@ -42,9 +42,10 @@ public:
 	void init(const RobotParams& p, uint32_t seed);
 	// Integrate the true yaw rate over a physics step (the chip's ODR filter).
 	void accumulate(double yaw_rate_rad_s, double dt);
-	// Called at the output data rate (104 Hz): latch the averaged rate into OUTZ_G.
+	// Called at the output data rate: latch the averaged rate into OUTZ_G.
 	void latch();
-	double odr_period() const { return 1.0 / 104.0; }
+	// Gyro output data rate from CTRL2_G (ODR_G bits) as the firmware wrote it; 104 Hz before that.
+	double odr_period() const;
 
 	bool read(uint8_t reg, uint8_t* buf, uint16_t len);
 	bool write(uint8_t reg, const uint8_t* buf, uint16_t len);

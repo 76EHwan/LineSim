@@ -404,16 +404,22 @@ void Viewer::render(const ViewerHud& hud) {
 	}
 
 	mjr_overlay(mjFONT_NORMAL, mjGRID_TOPLEFT, view, hud.status.c_str(), nullptr, &im_->con);
-	if (!hud.help.empty())
-		mjr_overlay(mjFONT_NORMAL, mjGRID_BOTTOMLEFT, view, hud.help.c_str(), nullptr, &im_->con);
+	std::string lcd;
+	if (!hud.lcd.empty()) {
+		lcd = hud.lcd_inverted ? "LCD (inverted)\n" : "LCD\n";
+		for (const std::string& row : hud.lcd)
+			lcd += row + "\n";
+	}
+	// with the session panel on the right, the LCD sits on the left just above the help lines
+	// (the status block above it carries the lap list)
+	const bool lcd_left = !lcd.empty() && !hud.panel.empty();
+	std::string bottom = (lcd_left ? lcd + "\n" : "") + hud.help;
+	if (!bottom.empty())
+		mjr_overlay(mjFONT_NORMAL, mjGRID_BOTTOMLEFT, view, bottom.c_str(), nullptr, &im_->con);
 	if (!hud.panel.empty())
 		mjr_overlay(mjFONT_NORMAL, mjGRID_TOPRIGHT, view, hud.panel.c_str(), nullptr, &im_->con);
-	if (!hud.lcd.empty()) {
-		std::string t = hud.lcd_inverted ? "LCD (inverted)\n" : "LCD\n";
-		for (const std::string& row : hud.lcd)
-			t += row + "\n";
-		mjr_overlay(mjFONT_NORMAL, hud.panel.empty() ? mjGRID_TOPRIGHT : mjGRID_LEFT, view, t.c_str(), nullptr, &im_->con);
-	}
+	if (!lcd.empty() && !lcd_left)
+		mjr_overlay(mjFONT_NORMAL, mjGRID_TOPRIGHT, view, lcd.c_str(), nullptr, &im_->con);
 
 	// IR bar: 16 line sensors left->right as mounted (sensor 0 = left), then the two mark sensors
 	const int cell = std::max(14, width_ / 60), gap = 3, h = cell * 2;

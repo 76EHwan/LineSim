@@ -37,7 +37,12 @@ const ParamRow kRows[] = {
 	{"steer kd", &FwDriveParams::steer_kd, 0.01f, 0.0f, 2.0f, "%.3f s", true},
 	{"pos atten gain", &FwDriveParams::pos_atten_gain, 0.05f, 0.0f, 2.0f, "%.2f"},
 	{"target shift", &FwDriveParams::target_shift, 0.05f, 0.0f, 1.0f, "%.2f"},
+	{"tgt curve gain", &FwDriveParams::target_curve_gain, 0.1f, 0.0f, 3.0f, "x%.2f"},   // drive 3/4, in curves
+	{"slalom ratio", &FwDriveParams::slalom_ratio, 0.05f, 0.0f, 1.0f, "%.2f"},          // drive 4, 45 deg segments
 	{"pit-in dist", &FwDriveParams::pit_in_m, 0.01f, 0.0f, 1.0f, "%.2f m"},
+	{"yaw kp", &FwDriveParams::yaw_kp, 0.1f, 0.0f, 20.0f, "%.2f"},          // cascade (0 / 0 = plain PD)
+	{"yaw ki", &FwDriveParams::yaw_ki, 1.0f, 0.0f, 500.0f, "%.1f /s"},
+	{"lat acc max", &FwDriveParams::lat_acc_max, 0.5f, 0.0f, 40.0f, "%.1f m/s2"},
 };
 constexpr int kRowCount = sizeof kRows / sizeof kRows[0];
 
@@ -237,7 +242,10 @@ void LiveView::run_session_script() {
 	if (script_waiting_drive_) {
 		if (s.busy)
 			script_saw_busy_ = true;
-		if (!script_saw_busy_ || s.busy)
+		// a drive that never starts (e.g. 2 after a wrong drive 1) does not hold the script: 2 s
+		if (!script_saw_busy_ && ++script_wait_ticks_ < 2000)
+			return;
+		if (s.busy)
 			return;
 		script_waiting_drive_ = false;
 	}
@@ -256,7 +264,7 @@ void LiveView::run_session_script() {
 	for (const auto& n : names)
 		if (k == n.first)
 			vk = n.second;
-	if (vk == VK_OEM_PLUS || vk == VK_OEM_MINUS || vk == 'V' || vk == 'C' || vk == 'S' || vk == 'T') {
+	if (vk == VK_OEM_PLUS || vk == VK_OEM_MINUS || vk == 'V' || vk == 'C' || vk == 'S' || vk == 'T' || vk == 'P') {
 		v_.inject_key(vk);   // playback / view keys go through the normal key handling
 		return;
 	}
@@ -268,6 +276,7 @@ void LiveView::run_session_script() {
 	if (vk >= '1' && vk <= '4') {
 		script_waiting_drive_ = true;
 		script_saw_busy_ = false;
+		script_wait_ticks_ = 0;
 	}
 }
 
@@ -319,19 +328,28 @@ void LiveView::render(double t_sim, const std::string& phase) {
 	char actual[48] = "";
 	if (achieved_ > 0 && achieved_ < 0.9 * speed_)   // the simulation cannot keep up with the request
 		std::snprintf(actual, sizeof actual, " (running x%.2g)", achieved_);
+	// command: the speed the firmware sends the wheels to (base after pos_atten and the grip limit)
+	char cut[48] = "";
+	if (tm.current_base_mps > 0.2f && tm.cmd_mps < 0.97f * tm.current_base_mps)
+		std::snprintf(cut, sizeof cut, " (-%.0f %%)", 100.0 * (1.0 - tm.cmd_mps / tm.current_base_mps));
 	char buf[600];
 	std::snprintf(buf, sizeof buf,
 		"%s\n"
 		"sim speed x%.3g%s%s%s\n"
 		"speed     %.2f m/s   wheels %.2f m/s   slip %.0f %%\n"
-		"fw base   %.2f / target %.2f m/s\n"
+		"fw base   %.2f / target %.2f m/s   command %.2f m/s%s\n"
 		"line      %+.1f mm (sensor bar)   target_pos %+.2f\n"
 		"yaw (fw)  %+.1f deg   markers %d%s\n"
 		"iq        L %+.2f A   R %+.2f A",
 		phase.c_str(), speed_, actual, paused_ ? ", PAUSED" : "", show_trail_ ? "" : "   (trail off)", v_body, v_wheels,
-		slip, tm.current_base_mps, tm.target_base_mps, lat * 1000, tm.target_pos, tm.yaw_deg, tm.marker_count,
+		slip, tm.current_base_mps, tm.target_base_mps, tm.cmd_mps, cut, lat * 1000, tm.target_pos, tm.yaw_deg, tm.marker_count,
 		tm.lost ? "   LINE LOST" : "", robot_.iq(0), robot_.iq(1));
 	hud.status = buf;
+	if (!laps_.empty()) {   // every drive, finished or not
+		hud.status += "\n\nlaps";
+		for (const std::string& l : laps_)
+			hud.status += "\n" + l;
+	}
 	hud.help = "Space pause   +/- sim speed   C camera   V sensor view   S shadows   T trail on/off   P screenshot   Esc quit\n"
 	           "mouse: left drag rotate, right drag pan, wheel zoom";
 	if (interactive_)

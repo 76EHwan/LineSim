@@ -43,6 +43,12 @@ public:
 	bool stop_requested() const { return stop_; }
 	// A drive is starting: the trail shows this drive only.
 	void drive_started() { v_.clear_trail(); }
+	// One line per drive for the lap list on the left (finished or not); keeps the last 8.
+	void add_lap(const std::string& line) {
+		laps_.push_back(line);
+		if (laps_.size() > 8)
+			laps_.erase(laps_.begin());
+	}
 
 	std::function<void()> on_reset;   // R key (interactive): put the robot back on the start line
 
@@ -62,6 +68,7 @@ private:
 	double speed_;
 	bool paused_ = false;
 	bool show_trail_ = true;
+	std::vector<std::string> laps_;
 	bool stop_ = false;
 	double anchor_wall_ = 0, anchor_sim_ = 0;
 	double last_frame_ = -1;
@@ -72,6 +79,7 @@ private:
 	double last_render_ = 0;                               // wall time of the last frame [s]
 	int shot_no_ = 0;
 	bool script_loaded_ = false, script_active_ = false, script_waiting_drive_ = false, script_saw_busy_ = false;
+	int script_wait_ticks_ = 0;
 	std::vector<std::string> script_;
 	double auto_shot_ = 0, next_auto_shot_ = 0;   // LINESIM_AUTOSHOT=<sim seconds>: periodic screenshots
 };

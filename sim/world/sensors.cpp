@@ -80,6 +80,7 @@ void IrBar::calibration(uint16_t white[kChannels], uint16_t black[kChannels]) co
 // ---------------------------------------------------------------------------
 namespace {
 constexpr uint8_t kWhoAmI = 0x0F;
+constexpr uint8_t kCtrl2G = 0x11;
 constexpr uint8_t kOutxLG = 0x22;   // gyro X,Y,Z then accel X,Y,Z (little endian)
 constexpr double kGyroLsbDps = 0.070;   // FS = 2000 dps
 constexpr double kAccelLsbG = 0.061e-3; // FS = 2 g
@@ -105,9 +106,20 @@ void Imu::accumulate(double yaw_rate_rad_s, double dt) {
 	sum_t_ += dt;
 }
 
+double Imu::odr_period() const {
+	// LSM6DS3TR-C CTRL2_G ODR_G[3:0]: 1 = 12.5 Hz, 2 = 26, 3 = 52, 4 = 104, ... 10 = 6.66 kHz
+	static const double kHz[11] = {0, 12.5, 26, 52, 104, 208, 416, 833, 1660, 3330, 6660};
+	const int odr = regs_[kCtrl2G] >> 4;
+	return 1.0 / (odr >= 1 && odr <= 10 ? kHz[odr] : 104.0);
+}
+
 void Imu::latch() {
 	double dps = (sum_t_ > 0 ? sum_ / sum_t_ : 0.0) * kRadToDeg + bias_dps_ + noise_dps_ * noise_(rng_);
-	double lsb = std::clamp(std::round(dps / kGyroLsbDps), -32768.0, 32767.0);
+	// CTRL2_G FS_G[1:0]: 250 / 500 / 1000 / 2000 dps full scale (FS_125 bit: 125 dps)
+	static const double kLsb[4] = {0.00875, 0.0175, 0.035, 0.070};
+	const uint8_t c2 = regs_[kCtrl2G];
+	const double lsb_dps = (c2 & 0x02) ? 0.004375 : (c2 >> 4) ? kLsb[(c2 >> 2) & 3] : kGyroLsbDps;
+	double lsb = std::clamp(std::round(dps / lsb_dps), -32768.0, 32767.0);
 	put16(&regs_[kOutxLG + 4], static_cast<int16_t>(lsb));
 	sum_ = sum_t_ = 0;
 }

@@ -43,6 +43,9 @@ void  fwb_install_sensor_calibration(const uint16_t white[18], const uint16_t bl
 
 typedef struct {
 	float base_mps, max_mps, accel, decel, steer_kp, steer_kd, pos_atten_gain, pit_in_m, target_shift;
+	float yaw_kp, yaw_ki, lat_acc_max;   /* cascade steering (firmware with DRIVE_HAS_CASCADE_STEER, else ignored) */
+	float target_curve_gain;             /* drive 3/4 target_pos x gain in curves (DRIVE_HAS_TARGET_CURVE_GAIN) */
+	float slalom_ratio;                  /* drive 4: 45 deg segments at base + (max - base) x ratio (DRIVE_HAS_SLALOM_RATIO) */
 	int   fan_en;
 } FwDriveParams;
 void fwb_get_drive_params(FwDriveParams *p);
@@ -50,6 +53,7 @@ void fwb_set_drive_params(const FwDriveParams *p);
 
 typedef struct {
 	float target_base_mps, current_base_mps;
+	float cmd_mps;          /* speed the wheels are commanded to (mean of both targets: after pos_atten / lat_acc_max) */
 	float target_pos;
 	float odom_m;
 	float yaw_deg;

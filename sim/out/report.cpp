@@ -52,15 +52,15 @@ void write_csv(const fs::path& p, const DriveResult& d) {
 	std::ofstream f(p);
 	f << "t,x,y,yaw_deg,v,wz_dps,lat_mm,s,pitch_deg,wheel_v_l,wheel_v_r,iq_l,iq_r,"
 	     "fw_target_base,fw_current_base,fw_target_pos,fw_odom,fw_yaw,fw_omega_t_l,fw_omega_t_r,"
-	     "fw_omega_m_l,fw_omega_m_r,fw_iq_cmd_l,fw_iq_cmd_r,fw_lost,fw_markers,body_contact\n";
+	     "fw_omega_m_l,fw_omega_m_r,fw_iq_cmd_l,fw_iq_cmd_r,fw_lost,fw_markers,body_contact,fw_cmd_mps\n";
 	char line[512];
 	for (const Sample& s : d.samples) {
 		std::snprintf(line, sizeof line,
 			"%.4f,%.5f,%.5f,%.3f,%.4f,%.2f,%.2f,%.4f,%.3f,%.4f,%.4f,%.4f,%.4f,"
-			"%.4f,%.4f,%.4f,%.4f,%.3f,%.2f,%.2f,%.2f,%.2f,%.4f,%.4f,%d,%d,%d\n",
+			"%.4f,%.4f,%.4f,%.4f,%.3f,%.2f,%.2f,%.2f,%.2f,%.4f,%.4f,%d,%d,%d,%.4f\n",
 			s.t, s.x, s.y, s.yaw_deg, s.v, s.wz_dps, s.lat_mm, s.s, s.pitch_deg, s.wheel_v[0], s.wheel_v[1], s.iq[0],
 			s.iq[1], s.tgt_base, s.cur_base, s.tgt_pos, s.odom, s.yaw_fw, s.omega_t[0], s.omega_t[1], s.omega_m[0],
-			s.omega_m[1], s.iq_cmd[0], s.iq_cmd[1], s.lost, s.markers, s.contact);
+			s.omega_m[1], s.iq_cmd[0], s.iq_cmd[1], s.lost, s.markers, s.contact, s.cmd_mps);
 		f << line;
 	}
 }
@@ -208,6 +208,7 @@ void plot_panel(std::ostream& o, double px, double py, double pw, double ph, con
 void write_drive_plot(const fs::path& p, const DriveResult& d) {
 	std::vector<double> t;
 	Series v{"v", "#4fc3f7"}, cb{"fw base", "#ffb74d"}, tb{"fw target", "#777"};
+	Series cm{"fw command (after grip limit / pos atten)", "#fff176"};
 	Series lat{"lateral error [mm]", "#e57373"}, tp{"target_pos x10", "#81c784"};
 	Series il{"iq L", "#ba68c8"}, ir{"iq R", "#4db6ac"};
 	for (const Sample& s : d.samples) {
@@ -215,6 +216,7 @@ void write_drive_plot(const fs::path& p, const DriveResult& d) {
 		v.y.push_back(s.v);
 		cb.y.push_back(s.cur_base);
 		tb.y.push_back(s.tgt_base);
+		cm.y.push_back(s.cmd_mps);
 		lat.y.push_back(s.lat_mm);
 		tp.y.push_back(s.tgt_pos * 10);
 		il.y.push_back(s.iq[0]);
@@ -227,7 +229,7 @@ void write_drive_plot(const fs::path& p, const DriveResult& d) {
 	  << "\" font-family=\"sans-serif\" font-size=\"12\">\n<rect width=\"100%\" height=\"100%\" fill=\"#15171a\"/>\n";
 	char title[160];
 	std::snprintf(title, sizeof title, "drive %d: speed [m/s] (%s, lap %.2f s)", d.n, d.outcome.c_str(), d.lap_time_fw);
-	plot_panel(o, px, 20, pw, ph, t, {tb, cb, v}, title);
+	plot_panel(o, px, 20, pw, ph, t, {tb, cb, cm, v}, title);
 	plot_panel(o, px, 20 + (ph + 30), pw, ph, t, {lat, tp}, "line tracking (sensor-bar center vs. line)");
 	plot_panel(o, px, 20 + 2 * (ph + 30), pw, ph, t, {il, ir}, "motor q-axis current [A]");
 	o << "<text x=\"" << px + pw / 2 << "\" y=\"" << 3 * (ph + 30) + 30
@@ -289,7 +291,9 @@ void write_reports(const ScenarioOptions& opt, const ScenarioResult& res, const 
 	j << "  \"params\": {\"base_mps\": " << p.base_mps << ", \"max_mps\": " << p.max_mps << ", \"accel\": " << p.accel
 	  << ", \"decel\": " << p.decel << ", \"steer_kp\": " << p.steer_kp << ", \"steer_kd\": " << p.steer_kd
 	  << ", \"pos_atten_gain\": " << p.pos_atten_gain << ", \"pit_in_m\": " << p.pit_in_m
-	  << ", \"target_shift\": " << p.target_shift << ", \"fan_en\": " << p.fan_en << "},\n";
+	  << ", \"target_shift\": " << p.target_shift << ", \"fan_en\": " << p.fan_en << ", \"yaw_kp\": " << p.yaw_kp
+	  << ", \"yaw_ki\": " << p.yaw_ki << ", \"lat_acc_max\": " << p.lat_acc_max
+	  << ", \"target_curve_gain\": " << p.target_curve_gain << ", \"slalom_ratio\": " << p.slalom_ratio << "},\n";
 	j << "  \"drives\": [\n";
 	for (size_t i = 0; i < res.drives.size(); i++) {
 		const DriveResult& d = res.drives[i];

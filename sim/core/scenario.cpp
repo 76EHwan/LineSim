@@ -270,6 +270,11 @@ bool apply_param(FwDriveParams* p, const std::string& key, double v) {
 	else if (key == "pit_in_m") p->pit_in_m = (float) v;
 	else if (key == "target_shift") p->target_shift = (float) v;
 	else if (key == "fan_en") p->fan_en = (int) v;
+	else if (key == "yaw_kp") p->yaw_kp = (float) v;              // cascade steering, inner gyro loop
+	else if (key == "yaw_ki") p->yaw_ki = (float) v;
+	else if (key == "lat_acc_max") p->lat_acc_max = (float) v;
+	else if (key == "target_curve_gain") p->target_curve_gain = (float) v;   // drive 3/4: target_pos x gain in curves
+	else if (key == "slalom_ratio") p->slalom_ratio = (float) v;             // drive 4: 45 deg speed ratio
 	else return false;
 	return true;
 }
@@ -440,6 +445,8 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 
 	// ---- per-drive bookkeeping, shared between the two fibers ----
 	int current = 0;              // drive running on the firmware fiber (0 = none)
+	bool drive1_ok = false;       // the last drive 1 read the course's marker sequence: drives 2-4 may run
+	int lap_no = 0;               // drives so far (lap list in the viewer)
 	bool ramp_seen = false, ramp_done = false;
 	double t_finished = 0;
 	bool lifted = false;
@@ -530,6 +537,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 		}
 		smp.tgt_base = tm.target_base_mps;
 		smp.cur_base = tm.current_base_mps;
+		smp.cmd_mps = tm.cmd_mps;
 		smp.tgt_pos = tm.target_pos;
 		smp.odom = tm.odom_m;
 		smp.yaw_fw = tm.yaw_deg;
@@ -632,7 +640,50 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 		if (!opt.quiet)
 			std::printf("[%8.3f s] drive %d %s, lap %.2f s, markers %s\n", sim->t(), n, cur->outcome.c_str(),
 				cur->lap_time_fw, cur->marker_check.c_str());
+		if (n == 1)
+			drive1_ok = cur->outcome == "finished" && cur->marker_check == "OK";
+		if (live) {   // lap list on the left: the firmware's lap time, else the time driven until it stopped
+			char line[160];
+			if (cur->lap_time_fw > 0) {
+				std::snprintf(line, sizeof line, "#%-3d drive %d  %6.2f s  %s", ++lap_no, n, cur->lap_time_fw,
+					cur->marker_check == "OK" ? "OK" : cur->marker_check.c_str());
+			} else {
+				double t0 = -1, t1 = 0;
+				for (const Sample& smp : cur->samples)
+					if (smp.tgt_base > 0.01f) {
+						if (t0 < 0)
+							t0 = smp.t;
+						t1 = smp.t;
+					}
+				std::snprintf(line, sizeof line, "#%-3d drive %d ~%6.2f s  %s  %s", ++lap_no, n, t0 >= 0 ? t1 - t0 : 0.0,
+					cur->outcome.c_str(), cur->marker_check == "OK" ? "" : cur->marker_check.c_str());
+			}
+			live->add_lap(line);
+		}
 		cur = nullptr;
+	};
+
+	// Drives 2-4 follow drive 1's marker log: they run only when drive 1 read the course right.
+	auto skip_drive = [&](int n) {
+		res.drives.emplace_back();
+		DriveResult& d = res.drives.back();
+		d.n = n;
+		d.outcome = "skipped";
+		d.marker_check = "drive 1 markers wrong";
+		d.t_start = d.t_end = sim->t();
+		if (!opt.quiet)
+			std::printf("[%8.3f s] drive %d skipped: drive 1 did not read the markers right\n", sim->t(), n);
+		if (live) {
+			char line[96];
+			std::snprintf(line, sizeof line, "#%-3d drive %d  skipped (drive 1 markers wrong)", ++lap_no, n);
+			live->add_lap(line);
+		}
+	};
+	auto run_or_skip = [&](int n) {
+		if (n >= 2 && !drive1_ok)
+			skip_drive(n);
+		else
+			run_one(n);
 	};
 
 	// Session: replace the course by a new random one (firmware idle, between events).
@@ -654,6 +705,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 		session.map_name = track.name();
 		session.expected = track.expected_markers();
 		session.message = "new course - run drive 1 first (2-4 replay its marker log)";
+		drive1_ok = false;
 		if (!opt.quiet)
 			std::printf("[%8.3f s] new course %s (%.2f m)\n", sim->t(), res.track_path_used.c_str(), track.length());
 	};
@@ -688,7 +740,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 			for (const int n : opt.drives) {   // scenario drives first, if any were given
 				fwb_set_drive_params(&session.params);
 				session.busy = true;
-				run_one(n);
+				run_or_skip(n);
 				session.busy = false;
 			}
 			GainTuner tuner;
@@ -810,6 +862,11 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 				} else if (session.request_drive) {
 					int n = session.request_drive;
 					session.request_drive = 0;
+					if (n >= 2 && !drive1_ok) {
+						skip_drive(n);
+						session.message = "drive 1 did not read the markers right - run drive 1 again";
+						continue;
+					}
 					fwb_set_drive_params(&session.params);
 					res.params = session.params;
 					session.busy = true;
@@ -828,7 +885,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 		}
 
 		for (int n : opt.drives)
-			run_one(n);
+			run_or_skip(n);
 	});
 
 	const double t_limit = (opt.interactive || opt.session) ? 1e7 : 30.0 + opt.drives.size() * (opt.max_drive_time + 20.0);
