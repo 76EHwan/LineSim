@@ -582,6 +582,8 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 		res.error = "cannot create " + sd.string();
 		return res;
 	}
+	// Saves a generated course into the output folder and returns its path. Only putting a course on
+	// the floor makes it res.track_path_used (auto-tune generates courses it does not drive yet).
 	auto save_generated = [&](const std::string& text, unsigned seed) {
 		fs::path f = out / ("random_" + std::to_string(seed) + ".json");
 		FILE* fp = std::fopen(f.string().c_str(), "wb");
@@ -589,10 +591,10 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 			std::fwrite(text.data(), 1, text.size(), fp);
 			std::fclose(fp);
 		}
-		res.track_path_used = f.string();
+		return f.string();
 	};
 	if (!generated.empty())
-		save_generated(generated, map_seed);
+		res.track_path_used = save_generated(generated, map_seed);
 	if (!map_firmware_flash()) {
 		res.error = "cannot map the firmware flash region at 0x081E0000";
 		return res;
@@ -654,7 +656,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 	int current = 0;              // drive running on the firmware fiber (0 = none)
 	bool drive1_ok = false;       // the last drive 1 read the course's marker sequence: drives 2-4 may run
 	int lap_no = 0;               // drives so far (lap list in the viewer)
-	std::string lap_tag;          // put in front of a lap in the list (auto-tune: which course)
+	std::string lap_key, lap_label;   // course of the next laps in the list ("" = the one on the floor)
 	bool ramp_seen = false, ramp_done = false;
 	double t_finished = 0;
 	bool lifted = false;
@@ -867,7 +869,8 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 				std::snprintf(what, sizeof what, "~%5.2f s %s %s", t0 >= 0 ? t1 - t0 : 0.0, cur->outcome.c_str(),
 					cur->marker_check == "OK" ? "" : cur->marker_check.c_str());
 			}
-			live->record_lap(n, ++lap_no, ok, cur->lap_time_fw, lap_tag + what);
+			live->record_lap(lap_key.empty() ? track.name() : lap_key, lap_label.empty() ? track.name() : lap_label, n,
+				++lap_no, ok, cur->lap_time_fw, what);
 		}
 		cur = nullptr;
 	};
@@ -883,7 +886,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 		if (!opt.quiet)
 			std::printf("[%8.3f s] drive %d skipped: drive 1 did not read the markers right\n", sim->t(), n);
 		if (live)
-			live->record_lap(n, ++lap_no, false, 0.0, "skipped (drive 1 markers wrong)");
+			live->record_lap(track.name(), track.name(), n, ++lap_no, false, 0.0, "skipped (drive 1 markers wrong)");
 	};
 	auto run_or_skip = [&](int n) {
 		if (n >= 2 && !drive1_ok)
@@ -903,8 +906,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 			session.message = "map generator: " + e;
 			return text;
 		}
-		save_generated(text, g.seed);
-		*label = res.track_path_used;
+		*label = save_generated(text, g.seed);   // load_course() makes it the course on the floor
 		return text;
 	};
 	// Session: put a course on the floor (firmware idle, between events).
@@ -1081,9 +1083,10 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 					char text[240] = "";
 					for (size_t m = 0; m < tune_courses.size(); m++) {
 						use_course(m);
-						char tag[16];
-						std::snprintf(tag, sizeof tag, "c%zu ", m + 1);
-						lap_tag = tag;
+						char tag[96];
+						std::snprintf(tag, sizeof tag, "c%zu %s %.1f m", m + 1, tune_courses[m].name.c_str(), tune_courses[m].length);
+						lap_key = tune_courses[m].name;
+						lap_label = tag;
 						const DriveResult d1 = drive(1);
 						if (!session.auto_tune) {   // stopped (A or X) during this drive: not a fair trial
 							stopped = true;
@@ -1125,7 +1128,8 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 						std::snprintf(lap, sizeof lap, "%s%.2f", laps.empty() ? "" : "/", d4.lap_time_fw);
 						laps += lap;
 					}
-					lap_tag.clear();
+					lap_key.clear();
+					lap_label.clear();
 					if (stopped)
 						continue;
 					double pace = 0;
@@ -1142,7 +1146,8 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 							// line, weave at most 1.5 x nominal + 10 dps) and x1.85 (must keep the line). Failing
 							// counts as unstable.
 							use_course(0);
-							lap_tag = "c1 lag ";
+							lap_key = tune_courses[0].name + " lag";   // lap times with more lag: a list of their own
+							lap_label = "c1 " + tune_courses[0].name + ", lag stress x1.4 / x1.85";
 							const double nominal = ir.delay();
 							std::string why;
 							ir.set_delay(nominal * kStressLag[0]);
@@ -1158,7 +1163,8 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 									why = "x1.85: " + s2.outcome;
 							}
 							ir.set_delay(nominal);
-							lap_tag.clear();
+							lap_key.clear();
+							lap_label.clear();
 							if (!session.auto_tune)
 								continue;
 							if (!why.empty()) {
@@ -1187,19 +1193,21 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 						char line[300];
 						if (!fresh.empty()) {
 							const std::string old = tune_courses[next_replace].name;
+							if (live)
+								live->drop_course(old);   // its laps do not compare with anything any more
 							tune_courses[next_replace] = course_entry(fresh, label);
 							if (cur_course == next_replace)
 								cur_course = tune_courses.size();   // reload it before the next drive
-							std::snprintf(line, sizeof line,
-								"auto-tune: no new BEST in %d drives -> course %zu %s replaced by %s (BEST %.3f m/s kp %.2f kd %.4f lat %.2f sl %.2f)",
-								GainTuner::stale_drives(), next_replace + 1, old.c_str(), tune_courses[next_replace].name.c_str(), v,
-								b.kp, b.kd, b.lat, b.sl);
-							next_replace = next_replace + 1 < tune_courses.size() ? next_replace + 1 : 1;
-							session.history.push_back(line);
-							if (!opt.quiet) {
-								std::printf("[%8.3f s] %s\n", sim->t(), line);
+							std::snprintf(line, sizeof line, "auto-tune: no new BEST in %d drives -> new c%zu (%.1f m)",
+								GainTuner::stale_drives(), next_replace + 1, tune_courses[next_replace].length);
+							if (!opt.quiet) {   // the full story on the console
+								std::printf("[%8.3f s] auto-tune: no new BEST in %d drives -> c%zu %s replaced by %s (BEST %.3f m/s kp %.2f kd %.4f lat %.2f sl %.2f)\n",
+									sim->t(), GainTuner::stale_drives(), next_replace + 1, old.c_str(),
+									tune_courses[next_replace].name.c_str(), v, b.kp, b.kd, b.lat, b.sl);
 								std::fflush(stdout);
 							}
+							next_replace = next_replace + 1 < tune_courses.size() ? next_replace + 1 : 1;
+							session.history.push_back(line);
 						}
 						tuner.start(v, b);   // paces belong to the courses: start over from BEST's values
 					}

@@ -364,21 +364,28 @@ void LiveView::render(double t_sim, const std::string& phase) {
 		slip, tm.current_base_mps, tm.target_base_mps, tm.cmd_mps, cut, lat * 1000, tm.target_pos, tm.yaw_deg, tm.marker_count,
 		tm.lost ? "   LINE LOST" : "", robot_.iq(0), robot_.iq(1));
 	hud.status = buf;
-	bool any_lap = false;
-	for (const LapSlot& l : laps_)
-		any_lap |= !l.last.empty();
-	if (any_lap) {   // per drive: the latest attempt (finished or not) and the best lap
+	// lap list: one course as before (drive 1-4); several (auto-tune) under a heading each, with the
+	// drives that have a record
+	auto lap_line = [](int d, const LapSlot& l) {
+		// best first: fixed width, so the columns line up in the proportional font
+		char best[48] = "best   -              ";
+		if (l.best_no)
+			std::snprintf(best, sizeof best, "best #%-3d %6.2f s", l.best_no, l.best_s);
+		char line[240];
+		std::snprintf(line, sizeof line, "drive %d   %s    %s", d + 1, best, l.last.empty() ? "" : l.last.c_str());
+		return std::string(line);
+	};
+	if (courses_.size() == 1) {
 		hud.status += "\n\nlaps";
-		for (int d = 0; d < 4; d++) {
-			const LapSlot& l = laps_[d];
-			// best first: fixed width, so the columns line up in the proportional font
-			char best[48] = "best   -              ";
-			if (l.best_no)
-				std::snprintf(best, sizeof best, "best #%-3d %6.2f s", l.best_no, l.best_s);
-			char line[240];
-			std::snprintf(line, sizeof line, "drive %d   %s    %s", d + 1, best, l.last.empty() ? "" : l.last.c_str());
-			hud.status += "\n";
-			hud.status += line;
+		for (int d = 0; d < 4; d++)
+			hud.status += "\n" + lap_line(d, courses_[0].d[d]);
+	} else if (courses_.size() > 1) {
+		hud.status += "\n\nlaps (per course)";
+		for (const CourseLaps& c : courses_) {
+			hud.status += "\n" + c.label;
+			for (int d = 0; d < 4; d++)
+				if (!c.d[d].last.empty())
+					hud.status += "\n   " + lap_line(d, c.d[d]);
 		}
 	}
 	hud.help = "Space pause   +/- sim speed   C camera   V sensor view   S shadows   T trail on/off   P screenshot   Esc quit\n"

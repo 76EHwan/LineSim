@@ -44,16 +44,33 @@ public:
 	// A drive is starting: the trail shows this drive only.
 	void drive_started() { v_.clear_trail(); }
 	// New course: the lap records start over.
-	void clear_laps() {
-		for (LapSlot& l : laps_)
-			l = LapSlot{};
+	void clear_laps() { courses_.clear(); }
+	// A course left the auto-tune set: its records go.
+	void drop_course(const std::string& course) {
+		for (size_t i = 0; i < courses_.size(); i++)
+			if (courses_[i].key == course) {
+				courses_.erase(courses_.begin() + static_cast<long>(i));
+				return;
+			}
 	}
-	// Lap list on the left, one line per drive 1-4: the latest attempt (finished or not) and the best
-	// finished one with every marker right. no = attempt number over all drives; ok = counts as a lap.
-	void record_lap(int drive, int no, bool ok, double lap_s, const std::string& what) {
+	// Lap list on the left, per course (lap times only compare on the same course) and drive 1-4:
+	// the latest attempt (finished or not) and the best finished one with every marker right.
+	// course: key of the course, label: its heading; no = attempt number over all drives;
+	// ok = counts as a lap.
+	void record_lap(const std::string& course, const std::string& label, int drive, int no, bool ok, double lap_s,
+		const std::string& what) {
 		if (drive < 1 || drive > 4)
 			return;
-		LapSlot& l = laps_[drive - 1];
+		CourseLaps* c = nullptr;
+		for (CourseLaps& e : courses_)
+			if (e.key == course)
+				c = &e;
+		if (!c) {
+			courses_.push_back({course, label, {}});
+			c = &courses_.back();
+		}
+		c->label = label;
+		LapSlot& l = c->d[drive - 1];
 		char buf[160];
 		std::snprintf(buf, sizeof buf, "last #%-3d %s", no, what.c_str());
 		l.last = buf;
@@ -86,7 +103,11 @@ private:
 		int best_no = 0;    // 0 = no finished lap yet
 		double best_s = 0;
 	};
-	LapSlot laps_[4];
+	struct CourseLaps {
+		std::string key, label;
+		LapSlot d[4];
+	};
+	std::vector<CourseLaps> courses_;   // in the order they were first driven
 	bool stop_ = false;
 	double anchor_wall_ = 0, anchor_sim_ = 0;
 	double last_frame_ = -1;
