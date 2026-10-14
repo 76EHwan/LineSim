@@ -252,6 +252,10 @@ void LiveView::run_session_script() {
 	if (s.busy || s.request_drive || s.request_new_map)
 		return;
 	if (script_.empty()) {
+		if (script_end_wall_ <= 0)   // 1 s (wall clock) more, so a last P screenshot gets drawn
+			script_end_wall_ = wall();
+		if (wall() - script_end_wall_ < 1.0)
+			return;
 		stop_ = true;
 		return;
 	}
@@ -304,7 +308,22 @@ std::string LiveView::session_panel() const {
 	if (!s.tune_lines.empty()) {
 		for (const std::string& l : s.tune_lines)
 			t += l + "\n";
-		t += "\n";
+		// the rest of the parameters (the tuner sets base speed, kp, kd, lat acc max, slalom ratio), three per line
+		t += "\nother parameters\n";
+		int col = 0;
+		for (int i = 0; i < kRowCount; i++) {
+			const float* f = &(s.params.*(kRows[i].field));
+			if (f == &s.params.base_mps || f == &s.params.steer_kp || f == &s.params.steer_kd ||
+				f == &s.params.lat_acc_max || f == &s.params.slalom_ratio)
+				continue;
+			char val[48];
+			std::snprintf(val, sizeof val, kRows[i].fmt, shown(s.params, kRows[i]));
+			std::snprintf(buf, sizeof buf, "%s%s %s", col ? "    " : "  ", kRows[i].name, val);
+			t += buf;
+			col = (col + 1) % 3;
+			t += col ? "" : "\n";
+		}
+		t += col ? "\n\n" : "\n";
 	}
 	size_t from = s.history.size() > (s.tune_lines.empty() ? 8u : 3u) ? s.history.size() - (s.tune_lines.empty() ? 8 : 3) : 0;
 	for (size_t i = from; i < s.history.size(); i++)
@@ -345,10 +364,22 @@ void LiveView::render(double t_sim, const std::string& phase) {
 		slip, tm.current_base_mps, tm.target_base_mps, tm.cmd_mps, cut, lat * 1000, tm.target_pos, tm.yaw_deg, tm.marker_count,
 		tm.lost ? "   LINE LOST" : "", robot_.iq(0), robot_.iq(1));
 	hud.status = buf;
-	if (!laps_.empty()) {   // every drive, finished or not
+	bool any_lap = false;
+	for (const LapSlot& l : laps_)
+		any_lap |= !l.last.empty();
+	if (any_lap) {   // per drive: the latest attempt (finished or not) and the best lap
 		hud.status += "\n\nlaps";
-		for (const std::string& l : laps_)
-			hud.status += "\n" + l;
+		for (int d = 0; d < 4; d++) {
+			const LapSlot& l = laps_[d];
+			// best first: fixed width, so the columns line up in the proportional font
+			char best[48] = "best   -              ";
+			if (l.best_no)
+				std::snprintf(best, sizeof best, "best #%-3d %6.2f s", l.best_no, l.best_s);
+			char line[240];
+			std::snprintf(line, sizeof line, "drive %d   %s    %s", d + 1, best, l.last.empty() ? "" : l.last.c_str());
+			hud.status += "\n";
+			hud.status += line;
+		}
 	}
 	hud.help = "Space pause   +/- sim speed   C camera   V sensor view   S shadows   T trail on/off   P screenshot   Esc quit\n"
 	           "mouse: left drag rotate, right drag pan, wheel zoom";
@@ -356,7 +387,7 @@ void LiveView::render(double t_sim, const std::string& phase) {
 		hud.help = "Arrows: U/D/L/R buttons   Enter: K button   R: robot back to start\n" + hud.help;
 	if (session) {
 		hud.help = "1-4: run drive 1-4   N: new random course   X: stop the robot   R: robot to start\n"
-		           "Up/Down: pick parameter   Left/Right: change it (Shift: x10)   Enter: type a value   A: auto-tune speed + kp/kd (endless)\n" + hud.help;
+		           "Up/Down: pick parameter   Left/Right: change it (Shift: x10)   Enter: type a value   A: auto-tune speed, kp/kd, lat max, slalom (endless)\n" + hud.help;
 		hud.panel = session_panel();
 	}
 

@@ -43,11 +43,24 @@ public:
 	bool stop_requested() const { return stop_; }
 	// A drive is starting: the trail shows this drive only.
 	void drive_started() { v_.clear_trail(); }
-	// One line per drive for the lap list on the left (finished or not); keeps the last 8.
-	void add_lap(const std::string& line) {
-		laps_.push_back(line);
-		if (laps_.size() > 8)
-			laps_.erase(laps_.begin());
+	// New course: the lap records start over.
+	void clear_laps() {
+		for (LapSlot& l : laps_)
+			l = LapSlot{};
+	}
+	// Lap list on the left, one line per drive 1-4: the latest attempt (finished or not) and the best
+	// finished one with every marker right. no = attempt number over all drives; ok = counts as a lap.
+	void record_lap(int drive, int no, bool ok, double lap_s, const std::string& what) {
+		if (drive < 1 || drive > 4)
+			return;
+		LapSlot& l = laps_[drive - 1];
+		char buf[160];
+		std::snprintf(buf, sizeof buf, "last #%-3d %s", no, what.c_str());
+		l.last = buf;
+		if (ok && (l.best_no == 0 || lap_s < l.best_s)) {
+			l.best_no = no;
+			l.best_s = lap_s;
+		}
 	}
 
 	std::function<void()> on_reset;   // R key (interactive): put the robot back on the start line
@@ -68,7 +81,12 @@ private:
 	double speed_;
 	bool paused_ = false;
 	bool show_trail_ = true;
-	std::vector<std::string> laps_;
+	struct LapSlot {
+		std::string last;   // latest attempt, empty = none yet
+		int best_no = 0;    // 0 = no finished lap yet
+		double best_s = 0;
+	};
+	LapSlot laps_[4];
 	bool stop_ = false;
 	double anchor_wall_ = 0, anchor_sim_ = 0;
 	double last_frame_ = -1;
@@ -80,6 +98,7 @@ private:
 	int shot_no_ = 0;
 	bool script_loaded_ = false, script_active_ = false, script_waiting_drive_ = false, script_saw_busy_ = false;
 	int script_wait_ticks_ = 0;
+	double script_end_wall_ = 0;
 	std::vector<std::string> script_;
 	double auto_shot_ = 0, next_auto_shot_ = 0;   // LINESIM_AUTOSHOT=<sim seconds>: periodic screenshots
 };

@@ -55,6 +55,8 @@ private:
 	static long long __stdcall wndproc(void* hwnd, unsigned msg, unsigned long long wp, long long lp);
 	long long handle(unsigned msg, unsigned long long wp, long long lp);
 	void mouse_move(int x, int y);
+	// mjr_overlay for any length: it keeps at most mjMAXOVERLAY - 1 (499) characters per call
+	void overlay(int grid, int left, int bottom, int width, int height, const std::string& text);
 
 	void* hwnd_ = nullptr;
 	void* hdc_ = nullptr;

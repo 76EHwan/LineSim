@@ -5,11 +5,14 @@
 
 struct TrackGenOptions {
 	unsigned seed = 1;
-	double board_w = 4.88, board_h = 4.88;   // ZETIN qualifying board
-	int min_pieces = 14, max_pieces = 28;     // random pieces before the closing ones
+	// About 3x the length of a qualifying-board course, packed like a final course on a 6.1 x 4.88 m
+	// board. max_length > 30 m: grown from a closed loop by inserting detours and reshaping corners;
+	// else one random walk (e.g. --board 4.88x4.88 --length 8,30 for the qualifying board).
+	double board_w = 6.1, board_h = 4.88;
+	int min_pieces = 14, max_pieces = 28;     // random walk only: pieces before the closing ones
 	int crossings = -1;                       // exact number of crossings, -1 = at least min_crossings
 	int min_crossings = 1;                    // courses always have a crossing unless set to 0
-	double min_length = 8.0, max_length = 30.0;
+	double min_length = 35.0, max_length = 55.0;
 };
 
 // Returns the track JSON (same format as tracks/*.json) or "" with *err set.

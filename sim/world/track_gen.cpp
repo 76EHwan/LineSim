@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <random>
 #include <sstream>
 #include <vector>
@@ -57,8 +58,364 @@ std::string to_json(const std::vector<Piece>& ps, unsigned seed, double goal_s, 
 	return o.str();
 }
 }  // namespace
+// ---------------------------------------------------------------------------
+// Long courses: start from a closed base loop (a rectangle, or a figure eight whose two long 45 deg
+// diagonals cross in the middle) and reshape it step by step:
+//  - insert a detour into a straight: a module that leaves and rejoins the same line with the same
+//    heading (bulbs, snakes of 270 deg lobes, fingers, chicanes, random symmetric shapes, or a loop
+//    that crosses its own straight at 90 deg);
+//  - replace the arcs between two non-parallel straights by another arc sequence with the same total
+//    turn (chamfers, lobed corners, S-bends), the two straights absorbing the change of position.
+// A step is kept only when the whole course still meets the ZETIN rules (Track::rule_problems:
+// clearance, crossings at 90 deg with 20 cm of straight around them, board size).
+// ---------------------------------------------------------------------------
+using Pieces = std::vector<Piece>;
+
+namespace {
+Pieces mirror(Pieces m, int sign) {
+	if (sign < 0)
+		for (Piece& p : m)
+			p.deg = -p.deg;
+	return m;
+}
+
+// x span of a module that starts on a straight (heading 0) and ends on the same line, heading 0
+// (mod 360); false if it does not.
+bool module_span(const Pieces& m, double* span) {
+	double x, y, th;
+	walk(m, &x, &y, &th);
+	const double turns = th / (2 * kPi);
+	if (std::fabs(y) > 1e-6 || std::fabs(turns - std::round(turns)) > 1e-6)
+		return false;
+	*span = x;
+	return true;
+}
+
+struct Pt {
+	double s, x, y;
+};
+
+// Points every `step` along the pieces, starting at (x, y) heading th; s continues from s0.
+void sample_pieces(const Pieces& ps, double x, double y, double th, double s0, double step, std::vector<Pt>* out) {
+	double s = s0;
+	for (const Piece& p : ps) {
+		if (!p.arc) {
+			int n = std::max(1, static_cast<int>(std::ceil(p.len / step)));
+			for (int k = 0; k < n; k++)
+				out->push_back({s + p.len * k / n, x + p.len * k / n * std::cos(th), y + p.len * k / n * std::sin(th)});
+			x += p.len * std::cos(th);
+			y += p.len * std::sin(th);
+			s += p.len;
+		} else {
+			const int turn = p.deg > 0 ? 1 : -1;
+			const double phi = p.deg * kPi / 180.0, len = kR * std::fabs(phi);
+			const double cx = x - turn * kR * std::sin(th), cy = y + turn * kR * std::cos(th);
+			int n = std::max(1, static_cast<int>(std::ceil(len / step)));
+			for (int k = 0; k < n; k++) {
+				double a = phi * k / n, rx = x - cx, ry = y - cy;
+				out->push_back({s + len * k / n, cx + rx * std::cos(a) - ry * std::sin(a), cy + rx * std::sin(a) + ry * std::cos(a)});
+			}
+			double rx = x - cx, ry = y - cy;
+			x = cx + rx * std::cos(phi) - ry * std::sin(phi);
+			y = cy + rx * std::sin(phi) + ry * std::cos(phi);
+			th += phi;
+			s += len;
+		}
+	}
+}
+
+// Quick pre-check of a detour on its own straight: no part of it runs within 20 cm of another part
+// or of the straight it sits on (the full course check comes later; this only saves time).
+bool module_clear(const Pieces& m, double span) {
+	std::vector<Pt> pts;
+	const double lead = 0.6;
+	sample_pieces({{false, lead, 0}}, -lead, 0, 0, -lead, 0.02, &pts);
+	sample_pieces(m, 0, 0, 0, 0, 0.02, &pts);
+	double mlen = 0;
+	for (const Piece& p : m)
+		mlen += p.arc ? kR * std::fabs(p.deg) * kPi / 180.0 : p.len;
+	sample_pieces({{false, lead, 0}}, span, 0, 0, mlen, 0.02, &pts);
+	for (size_t i = 0; i < pts.size(); i++)
+		for (size_t j = i + 1; j < pts.size(); j++) {
+			if (pts[j].s - pts[i].s < 0.45)
+				continue;
+			double dx = pts[i].x - pts[j].x, dy = pts[i].y - pts[j].y;
+			if (dx * dx + dy * dy < 0.2 * 0.2)
+				return false;
+		}
+	return true;
+}
+
+// Appends an arc, keeping arcs that meet with the same turn apart (they would be one arc).
+void push_arc(Pieces* ps, int deg, double gap) {
+	if (!ps->empty() && ps->back().arc && (ps->back().deg > 0) == (deg > 0))
+		ps->push_back({false, gap, 0});
+	ps->push_back({true, 0, deg});
+}
+}  // namespace
+
+std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* attempts_out) {
+	std::mt19937 rng(opt.seed);
+	auto uni = [&](double a, double b) { return std::uniform_real_distribution<double>(a, b)(rng); };
+	auto pick = [&](int n) { return std::uniform_int_distribution<int>(0, n - 1)(rng); };
+	auto sgn = [&]() { return uni(0, 1) < 0.5 ? 1 : -1; };
+	auto len_q = [&](double a, double b) { return round_to(uni(a, b), 0.05); };
+	auto rand_deg = [&](int max_steps) { return 45 * (1 + pick(max_steps)); };   // 45 .. 45*max_steps
+	const double R = kR, start_len = 1.0, goal_s = 0.2, start_s = 0.65;
+	const double target = uni(opt.min_length, opt.max_length);
+	const int want_cross = opt.crossings >= 0 ? opt.crossings : std::max(opt.min_crossings, 2 + pick(5));
+
+	auto check = [&](const Pieces& ps, Track* t) {
+		std::string e;
+		if (!t->load_text(to_json(ps, opt.seed, goal_s, start_s), "random", &e))
+			return false;
+		if (!t->rule_problems(opt.board_w - 0.2, opt.board_h - 0.2).empty())
+			return false;
+		// beyond the rules: 40 cm of straight before every crossing (20 cm after it), so the robot
+		// is square to the line again when it gets there. Coming out of a tight curve with 20 cm the
+		// sensor bar meets the crossing at an angle: both marker sensors fire without the full bar
+		// (that reads as the end mark), which also happens on a real course.
+		for (const TrackCrossing& x : t->crossings())
+			for (double s : {x.s1, x.s2}) {
+				double before, after;
+				t->straight_run(s, &before, &after);
+				if (before < 0.4 || after < 0.2)
+					return false;
+			}
+		return true;
+	};
+
+	// ---- detours (in the frame of the straight they sit on; sign mirrors them to the other side)
+	auto cross_loop = [&]() -> Pieces {   // crosses the incoming straight at 90 deg, then rejoins the line
+		double u = len_q(0.2, 0.6), w = len_q(0.2, 0.8);
+		double h = len_q(R + 0.25, 0.9);   // how far below the line it comes back
+		double z = round_to(w + uni(0.6, 1.4), 0.05);
+		return mirror({{true, 0, 90}, {false, u, 0}, {true, 0, 90}, {false, w, 0}, {true, 0, 90},
+			{false, R + u + h, 0}, {true, 0, 90}, {false, z, 0}, {true, 0, 90}, {false, h - R, 0}, {true, 0, -90}}, sgn());
+	};
+	auto detour = [&]() -> Pieces {
+		const int kind = pick(10);
+		const int s = sgn();
+		if (kind == 0) {   // snake of 1, 3 or 5 lobes of 270 deg
+			int lobes = 1 + 2 * pick(3);
+			Pieces m = {{true, 0, 135 * s}};
+			for (int k = 0; k < lobes; k++)
+				m.push_back({true, 0, (k % 2 ? 270 : -270) * s});
+			m.push_back({true, 0, 135 * s});
+			return m;
+		}
+		if (kind == 1) {   // finger: out, U-turn (or a round bulb), back
+			double d = len_q(0.2, 1.4);
+			if (uni(0, 1) < 0.5)
+				return mirror({{true, 0, 90}, {false, d, 0}, {true, 0, -180}, {false, d, 0}, {true, 0, 90}}, s);
+			return mirror({{true, 0, 90}, {false, d, 0}, {true, 0, 45}, {true, 0, -270}, {true, 0, 45}, {false, d, 0},
+				{true, 0, 90}}, s);
+		}
+		if (kind == 2) {   // chicane (45 deg slalom)
+			double a = len_q(0.2, 0.6), b = len_q(0.2, 0.8);
+			return mirror({{true, 0, 45}, {false, a, 0}, {true, 0, -45}, {false, b, 0}, {true, 0, -45}, {false, a, 0},
+				{true, 0, 45}}, s);
+		}
+		if (kind == 3) {   // 45 deg hump
+			double a = len_q(0.2, 0.8);
+			return mirror({{true, 0, 45}, {false, a, 0}, {true, 0, -90}, {false, a, 0}, {true, 0, 45}}, s);
+		}
+		// random mirror-symmetric shape: half H, a middle piece, H backwards. Any such shape with zero
+		// total turn ends on the line it started from.
+		Pieces h;
+		int sum = 0;
+		const int arcs = 1 + pick(3);
+		for (int k = 0; k < arcs; k++) {
+			if (k > 0 && uni(0, 1) < 0.45)
+				h.push_back({false, len_q(0.1, 0.7), 0});
+			int deg = rand_deg(6) * (h.empty() || !h.back().arc ? sgn() : (h.back().deg > 0 ? -1 : 1));
+			h.push_back({true, 0, deg});
+			sum += deg;
+		}
+		const int mid = -2 * sum;
+		if (std::abs(mid) > 270)
+			return {};
+		if (mid != 0 && (h.back().deg > 0) == (mid > 0))   // same turn on both sides: keep them apart
+			h.push_back({false, len_q(0.1, 0.5), 0});
+		Pieces m = h;
+		m.push_back(mid == 0 ? Piece{false, len_q(0.2, 0.8), 0} : Piece{true, 0, mid});
+		m.insert(m.end(), h.rbegin(), h.rend());
+		return m;
+	};
+	// new arc sequence between two straights with total turn `turn`
+	auto corner = [&](int turn) -> Pieces {
+		Pieces c;
+		int sum = 0;
+		const int arcs = 1 + pick(3);
+		for (int k = 0; k + 1 < arcs; k++) {
+			int deg = rand_deg(6) * (c.empty() ? sgn() : (c.back().deg > 0 ? -1 : 1));
+			if (!c.empty() && uni(0, 1) < 0.5)
+				c.push_back({false, len_q(0.1, 0.8), 0});
+			c.push_back({true, 0, deg});
+			sum += deg;
+		}
+		int last = turn - sum;
+		if (last == 0 || std::abs(last) > 270)
+			return {};
+		if (!c.empty() && uni(0, 1) < 0.5)
+			c.push_back({false, len_q(0.1, 0.8), 0});
+		push_arc(&c, last, len_q(0.1, 0.6));
+		return c;
+	};
+
+	// ---- base loops; piece 0 is the end-mark straight and is never touched
+	auto base = [&]() -> Pieces {
+		const double bw = opt.board_w - 0.2, bh = opt.board_h - 0.2;
+		if (uni(0, 1) < 0.5) {   // rectangle with R25 corners
+			double W = round_to(uni(0.6, 0.9) * bw, 0.05), H = round_to(uni(0.6, 0.9) * bh, 0.05);
+			return {{false, start_len, 0}, {false, W - 2 * R - start_len, 0}, {true, 0, 90}, {false, H - 2 * R, 0},
+				{true, 0, 90}, {false, W - 2 * R, 0}, {true, 0, 90}, {false, H - 2 * R, 0}, {true, 0, 90}};
+		}
+		// figure eight: two side loops joined by two 45 deg diagonals that cross at 90 deg in the middle
+		const double c45 = std::sqrt(0.5);
+		double rise = uni(0.55, 0.9) * bh - 0.05;        // diagonal height incl. its two 45 deg arcs
+		double L = round_to((rise - 2 * R * (1 - c45)) / c45, 0.05);
+		rise = L * c45 + 2 * R * (1 - c45);
+		double side = rise - 2 * R;
+		double xw = L * c45 + 2 * R * c45;                // width of the X
+		double room = bw - xw - 2 * R;
+		if (room < 1.4 || side < 0.3)
+			return {};
+		double a1 = len_q(0.1, std::min(1.2, room - 1.25)), t1 = len_q(0.2, std::max(0.25, room - start_len - a1 - 0.05));
+		return {{false, start_len, 0}, {false, a1, 0}, {true, 0, 45}, {false, L, 0}, {true, 0, -45}, {false, t1, 0},
+			{true, 0, -90}, {false, side, 0}, {true, 0, -90}, {false, t1, 0}, {true, 0, -45}, {false, L, 0}, {true, 0, 45},
+			{false, start_len + a1, 0}, {true, 0, 90}, {false, side, 0}, {true, 0, 90}};
+	};
+
+	Track t;
+	int checks = 0;
+	for (int attempt = 1; attempt <= 60; attempt++) {
+		Pieces ps = base();
+		if (ps.empty())
+			continue;
+		checks++;
+		if (!check(ps, &t))
+			continue;
+		int crossings = static_cast<int>(t.crossings().size()), fails = 0;
+		if (opt.crossings >= 0 && crossings > opt.crossings)
+			continue;
+		while ((t.length() < target || crossings < want_cross) && fails < 400) {
+			// global heading (in 45 deg steps) at the start of every piece
+			std::vector<int> hd(ps.size() + 1, 0);
+			for (size_t i = 0; i < ps.size(); i++)
+				hd[i + 1] = hd[i] + (ps[i].arc ? ps[i].deg : 0);
+			Pieces next;
+			const double r = uni(0, 1);
+			if (r < 0.62 || (crossings < want_cross && r < 0.8)) {
+				// detour into a straight (the end-mark straight stays as it is)
+				const bool need_cross = crossings < want_cross && (opt.crossings >= 0 || uni(0, 1) < 0.35);
+				Pieces m = need_cross ? cross_loop() : detour();
+				double span;
+				if (m.empty() || !module_span(m, &span) || span < 0.25 || (!need_cross && !module_clear(m, span))) {
+					fails++;
+					continue;
+				}
+				// a straight with room for it (and, for the loop, the straight it crosses behind it)
+				const double before_min = need_cross ? m[3].len + R + 0.55 : 0.2;
+				std::vector<int> cand;
+				for (size_t i = 1; i < ps.size(); i++)
+					if (!ps[i].arc && ps[i].len >= before_min + span + 0.2)
+						cand.push_back(static_cast<int>(i));
+				if (cand.empty()) {
+					fails++;
+					continue;
+				}
+				int i = cand[pick(static_cast<int>(cand.size()))];
+				double b = round_to(before_min + uni(0, ps[i].len - span - before_min - 0.2), 0.05);
+				b = std::min(b, ps[i].len - span - 0.2);
+				next.assign(ps.begin(), ps.begin() + i);
+				next.push_back({false, b, 0});
+				next.insert(next.end(), m.begin(), m.end());
+				next.push_back({false, ps[i].len - b - span, 0});
+				next.insert(next.end(), ps.begin() + i + 1, ps.end());
+			} else {
+				// reshape the arcs between two straights A = ps[i] and B = ps[j]
+				std::vector<int> straights;
+				for (size_t i = 1; i < ps.size(); i++)
+					if (!ps[i].arc)
+						straights.push_back(static_cast<int>(i));
+				if (straights.size() < 2) {
+					fails++;
+					continue;
+				}
+				size_t k = static_cast<size_t>(pick(static_cast<int>(straights.size()) - 1));
+				const int i = straights[k], j = straights[k + 1];
+				const int turn = hd[j] - hd[i];
+				const double tha = hd[i] * kPi / 180.0, thb = hd[j] * kPi / 180.0;
+				const double det = std::sin(thb - tha);
+				if (j - i < 2 || std::fabs(det) < 0.5) {
+					fails++;
+					continue;
+				}
+				Pieces c = corner(turn);
+				if (c.empty()) {
+					fails++;
+					continue;
+				}
+				Pieces old(ps.begin() + i + 1, ps.begin() + j);
+				double ox, oy, oth, nx, ny, nth;
+				walk(old, &ox, &oy, &oth);
+				walk(c, &nx, &ny, &nth);
+				// the change of position, in the frame of A, taken up by A and B: da*(1,0) + db*u_b = old - new
+				const double ex = ox - nx, ey = oy - ny, ub = thb - tha;
+				const double db = ey / std::sin(ub), da = ex - db * std::cos(ub);
+				const double la = ps[i].len + da, lb = ps[j].len + db;
+				if (la < 0.1 || lb < 0.1) {
+					fails++;
+					continue;
+				}
+				next.assign(ps.begin(), ps.begin() + i);
+				next.push_back({false, round_to(la, 1e-4), 0});
+				next.insert(next.end(), c.begin(), c.end());
+				next.push_back({false, round_to(lb, 1e-4), 0});
+				next.insert(next.end(), ps.begin() + j + 1, ps.end());
+			}
+			Track tn;
+			checks++;
+			if (check(next, &tn) && tn.length() <= opt.max_length) {
+				const int nc = static_cast<int>(tn.crossings().size());
+				if ((opt.crossings >= 0 && nc > opt.crossings) || nc < crossings) {
+					fails++;
+					continue;
+				}
+				// progress (longer, or one more crossing) restarts the count; a reshape that only moves
+				// things around is kept (it may open room) but still counts towards giving up
+				fails = tn.length() > t.length() + 0.05 || nc > crossings ? 0 : fails + 1;
+				ps = next;
+				t = tn;
+				crossings = nc;
+			} else {
+				fails++;
+			}
+		}
+		if (std::getenv("LINESIM_GEN_DEBUG"))
+			std::fprintf(stderr, "attempt %d: %.1f m (target %.1f), %d/%d crossings, %zu pieces, %d checks\n", attempt,
+				t.length(), target, crossings, want_cross, ps.size(), checks);
+		if (t.length() < opt.min_length || crossings < (opt.crossings >= 0 ? opt.crossings : opt.min_crossings))
+			continue;
+		if (attempts_out)
+			*attempts_out = attempt;
+		return to_json(ps, opt.seed, goal_s, start_s);
+	}
+	*err = "no valid course found (try other options)";
+	return "";
+}
+
+std::string generate_walk(const TrackGenOptions& opt, std::string* err, int* attempts_out);
 
 std::string generate_track(const TrackGenOptions& opt, std::string* err, int* attempts_out) {
+	// long courses grow by insertion, short ones come from one random walk
+	if (opt.max_length > 30.0)
+		return generate_grown(opt, err, attempts_out);
+	return generate_walk(opt, err, attempts_out);
+}
+
+std::string generate_walk(const TrackGenOptions& opt, std::string* err, int* attempts_out) {
 	std::mt19937 rng(opt.seed);
 	auto uni = [&](double a, double b) { return std::uniform_real_distribution<double>(a, b)(rng); };
 	auto pick = [&](int n) { return std::uniform_int_distribution<int>(0, n - 1)(rng); };

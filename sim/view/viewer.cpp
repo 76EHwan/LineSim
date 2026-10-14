@@ -331,6 +331,61 @@ void Viewer::add_trail(double x, double y, double speed) {
 	trail_vmax_ = std::max(trail_vmax_, speed);
 }
 
+void Viewer::overlay(int grid, int left, int bottom, int width, int height, const std::string& text) {
+	// whole lines, each piece under the mjr_overlay limit
+	std::vector<std::string> pieces(1);
+	std::vector<int> rows(1, 0);
+	size_t p = 0;
+	while (p <= text.size()) {
+		size_t q = text.find('\n', p);
+		if (q == std::string::npos)
+			q = text.size();
+		std::string line = text.substr(p, q - p);
+		if (line.size() > mjMAXOVERLAY - 2)
+			line.resize(mjMAXOVERLAY - 2);
+		if (!pieces.back().empty() && pieces.back().size() + 1 + line.size() > mjMAXOVERLAY - 2) {
+			pieces.emplace_back();
+			rows.push_back(0);
+		}
+		if (rows.back() > 0)
+			pieces.back() += '\n';
+		pieces.back() += line;
+		rows.back()++;
+		p = q + 1;
+	}
+	// line pitch of mjr_overlay: about 1.17 character heights (measured on screen: 33 px at 28 px)
+	const int lh = static_cast<int>(im_->con.charHeight * 1.17 + 0.5);
+	const bool from_bottom = grid == mjGRID_BOTTOMLEFT || grid == mjGRID_BOTTOMRIGHT;
+	// Right-aligned text: mjr_overlay would align every piece on its own widest line, so pieces of
+	// different widths would start at different x. Draw them all left-aligned from the x where the
+	// widest line of the whole text fits instead.
+	if (pieces.size() > 1 && (grid == mjGRID_TOPRIGHT || grid == mjGRID_BOTTOMRIGHT)) {
+		int widest = 0, w = 0;
+		for (char c : text) {
+			if (c == '\n') {
+				widest = std::max(widest, w);
+				w = 0;
+			} else if (static_cast<unsigned char>(c) < 127) {
+				w += im_->con.charWidth[static_cast<unsigned char>(c)];
+			}
+		}
+		widest = std::max(widest, w);
+		const int margin = im_->con.charHeight;   // the padding mjr_overlay puts around its text
+		const int x = std::max(left, left + width - widest - 2 * margin);
+		width -= x - left;
+		left = x;
+		grid = grid == mjGRID_TOPRIGHT ? mjGRID_TOPLEFT : mjGRID_BOTTOMLEFT;
+	}
+	int off = 0;
+	for (size_t k = 0; k < pieces.size(); k++) {
+		const size_t i = from_bottom ? pieces.size() - 1 - k : k;   // stack away from the anchor corner
+		mjrRect r{left, from_bottom ? bottom + off : bottom, width, height - off};
+		if (r.height > lh)
+			mjr_overlay(mjFONT_NORMAL, grid, r, pieces[i].c_str(), nullptr, &im_->con);
+		off += rows[i] * lh;
+	}
+}
+
 void Viewer::render(const ViewerHud& hud) {
 	if (closed_ || !im_ || width_ <= 0 || height_ <= 0)
 		return;
@@ -403,7 +458,7 @@ void Viewer::render(const ViewerHud& hud) {
 		mjr_overlay(mjFONT_NORMAL, mjGRID_TOPLEFT, r, "sensor view (V)", nullptr, &im_->con);
 	}
 
-	mjr_overlay(mjFONT_NORMAL, mjGRID_TOPLEFT, view, hud.status.c_str(), nullptr, &im_->con);
+	overlay(mjGRID_TOPLEFT, view.left, view.bottom, view.width, view.height, hud.status);
 	std::string lcd;
 	if (!hud.lcd.empty()) {
 		lcd = hud.lcd_inverted ? "LCD (inverted)\n" : "LCD\n";
@@ -415,11 +470,11 @@ void Viewer::render(const ViewerHud& hud) {
 	const bool lcd_left = !lcd.empty() && !hud.panel.empty();
 	std::string bottom = (lcd_left ? lcd + "\n" : "") + hud.help;
 	if (!bottom.empty())
-		mjr_overlay(mjFONT_NORMAL, mjGRID_BOTTOMLEFT, view, bottom.c_str(), nullptr, &im_->con);
+		overlay(mjGRID_BOTTOMLEFT, view.left, view.bottom, view.width, view.height, bottom);
 	if (!hud.panel.empty())
-		mjr_overlay(mjFONT_NORMAL, mjGRID_TOPRIGHT, view, hud.panel.c_str(), nullptr, &im_->con);
+		overlay(mjGRID_TOPRIGHT, view.left, view.bottom, view.width, view.height, hud.panel);
 	if (!lcd.empty() && !lcd_left)
-		mjr_overlay(mjFONT_NORMAL, mjGRID_TOPRIGHT, view, lcd.c_str(), nullptr, &im_->con);
+		overlay(mjGRID_TOPRIGHT, view.left, view.bottom, view.width, view.height, lcd);
 
 	// IR bar: 16 line sensors left->right as mounted (sensor 0 = left), then the two mark sensors
 	const int cell = std::max(14, width_ / 60), gap = 3, h = cell * 2;

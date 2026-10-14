@@ -617,19 +617,44 @@ std::vector<std::string> Track::rule_problems(double board_w, double board_h, do
 				return true;
 		return false;
 	};
-	for (size_t i = 0; i < sm.size(); i++) {
-		if (near_cross(sm[i].s))
+	// spatial grid with cells of min_clear: only samples in neighbouring cells can be too close
+	const size_t n = sm.size();
+	std::vector<char> skip(n);
+	double gx0 = 1e18, gy0 = 1e18;
+	for (size_t i = 0; i < n; i++) {
+		skip[i] = near_cross(sm[i].s);
+		gx0 = std::min(gx0, sm[i].x);
+		gy0 = std::min(gy0, sm[i].y);
+	}
+	const double cell = std::max(min_clear, 0.05);
+	auto cx = [&](double x) { return static_cast<int>((x - gx0) / cell); };
+	auto cy = [&](double y) { return static_cast<int>((y - gy0) / cell); };
+	int nx = 0, ny = 0;
+	for (size_t i = 0; i < n; i++) {
+		nx = std::max(nx, cx(sm[i].x) + 1);
+		ny = std::max(ny, cy(sm[i].y) + 1);
+	}
+	std::vector<std::vector<int>> grid(static_cast<size_t>(nx) * ny);
+	for (size_t i = 0; i < n; i++)
+		if (!skip[i])
+			grid[static_cast<size_t>(cy(sm[i].y)) * nx + cx(sm[i].x)].push_back(static_cast<int>(i));
+	for (size_t i = 0; i < n; i++) {
+		if (skip[i])
 			continue;
-		for (size_t j = i + 1; j < sm.size(); j++) {
-			if (circ(sm[i].s, sm[j].s) < 0.45 || near_cross(sm[j].s))
-				continue;
-			double dx = sm[i].x - sm[j].x, dy = sm[i].y - sm[j].y;
-			if (dx * dx + dy * dy < min_clear * min_clear) {
-				std::snprintf(buf, sizeof buf, "lines closer than %.0f cm near (%.2f, %.2f)", min_clear * 100, sm[i].x, sm[i].y);
-				out.push_back(buf);
-				return out;
-			}
-		}
+		const int gx = cx(sm[i].x), gy = cy(sm[i].y);
+		for (int yy = std::max(0, gy - 1); yy <= std::min(ny - 1, gy + 1); yy++)
+			for (int xx = std::max(0, gx - 1); xx <= std::min(nx - 1, gx + 1); xx++)
+				for (int j : grid[static_cast<size_t>(yy) * nx + xx]) {
+					if (static_cast<size_t>(j) <= i || circ(sm[i].s, sm[j].s) < 0.45)
+						continue;
+					double dx = sm[i].x - sm[j].x, dy = sm[i].y - sm[j].y;
+					if (dx * dx + dy * dy < min_clear * min_clear) {
+						std::snprintf(buf, sizeof buf, "lines closer than %.0f cm near (%.2f, %.2f)", min_clear * 100,
+							sm[i].x, sm[i].y);
+						out.push_back(buf);
+						return out;
+					}
+				}
 	}
 	return out;
 }
