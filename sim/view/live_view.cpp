@@ -179,16 +179,34 @@ void LiveView::session_key(int k) {
 		if (s.busy)
 			s.request_abort = true;
 		s.auto_tune = false;
+		s.tune_mode = 0;
 		break;
-	case 'A':   // endless auto-tune of steer kp / kd at the current base speed
-		if (s.auto_tune) {
+	case 'A':   // 3-course AI Bayesian Gain Auto-Tune (mode 1)
+		if (s.auto_tune && s.tune_mode == 1) {
 			s.auto_tune = false;
-		} else if (s.busy) {
+			s.tune_mode = 0;
+		} else if (s.busy && !s.auto_tune) {
 			s.message = "wait for the drive to finish (X stops it)";
 		} else {
 			s.auto_tune = true;
+			s.tune_mode = 1;
+			s.message = "switched to [A] 3-Course AI Gain Auto-Tune";
 			if (speed_ < 16.0)
-				speed_ = 32.0;   // Auto-tune defaults to high-speed turbo execution
+				speed_ = 32.0;
+		}
+		break;
+	case 'E':   // Endless 100-Map Reliability + AI Gain Auto-Heal (mode 2)
+		if (s.auto_tune && s.tune_mode == 2) {
+			s.auto_tune = false;
+			s.tune_mode = 0;
+		} else if (s.busy && !s.auto_tune) {
+			s.message = "wait for the drive to finish (X stops it)";
+		} else {
+			s.auto_tune = true;
+			s.tune_mode = 2;
+			s.message = "switched to [E] Endless 100-Map + AI Gain Auto-Heal";
+			if (speed_ < 16.0)
+				speed_ = 32.0;
 		}
 		break;
 	case 's':
@@ -486,7 +504,7 @@ void LiveView::render(double t_sim, const std::string& phase) {
 		hud.help = "Arrows: U/D/L/R buttons   Enter: K button   R: robot back to start\n" + hud.help;
 	if (session) {
 		hud.help = "1-4: run drive 1-4   N: new random course   X: stop   R: robot to start   S: save to drive.c\n"
-		           "Up/Down: pick parameter   Left/Right: change (Shift: x10)   Enter: type value   A: auto-tune (endless)\n" + hud.help;
+		           "Up/Down: pick   Left/Right: change   Enter: type   A: gain auto-tune (3-course)   E: endless (1+4/map + AI heal)\n" + hud.help;
 		hud.panel = session_panel();
 	}
 

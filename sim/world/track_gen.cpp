@@ -282,7 +282,7 @@ bool fast_check_course(const Pieces& ps, double max_w, double max_h, double max_
 		p.ux = std::cos(th);
 		p.uy = std::sin(th);
 		if (!src.arc) {
-			if (src.len <= 0)
+			if (src.len < 0.199)
 				return false;
 			p.turn = 0;
 			p.len = src.len;
@@ -569,7 +569,7 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 		const int arcs = 1 + pick(3);
 		for (int k = 0; k < arcs; k++) {
 			if (k > 0 && uni(0, 1) < 0.45)
-				h.push_back({false, len_q(0.1, 0.7), 0});
+				h.push_back({false, len_q(0.2, 0.7), 0});
 			int deg = rand_deg(6) * (h.empty() || !h.back().arc ? sgn() : (h.back().deg > 0 ? -1 : 1));
 			h.push_back({true, 0, deg});
 			sum += deg;
@@ -578,7 +578,7 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 		if (std::abs(mid) > 270)
 			return {};
 		if (mid != 0 && (h.back().deg > 0) == (mid > 0))
-			h.push_back({false, len_q(0.1, 0.5), 0});
+			h.push_back({false, len_q(0.2, 0.5), 0});
 		Pieces m = h;
 		m.push_back(mid == 0 ? Piece{false, len_q(0.2, 0.8), 0} : Piece{true, 0, mid});
 		m.insert(m.end(), h.rbegin(), h.rend());
@@ -592,7 +592,7 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 		for (int k = 0; k + 1 < arcs; k++) {
 			int deg = rand_deg(6) * (c.empty() ? sgn() : (c.back().deg > 0 ? -1 : 1));
 			if (!c.empty() && uni(0, 1) < 0.5)
-				c.push_back({false, len_q(0.1, 0.8), 0});
+				c.push_back({false, len_q(0.2, 0.8), 0});
 			c.push_back({true, 0, deg});
 			sum += deg;
 		}
@@ -600,8 +600,8 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 		if (last == 0 || std::abs(last) > 270)
 			return {};
 		if (!c.empty() && uni(0, 1) < 0.5)
-			c.push_back({false, len_q(0.1, 0.8), 0});
-		push_arc(&c, last, len_q(0.1, 0.6));
+			c.push_back({false, len_q(0.2, 0.8), 0});
+		push_arc(&c, last, len_q(0.2, 0.6));
 		return c;
 	};
 
@@ -730,7 +730,7 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 				const double ex = ox - nx, ey = oy - ny, ub = thb - tha;
 				const double db = ey / std::sin(ub), da = ex - db * std::cos(ub);
 				const double la = ps[i].len + da, lb = ps[j].len + db;
-				if (la < 0.1 || lb < 0.1) {
+				if (la < 0.2 || lb < 0.2) {
 					fails++;
 					continue;
 				}
@@ -811,7 +811,7 @@ std::string generate_walk(const TrackGenOptions& opt, std::string* err, int* att
 			const Piece& prev = ps.back();
 			bool arc = prev.arc ? uni(0, 1) < 0.35 : true;
 			if (!arc) {
-				ps.push_back({false, round_to(uni(0.15, 1.0), 0.05), 0});
+				ps.push_back({false, round_to(uni(0.2, 1.0), 0.05), 0});
 			} else {
 				int a = rand_angle();
 				int sign = uni(0, 1) < 0.5 ? 1 : -1;
@@ -878,7 +878,7 @@ std::string generate_walk(const TrackGenOptions& opt, std::string* err, int* att
 				double da = (-ex * vy + ey * vx) / det;
 				double db = (-ey * ux + ex * uy) / det;
 				double la = ps[si[a]].len + da, lb = ps[si[b]].len + db;
-				if (la < 0.15 || lb < 0.15 || la > 2.5 || lb > 2.5)
+				if (la < 0.2 || lb < 0.2 || la > 2.5 || lb > 2.5)
 					continue;
 				double cost = std::fabs(da) + std::fabs(db);
 				if (cost < best_cost) {

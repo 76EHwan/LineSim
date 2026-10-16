@@ -22,7 +22,8 @@ struct SessionState {
 	bool request_abort = false;
 	bool busy = false;              // a drive is running
 	bool ready = false;             // firmware booted, params loaded
-	bool auto_tune = false;         // A: drive 1 over and over, adjusting steer kp / kd
+	bool auto_tune = false;         // true when either A (mode 1) or E (mode 2) is active
+	int tune_mode = 0;              // 0: off, 1: A (3-course gain auto-tune), 2: E (endless 1+4 per map + AI heal)
 	std::vector<std::string> tune_lines;   // auto-tune status for the panel
 	std::string map_name, expected; // expected marker sequence (U L R C)
 	std::vector<std::string> history;
