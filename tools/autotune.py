@@ -1,11 +1,13 @@
 """Base speed and steering gains for the race, found in the simulator.
 
-    python tools/autotune.py 2.0                 best steer kp / kd at base speed 2.0 m/s
+    python tools/autotune.py 2.0 --hours 3       endless tuning for 3 hours with rotating random courses
+    python tools/autotune.py 2.0 --endless       endless tuning continuously until Ctrl+C
     python tools/autotune.py 1.6 --max-speed     highest base speed that passes, from 1.6 up
     python tools/autotune.py 2.2 --max-speed --lat 10,12,14,16   with the grip limit (lat_acc_max) as a 3rd axis
 
-    options: [--drives 1,4] [--track tracks/x.json ...] [--courses 4] [--robot robots/full.json] [--jobs 8]
-             [--kp 8,10,...] [--kd 0,0.05,...] [--lat 0] [--set max_mps=4 ...] [--reuse]
+    options: [--hours <N>] [--endless] [--drives 1,4] [--track tracks/x.json ...] [--courses 4]
+             [--robot robots/full.json] [--jobs 8] [--kp 8,10,...] [--kd 0,0.05,...] [--lat 0]
+             [--set max_mps=4 ...] [--reuse]
 
 Course: the real practice board (tracks/practice_board.json, made from the robot's logs) when it
 is there, else --courses random ZETIN courses with fixed seeds. --track picks courses by hand.
@@ -46,11 +48,34 @@ import csv
 import json
 import math
 import os
+import re
 import subprocess
 import sys
+import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EXE = os.path.join(ROOT, "build", "Release", "linesim.exe")
+
+
+def update_drive_c(base_mps, kp, kd_fw, lat_acc=None):
+    """Safely updates firmware/Main/Src/drive.c with newly discovered best parameters."""
+    path = os.path.join(ROOT, "firmware", "Main", "Src", "drive.c")
+    if not os.path.exists(path):
+        return False
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            text = fh.read()
+        text = re.sub(r"(\.base_mps\s*=\s*)[0-9.]+f?", rf"\g<1>{base_mps:.2f}f", text)
+        text = re.sub(r"(\.steer_gain_p\s*=\s*)[0-9.]+f?", rf"\g<1>{kp:.2f}f", text)
+        text = re.sub(r"(\.steer_gain_d\s*=\s*)[0-9.]+f?", rf"\g<1>{kd_fw:.0f}.f", text)
+        if lat_acc is not None and lat_acc > 0:
+            text = re.sub(r"(\.lat_acc_max\s*=\s*)[0-9.]+f?", rf"\g<1>{lat_acc:.2f}f", text)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        return True
+    except Exception as e:
+        print(f"Warning: failed to update {path}: {e}")
+        return False
 
 
 def use_private_exe():
@@ -410,6 +435,174 @@ def report_search(s, courses, robot, extra, drives="1,4"):
     return "\n".join(lines)
 
 
+def run_endless(initial_speed, user_tracks, robot, axes, extra, jobs, reuse, refine, drives, hours=None, n_courses=3):
+    """Continuously tunes base speed and steering gains across rotating random courses for N hours or until Ctrl+C."""
+    t_start = time.time()
+    duration_sec = (hours * 3600.0) if hours else None
+    fast_num = drives.split(",")[-1].strip()
+
+    overall_best = None
+    round_no = 0
+    current_speed = initial_speed
+    consecutive_passes = 0
+    consecutive_fails = 0
+
+    endless_log = []
+    out_dir = os.path.join(ROOT, "runs", "tune", "endless")
+    os.makedirs(out_dir, exist_ok=True)
+
+    print("\n" + "=" * 78)
+    if hours:
+        print(f"=== LINE SIM ENDLESS AUTO-TUNER: RUNNING FOR {hours:g} HOUR(S) ({hours*60:.0f} MINS) ===")
+    else:
+        print("=== LINE SIM ENDLESS AUTO-TUNER: RUNNING INDEFINITELY (PRESS CTRL+C TO STOP) ===")
+    print(f"=== Start Speed: {initial_speed:.2f} m/s | Drives: 1 + {fast_num} | Parallel Jobs: {jobs} ===")
+    print(f"=== Robot: {os.path.basename(robot)} | Courses per round: {len(user_tracks) if user_tracks else n_courses} ===")
+    print("=" * 78 + "\n", flush=True)
+
+    try:
+        while True:
+            t_now = time.time()
+            elapsed = t_now - t_start
+            if duration_sec and elapsed >= duration_sec:
+                print(f"\n[TIME'S UP] Configured duration of {hours:g} hour(s) has elapsed.", flush=True)
+                break
+
+            round_no += 1
+            elapsed_str = time.strftime("%H:%M:%S", time.gmtime(elapsed))
+            if duration_sec:
+                remain_sec = max(0.0, duration_sec - elapsed)
+                remain_str = time.strftime("%H:%M:%S", time.gmtime(remain_sec))
+                progress_hdr = f"[{elapsed_str} / -{remain_str}]"
+            else:
+                progress_hdr = f"[{elapsed_str} / ENDLESS]"
+
+            # Course selection: use explicit user tracks, or generate fresh random tracks each round
+            if user_tracks:
+                current_courses = list(user_tracks)
+            else:
+                current_courses = []
+                cdir = os.path.join(out_dir, "courses")
+                os.makedirs(cdir, exist_ok=True)
+                round_seeds = [1000 * round_no + s for s in SEEDS[:n_courses]]
+                for s in round_seeds:
+                    c = os.path.join(cdir, f"course_r{round_no}_{s}.json")
+                    subprocess.run([EXE, "gen", "--seed", str(s), "--out", c], stdout=subprocess.DEVNULL, check=True)
+                    current_courses.append(c)
+
+            best_banner = (f"BEST: {overall_best['speed']:.2f} m/s ({describe(overall_best['pick'])})"
+                           if overall_best else "BEST: searching initial...")
+            print(f"{progress_hdr} Round #{round_no} | Testing base speed {current_speed:.2f} m/s | {best_banner}", flush=True)
+
+            s = search_at(round(current_speed, 3), current_courses, robot, axes, extra, jobs, reuse, refine, quiet=True, drives=drives)
+            t = s["final"]
+            passed = t["pick"] is not None and t["pick"] in t["safe"] and s["verified"]
+
+            if passed:
+                pick = t["pick"]
+                rs = t["cell"][pick]["runs"]
+                avg_lap = sum(x["lap_fast"] for x in rs) / len(rs)
+                score = t["cell"][pick]["score"]
+
+                is_new_best = False
+                if overall_best is None:
+                    is_new_best = True
+                elif current_speed > overall_best["speed"] + 1e-4:
+                    is_new_best = True
+                elif abs(current_speed - overall_best["speed"]) <= 1e-4 and score < overall_best["score"]:
+                    is_new_best = True
+
+                log_entry = (f"{progress_hdr} Round #{round_no} PASS @ {current_speed:.2f} m/s: {describe(pick)}, "
+                             f"lap {avg_lap:.2f}s, score {score:.1f}")
+                print(log_entry, flush=True)
+                endless_log.append(log_entry)
+
+                if is_new_best:
+                    overall_best = {
+                        "speed": current_speed,
+                        "pick": pick,
+                        "score": score,
+                        "lap_fast": avg_lap,
+                        "round": round_no,
+                        "rs": rs,
+                        "kd_fw": rs[0]["kd_fw"],
+                        "elapsed_sec": elapsed,
+                        "elapsed_str": elapsed_str
+                    }
+                    print("\n" + "*" * 78)
+                    print(f"*** [NEW OVERALL BEST] Base Speed: {current_speed:.2f} m/s | {describe(pick)}")
+                    print(f"*** Drive {fast_num} Lap: {avg_lap:.2f} s | Score: {score:.1f} | Menu: steer_gain_d {rs[0]['kd_fw']:.0f}")
+                    update_drive_c(current_speed, pick[0], rs[0]["kd_fw"], pick[2])
+                    with open(os.path.join(out_dir, "best.json"), "w", encoding="utf-8") as fh:
+                        json.dump({
+                            "speed": current_speed,
+                            "steer_kp": pick[0],
+                            "steer_kd_s": pick[1],
+                            "steer_gain_d": rs[0]["kd_fw"],
+                            "lat_acc_max": pick[2],
+                            "lap_time": avg_lap,
+                            "score": score,
+                            "round": round_no,
+                            "elapsed_str": elapsed_str
+                        }, fh, indent=2)
+                    print(f"*** Auto-saved to firmware/Main/Src/drive.c and {out_dir}/best.json")
+                    print("*" * 78 + "\n", flush=True)
+
+                consecutive_passes += 1
+                consecutive_fails = 0
+                current_speed = round(current_speed + 0.02, 3)
+            else:
+                why_txt = t["cell"][t["pick"]]["why"][0] if (t["pick"] and t["cell"][t["pick"]]["why"]) else "instability/stress fail"
+                log_entry = f"{progress_hdr} Round #{round_no} MISS @ {current_speed:.2f} m/s ({why_txt})"
+                print(log_entry, flush=True)
+                endless_log.append(log_entry)
+
+                consecutive_fails += 1
+                consecutive_passes = 0
+
+                if overall_best is not None:
+                    if consecutive_fails == 1:
+                        current_speed = round(overall_best["speed"] + 0.01, 3)
+                    else:
+                        current_speed = overall_best["speed"]
+                else:
+                    current_speed = max(0.5, round(current_speed - 0.05, 3))
+
+            with open(os.path.join(out_dir, "endless_history.log"), "w", encoding="utf-8") as fh:
+                fh.write("\n".join(endless_log) + "\n")
+
+    except KeyboardInterrupt:
+        print("\n\n[USER STOPPED] KeyboardInterrupt received. Safely stopping auto-tune...", flush=True)
+
+    total_elapsed = time.time() - t_start
+    total_elapsed_str = time.strftime("%H:%M:%S", time.gmtime(total_elapsed))
+
+    summary_lines = [
+        "",
+        "=" * 78,
+        f"=== ENDLESS AUTO-TUNE FINAL REPORT (Elapsed: {total_elapsed_str}, Rounds: {round_no}) ===",
+        "=" * 78,
+    ]
+    if overall_best:
+        p = overall_best["pick"]
+        summary_lines.append(f"HIGHEST VERIFIED BASE SPEED: {overall_best['speed']:.2f} m/s")
+        summary_lines.append(f"BEST GAINS: {describe(p)}")
+        summary_lines.append(f"  Robot Menu Parameter: steer_gain_d {overall_best['kd_fw']:.0f}")
+        summary_lines.append(f"  Drive {fast_num} Lap Time: {overall_best['lap_fast']:.2f} s (Score: {overall_best['score']:.1f})")
+        summary_lines.append(f"  Discovered at round #{overall_best['round']} ({overall_best['elapsed_str']})")
+        summary_lines.append("")
+        summary_lines.append(f"Permanent configuration saved to firmware/Main/Src/drive.c")
+        summary_lines.append(f"Detailed logs saved to {out_dir}/best.json and {out_dir}/endless_history.log")
+    else:
+        summary_lines.append("No configuration passed all courses and stress tests.")
+    summary_lines.append("=" * 78 + "\n")
+
+    summary_text = "\n".join(summary_lines)
+    print(summary_text, flush=True)
+    with open(os.path.join(out_dir, "final_summary.txt"), "w", encoding="utf-8") as fh:
+        fh.write(summary_text + "\n")
+
+
 def main():
     a = sys.argv[1:]
 
@@ -434,6 +627,9 @@ def main():
         tracks.append(os.path.abspath(opt("--track", None)))
     reuse = flag("--reuse")
     max_speed = flag("--max-speed")
+    hours_str = opt("--hours", None)
+    hours = float(hours_str) if hours_str is not None else None
+    endless = flag("--endless")
     robot = os.path.abspath(opt("--robot", os.path.join(ROOT, "robots", "full.json")))
     if not os.path.exists(robot):
         robot = os.path.join(ROOT, "robots", "default.json")
@@ -450,6 +646,10 @@ def main():
         sys.exit(__doc__)
     speed = float(a[0])
     use_private_exe()
+
+    if hours is not None or endless:
+        run_endless(speed, tracks, robot, axes, extra, jobs, reuse, refine, drives, hours=hours, n_courses=n_courses)
+        return
 
     if not tracks:
         if os.path.exists(REAL_COURSE):

@@ -166,11 +166,20 @@ python tools/compare_logs.py "real_logs/주행 로그" "real_logs/주행 로그/
 **격자 탐색 (창 없이)**:
 
 ```bash
+# 기본 속도 2.0 m/s에서 1회 탐색
 tools\.venv\Scripts\python.exe tools\autotune.py 2.0
+
+# 3시간 동안 무작위 맵을 계속 바꾸며 무한 한계 속도 탐색 (--hours N)
+tools\.venv\Scripts\python.exe tools\autotune.py 2.0 --hours 3
+
+# 중단(Ctrl+C)할 때까지 무제한 엔드리스 탐색 (--endless)
+tools\.venv\Scripts\python.exe tools\autotune.py 2.0 --endless
+
+# 통과 가능한 최고 기본 속도 한계 탐색
 tools\.venv\Scripts\python.exe tools\autotune.py 1.6 --max-speed
 ```
 
-VS Code: **Run Task → LineSim: Auto-tune steering gains (target speed)**. 코스는 `tracks/practice_board.json`이 있으면 그것, 없으면 무작위 코스 4개(고정 시드), `--track`으로 지정 가능. 기본적으로 실전 결승 주행인 **1회차 → 4회차(`--drives 1,4`)**를 평가하며, 2회차 주행으로 평가하려면 `--drives 1,2`를 지정합니다. kp 8–40 × kd 0–0.5 s(104조합)를 11개씩 병렬로 돌립니다. `--max-speed`는 통과하는 가장 높은 기본 속도를 찾습니다. 결과: `runs/tune/<속도>/result.txt`(kp × kd 표, 추천값, 3D 세션 명령), `runs/tune/max_speed.txt`.
+VS Code: **Run Task → LineSim: Auto-tune steering gains (target speed)**. 코스는 `tracks/practice_board.json`이 있으면 그것, 없으면 무작위 코스 4개(고정 시드), `--track`으로 지정 가능. 기본적으로 실전 결승 주행인 **1회차 → 4회차(`--drives 1,4`)**를 평가하며, 2회차 주행으로 평가하려면 `--drives 1,2`를 지정합니다. `--hours N`이나 `--endless`를 지정하면 매 라운드 새로운 무작위 ZETIN 코스를 만들어 과적합 없이 최고 속도를 올리며 최적 게인을 찾아 `firmware/Main/Src/drive.c`에 즉시 자동 저장합니다. kp 8–40 × kd 0–0.5 s(104조합)를 11개씩 병렬로 돌립니다. 결과: `runs/tune/endless/best.json`, `runs/tune/<속도>/result.txt`, `runs/tune/max_speed.txt`.
 
 **steer kd 단위**: 펌웨어의 `steer_pid`는 CMSIS `arm_pid_f32`이고 조향 주기(TIM14, `Core/Src/tim.c`에서 읽은 500 µs)마다 한 번 불립니다. Kd는 호출 사이 오차 변화에 곱해지므로 초 단위 kd를 쓰려면 **로봇 값 = kd ÷ 0.0005**(예: 0.3 s → 600)입니다. 시뮬레이터 화면과 도구는 초 단위로 보여주고 로봇 값을 함께 적습니다(`--set steer_kd_s=0.3`, 펌웨어 값 그대로는 `--set steer_kd=600`). 지금까지 쓰던 kd 0.2–1.3은 0.0001–0.00065 s라 미분이 거의 없습니다.
 
