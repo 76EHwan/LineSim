@@ -28,9 +28,9 @@ build.bat
 
 결과물: `build/Release/linesim.exe`
 
-## GitHub Codespaces 및 iPad 환경 (웹 브라우저 실행)
+## GitHub Codespaces 및 모바일 환경 (웹 브라우저 실행)
 
-iPad Air 3 등 태블릿 환경에서도 GitHub Codespaces를 통해 별도 설치 없이 브라우저(Safari/Chrome)에서 시뮬레이터를 실행할 수 있습니다.
+모바일 환경에서도 GitHub Codespaces를 통해 별도 설치 없이 브라우저(Safari/Chrome)에서 시뮬레이터를 실행할 수 있습니다.
 
 1. **Codespaces 생성**: GitHub 저장소에서 **Code → Codespaces → Create codespace on main**을 누르면 자동으로 컨테이너(`.devcontainer`)가 생성됩니다.
 2. **3D 실시간 뷰어 (noVNC)**:
