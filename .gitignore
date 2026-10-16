@@ -15,3 +15,6 @@ linesim_*.bmp
 # rebuilt from private run logs (tools/track_from_logs.py), kept local
 /tracks/practice_board.json
 /scenarios/practice_board.json
+powershell.cmd
+/scratch/
+/build-linux/

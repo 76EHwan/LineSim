@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "core/scenario.h"
 #include "core/simulation.h"
 #include "fw_bridge.h"
 #include "sim_mcu.h"
@@ -39,6 +40,7 @@ const ParamRow kRows[] = {
 	{"target shift", &FwDriveParams::target_shift, 0.05f, 0.0f, 1.0f, "%.2f"},
 	{"tgt curve gain", &FwDriveParams::target_curve_gain, 0.1f, 0.0f, 3.0f, "x%.2f"},   // drive 3/4, in curves
 	{"slalom ratio", &FwDriveParams::slalom_ratio, 0.05f, 0.0f, 1.0f, "%.2f"},          // drive 4, 45 deg segments
+	{"brake margin", &FwDriveParams::brake_margin_m, 0.01f, 0.0f, 1.0f, "%.2f m"},       // straight braking margin
 	{"pit-in dist", &FwDriveParams::pit_in_m, 0.01f, 0.0f, 1.0f, "%.2f m"},
 	{"yaw kp", &FwDriveParams::yaw_kp, 0.1f, 0.0f, 20.0f, "%.2f"},          // cascade (0 / 0 = plain PD)
 	{"yaw ki", &FwDriveParams::yaw_ki, 1.0f, 0.0f, 500.0f, "%.1f /s"},
@@ -91,8 +93,14 @@ void LiveView::handle_keys() {
 			show_trail_ = !show_trail_;
 			v_.clear_trail();
 			break;
-		case 'S': v_.toggle_shadows(); break;
-		case 'V': v_.toggle_inset(); break;
+		case 'S':
+			if (session)
+				session_key(k);
+			else
+				v_.toggle_shadows();
+			break;
+		case 'M':
+		case 'V': v_.cycle_inset(); break;
 		case 'P': {
 			char name[64];
 			std::snprintf(name, sizeof name, "linesim_shot_%03d.bmp", ++shot_no_);
@@ -103,6 +111,9 @@ void LiveView::handle_keys() {
 			if ((interactive_ || (session && !session->busy)) && on_reset) {
 				on_reset();
 				v_.clear_trail();
+				has_trail_pose_ = false;
+				live_beta_ = 0;
+				max_beta_seen_ = 0;
 			}
 			break;
 		case VK_ESCAPE: stop_ = true; break;
@@ -137,6 +148,7 @@ void LiveView::session_key(int k) {
 		v = std::clamp(v, r.lo, r.hi);
 		v = std::round(v / (r.step / 10)) * (r.step / 10);   // no float drift
 		store(s.params, r, v);
+		fwb_set_drive_params(&s.params);
 		break;
 	}
 	case VK_RETURN: {   // type the value of the selected row
@@ -166,19 +178,48 @@ void LiveView::session_key(int k) {
 		s.auto_tune = false;
 		break;
 	case 'A':   // endless auto-tune of steer kp / kd at the current base speed
-		if (s.auto_tune)
+		if (s.auto_tune) {
 			s.auto_tune = false;
-		else if (s.busy)
+		} else if (s.busy) {
 			s.message = "wait for the drive to finish (X stops it)";
-		else
+		} else {
 			s.auto_tune = true;
+			if (speed_ < 16.0)
+				speed_ = 32.0;   // Auto-tune defaults to high-speed turbo execution
+		}
 		break;
+	case 's':
+	case 'S': {  // save current session parameters directly to firmware/Main/Src/drive.c
+		std::string out_path;
+		fwb_set_drive_params(&s.params);
+		if (save_drive_params_to_firmware_file(s.params, &out_path)) {
+			char msg[160];
+			std::snprintf(msg, sizeof msg, "[SAVED to drive.c] v=%.2f kp=%.1f kd=%.0f shf=%.2f",
+				s.params.base_mps, s.params.steer_kp, s.params.steer_kd, s.params.target_shift);
+			s.message = msg;
+			std::printf("[SAVE] Current parameters saved to %s\n", out_path.c_str());
+		} else {
+			s.message = "[SAVE FAILED] Could not write to drive.c (check console)";
+		}
+		break;
+	}
 	default: break;
 	}
 }
 
 void LiveView::edit_key(int k) {
 	SessionState& s = *session;
+	if (k == 's' || k == 'S') {  // user pressed 's' while editing: commit typed value and save immediately
+		s.editing = false;
+		if (!s.edit_buf.empty() && s.edit_buf != ".") {
+			const ParamRow& r = kRows[s.selected];
+			const float v = static_cast<float>(std::atof(s.edit_buf.c_str()));
+			store(s.params, r, std::clamp(v, r.lo, r.hi));
+			fwb_set_drive_params(&s.params);
+		}
+		session_key(k);
+		return;
+	}
 	char c = 0;
 	if (k >= '0' && k <= '9')
 		c = static_cast<char>(k);
@@ -206,6 +247,7 @@ void LiveView::edit_key(int k) {
 		const ParamRow& r = kRows[s.selected];
 		const float v = static_cast<float>(std::atof(s.edit_buf.c_str()));
 		store(s.params, r, std::clamp(v, r.lo, r.hi));
+		fwb_set_drive_params(&s.params);
 		if (v < r.lo || v > r.hi) {
 			char msg[96];
 			std::snprintf(msg, sizeof msg, "%s: kept within %g .. %g", r.name, r.lo, r.hi);
@@ -268,7 +310,7 @@ void LiveView::run_session_script() {
 	for (const auto& n : names)
 		if (k == n.first)
 			vk = n.second;
-	if (vk == VK_OEM_PLUS || vk == VK_OEM_MINUS || vk == 'V' || vk == 'C' || vk == 'S' || vk == 'T' || vk == 'P') {
+	if (vk == VK_OEM_PLUS || vk == VK_OEM_MINUS || vk == 'V' || vk == 'C' || vk == 'T' || vk == 'P') {
 		v_.inject_key(vk);   // playback / view keys go through the normal key handling
 		return;
 	}
@@ -286,29 +328,51 @@ void LiveView::run_session_script() {
 
 std::string LiveView::session_panel() const {
 	const SessionState& s = *session;
-	std::string t = "course  " + s.map_name + "\n";
-	t += "expected " + s.expected + "\n\n";
+	std::string map_display = s.map_name;
+	if (map_display.size() > 24) {
+		size_t slash = map_display.find_last_of("/\\");
+		if (slash != std::string::npos)
+			map_display = map_display.substr(slash + 1);
+	}
+	std::string t = "course   " + map_display + "\n";
+	if (!s.expected.empty()) {
+		if (s.expected.size() > 36) {
+			t += "markers: ";
+			size_t col = 9;
+			for (size_t k = 0; k < s.expected.size(); ++k) {
+				t += s.expected[k];
+				col++;
+				if (col >= 35 && s.expected[k] == ' ') {
+					t += "\n         ";
+					col = 9;
+				}
+			}
+			t += "\n\n";
+		} else {
+			t += "markers: " + s.expected + "\n\n";
+		}
+	}
 	char buf[160];
 	for (int i = 0; i < kRowCount && s.tune_lines.empty(); i++) {   // auto-tune shows its own table instead
 		char val[64];
 		if (s.editing && i == s.selected) {
-			std::snprintf(val, sizeof val, "[%s_]   Enter set, Esc cancel", s.edit_buf.c_str());
+			std::snprintf(val, sizeof val, "[%s_]", s.edit_buf.c_str());
 		} else {
 			std::snprintf(val, sizeof val, kRows[i].fmt, shown(s.params, kRows[i]));
 			if (kRows[i].per_dt) {   // what goes into the robot's menu (driveData.steer_gain_d)
 				char fw[24];
-				std::snprintf(fw, sizeof fw, "  (fw %.0f)", s.params.*(kRows[i].field));
+				std::snprintf(fw, sizeof fw, " (fw %.0f)", s.params.*(kRows[i].field));
 				std::strncat(val, fw, sizeof val - std::strlen(val) - 1);
 			}
 		}
-		std::snprintf(buf, sizeof buf, "%s %-15s %s\n", i == s.selected ? ">" : "  ", kRows[i].name, val);
+		std::snprintf(buf, sizeof buf, "%s %-16s %s\n", i == s.selected ? ">" : " ", kRows[i].name, val);
 		t += buf;
 	}
 	t += "\n";
 	if (!s.tune_lines.empty()) {
 		for (const std::string& l : s.tune_lines)
 			t += l + "\n";
-		// the rest of the parameters (the tuner sets base speed, kp, kd, lat acc max, slalom ratio), three per line
+		// the rest of the parameters (the tuner sets base speed, kp, kd, lat acc max, slalom ratio), two per line
 		t += "\nother parameters\n";
 		int col = 0;
 		for (int i = 0; i < kRowCount; i++) {
@@ -318,16 +382,33 @@ std::string LiveView::session_panel() const {
 				continue;
 			char val[48];
 			std::snprintf(val, sizeof val, kRows[i].fmt, shown(s.params, kRows[i]));
-			std::snprintf(buf, sizeof buf, "%s%s %s", col ? "    " : "  ", kRows[i].name, val);
+			std::snprintf(buf, sizeof buf, "  %-14s %-9s", kRows[i].name, val);
 			t += buf;
-			col = (col + 1) % 3;
+			col = (col + 1) % 2;
 			t += col ? "" : "\n";
 		}
 		t += col ? "\n\n" : "\n";
 	}
-	size_t from = s.history.size() > (s.tune_lines.empty() ? 8u : 3u) ? s.history.size() - (s.tune_lines.empty() ? 8 : 3) : 0;
-	for (size_t i = from; i < s.history.size(); i++)
-		t += s.history[i] + "\n";
+	size_t from = s.history.size() > (s.tune_lines.empty() ? 6u : 3u) ? s.history.size() - (s.tune_lines.empty() ? 6 : 3) : 0;
+	for (size_t i = from; i < s.history.size(); i++) {
+		const std::string& h = s.history[i];
+		if (h.size() > 38) {
+			size_t p = 0;
+			while (p < h.size()) {
+				if (h.size() - p <= 38) {
+					t += h.substr(p) + "\n";
+					break;
+				}
+				size_t cut = h.rfind(' ', p + 36);
+				if (cut == std::string::npos || cut <= p)
+					cut = p + 36;
+				t += h.substr(p, cut - p) + "\n  ";
+				p = (h[cut] == ' ') ? cut + 1 : cut;
+			}
+		} else {
+			t += h + "\n";
+		}
+	}
 	if (!s.message.empty())
 		t += s.message + "\n";
 	return t;
@@ -345,8 +426,8 @@ void LiveView::render(double t_sim, const std::string& phase) {
 	const double v_wheels = 0.5 * (robot_.wheel_speed(0) + robot_.wheel_speed(1)) * rp.wheel_radius;
 	const double slip = v_wheels > 0.1 ? 100.0 * (1.0 - v_body / v_wheels) : 0.0;
 	char actual[48] = "";
-	if (achieved_ > 0 && achieved_ < 0.9 * speed_)   // the simulation cannot keep up with the request
-		std::snprintf(actual, sizeof actual, " (running x%.2g)", achieved_);
+	if (achieved_ > 0 && (speed_ >= 16.0 || achieved_ < 0.9 * speed_))
+		std::snprintf(actual, sizeof actual, " (running x%.1f)", achieved_);
 	// command: the speed the firmware sends the wheels to (base after pos_atten and the grip limit)
 	char cut[48] = "";
 	if (tm.current_base_mps > 0.2f && tm.cmd_mps < 0.97f * tm.current_base_mps)
@@ -358,19 +439,27 @@ void LiveView::render(double t_sim, const std::string& phase) {
 		"speed     %.2f m/s   wheels %.2f m/s   slip %.0f %%\n"
 		"fw base   %.2f / target %.2f m/s   command %.2f m/s%s\n"
 		"line      %+.1f mm (sensor bar)   target_pos %+.2f\n"
-		"yaw (fw)  %+.1f deg   markers %d%s\n"
+		"yaw (fw)  %+.1f deg   beta %4.1f deg (max %.1f)%s\n"
+		"markers   %d%s\n"
 		"iq        L %+.2f A   R %+.2f A",
 		phase.c_str(), speed_, actual, paused_ ? ", PAUSED" : "", show_trail_ ? "" : "   (trail off)", v_body, v_wheels,
-		slip, tm.current_base_mps, tm.target_base_mps, tm.cmd_mps, cut, lat * 1000, tm.target_pos, tm.yaw_deg, tm.marker_count,
-		tm.lost ? "   LINE LOST" : "", robot_.iq(0), robot_.iq(1));
+		slip, tm.current_base_mps, tm.target_base_mps, tm.cmd_mps, cut, lat * 1000, tm.target_pos,
+		tm.yaw_deg, live_beta_, max_beta_seen_,
+		live_beta_ >= 25.0 ? (std::fabs(lat * 1000.0) > 70.0 ? "  [OVERSTEER - OFF LIMIT!]" : "  [DRIFT: LIMIT OK]")
+		                   : (std::fabs(lat * 1000.0) > 70.0 ? "  [LINE DEPARTED! (>70mm)]" : ""),
+		tm.marker_count, tm.lost ? "   LINE LOST" : "", robot_.iq(0), robot_.iq(1));
 	hud.status = buf;
+	hud.live_beta = live_beta_;
+	hud.live_lat_mm = lat * 1000.0;
 	// lap list: one course as before (drive 1-4); several (auto-tune) under a heading each, with the
 	// drives that have a record
 	auto lap_line = [](int d, const LapSlot& l) {
 		// best first: fixed width, so the columns line up in the proportional font
-		char best[48] = "best   -              ";
-		if (l.best_no)
-			std::snprintf(best, sizeof best, "best #%-3d %6.2f s", l.best_no, l.best_s);
+		char best[48];
+		if (!l.best_tag.empty())
+			std::snprintf(best, sizeof best, "best %-8s %6.2f s", l.best_tag.c_str(), l.best_s);
+		else
+			std::snprintf(best, sizeof best, "%-22s", "best   -");
 		char line[240];
 		std::snprintf(line, sizeof line, "drive %d   %s    %s", d + 1, best, l.last.empty() ? "" : l.last.c_str());
 		return std::string(line);
@@ -388,13 +477,13 @@ void LiveView::render(double t_sim, const std::string& phase) {
 					hud.status += "\n   " + lap_line(d, c.d[d]);
 		}
 	}
-	hud.help = "Space pause   +/- sim speed   C camera   V sensor view   S shadows   T trail on/off   P screenshot   Esc quit\n"
-	           "mouse: left drag rotate, right drag pan, wheel zoom";
+	hud.help = "C: camera (Follow/Sensor/Top Map)   M: minimap (Track Map/Sensor/Off)   T: trail (orange=drift, magenta=line-out, red=oversteer off)\n"
+	           "Space: pause   +/-: speed   S: save to drive.c   P: screenshot   Esc: quit   (mouse: drag, wheel)";
 	if (interactive_)
 		hud.help = "Arrows: U/D/L/R buttons   Enter: K button   R: robot back to start\n" + hud.help;
 	if (session) {
-		hud.help = "1-4: run drive 1-4   N: new random course   X: stop the robot   R: robot to start\n"
-		           "Up/Down: pick parameter   Left/Right: change it (Shift: x10)   Enter: type a value   A: auto-tune speed, kp/kd, lat max, slalom (endless)\n" + hud.help;
+		hud.help = "1-4: run drive 1-4   N: new random course   X: stop   R: robot to start   S: save to drive.c\n"
+		           "Up/Down: pick parameter   Left/Right: change (Shift: x10)   Enter: type value   A: auto-tune (endless)\n" + hud.help;
 		hud.panel = session_panel();
 	}
 
@@ -431,17 +520,46 @@ void LiveView::render(double t_sim, const std::string& phase) {
 void LiveView::tick(double t_sim, bool fast_forward, const std::string& phase) {
 	if (stop_)
 		return;
-	if (!v_.pump()) {
-		stop_ = true;
-		return;
+
+	double now = wall();
+	if (now - last_pump_ >= 0.015) {   // ~60 Hz: rate-limit Win32 message pumping
+		last_pump_ = now;
+		if (!v_.pump()) {
+			stop_ = true;
+			return;
+		}
+		handle_keys();
+		run_session_script();
 	}
-	handle_keys();
-	run_session_script();
+
+	const bool fast = (speed_ >= 2.0 || (session && session->auto_tune));
+	v_.set_fast_mode(fast);
+
 	if (++trail_div_ >= 10) {
 		trail_div_ = 0;
 		Pose2 p = robot_.pose();
-		if (show_trail_ && robot_.forward_speed() > 0.02)
-			v_.add_trail(p.x, p.y, robot_.forward_speed());
+		double beta = 0.0;
+		if (has_trail_pose_) {
+			double dx = p.x - last_trail_pose_.x;
+			double dy = p.y - last_trail_pose_.y;
+			double dist = std::hypot(dx, dy);
+			if (dist > 1e-4 && robot_.forward_speed() > 0.4) {
+				double th_traj = std::atan2(dy, dx) * 180.0 / 3.14159265358979323846;
+				double th_veh = p.th * 180.0 / 3.14159265358979323846;
+				beta = std::abs(std::remainder(th_veh - th_traj, 360.0));
+			}
+		}
+		last_trail_pose_ = p;
+		has_trail_pose_ = true;
+		live_beta_ = beta;
+		if (robot_.forward_speed() > 0.4)
+			max_beta_seen_ = std::max(max_beta_seen_, beta);
+		if (show_trail_ && robot_.forward_speed() > 0.02) {
+			double lat = 0, s = 0;
+			const RobotParams& rp = robot_.params();
+			track_.nearest(robot_.body_to_ground(rp.sensor_x, 0.0), &lat, &s);
+			v_.add_trail(p.x, p.y, robot_.forward_speed(), beta, lat * 1000.0);
+		}
 	}
 	last_t_ = t_sim;
 	if (auto_shot_ > 0 && t_sim >= next_auto_shot_ && !fast_forward) {
@@ -452,7 +570,6 @@ void LiveView::tick(double t_sim, bool fast_forward, const std::string& phase) {
 		last_frame_ = -1;   // render now
 	}
 
-	double now = wall();
 	if (fast_forward) {
 		if (now - last_frame_ > 0.05) {
 			render(t_sim, phase + "   [fast forward]");
@@ -476,37 +593,53 @@ void LiveView::tick(double t_sim, bool fast_forward, const std::string& phase) {
 		rate_wall_ = 0;
 		return;
 	}
-	double target = anchor_wall_ + (t_sim - anchor_sim_) / speed_;
-	// Behind: don't try to catch up. Far ahead: the anchor is stale, never sleep on it.
-	if (now - target > 0.25 || target - now > 0.5 + 0.002 / speed_) {
-		reanchor(t_sim);
-		target = now;
-	}
-	// Fast playback: fewer frames, so the simulation gets the CPU (x4: 60 fps ... x256: 4 fps), and
-	// above x1 drawing never takes more than a third of the time (slow GPU, laptop on battery).
-	const double frame_dt = std::min(0.5, std::max(std::min(0.25, std::max(1.0, speed_ / 4) / fps_),
-	                                               speed_ > 1 ? 2 * last_render_ : 0.0));
-	for (;;) {
-		now = wall();
+
+	// Turbo mode: decoupled unconstrained physics at max CPU throughput
+	if (speed_ >= 4.0 || (session && session->auto_tune)) {
+		// Render at ~5-8 FPS in turbo/auto-tune mode (0.15s - 0.20s) so GPU rendering
+		// takes only ~10-15% of wall time, leaving 85-90% CPU for 6x-8x simulation physics.
+		const double frame_dt = (speed_ >= 16.0 || (session && session->auto_tune)) ? 0.20 : 0.12;
 		if (now - last_frame_ >= frame_dt) {
-			if (rate_wall_ > 0 && now - rate_wall_ >= 0.5) {   // simulated seconds per wall second
+			if (rate_wall_ > 0 && now - rate_wall_ >= 0.5) {
 				achieved_ = (t_sim - rate_sim_) / (now - rate_wall_);
 				rate_wall_ = 0;
+				if (std::getenv("LINESIM_PROFILE"))
+					std::fprintf(stderr, "[SPEED] achieved = %.1fx real time\n", achieved_);
 			}
 			if (rate_wall_ <= 0) {
 				rate_wall_ = now;
 				rate_sim_ = t_sim;
 			}
 			render(t_sim, phase);
-			last_frame_ = wall();   // from the end of the frame: slow frames must not starve the simulation
+			last_frame_ = wall();
 		}
-		if (now >= target)
-			break;
-		double wait = std::min(target - now, frame_dt);
+		reanchor(t_sim);
+		return;
+	}
+
+	// Normal paced mode (< 4x)
+	double target = anchor_wall_ + (t_sim - anchor_sim_) / speed_;
+	if (now - target > 0.25 || target - now > 0.5 + 0.002 / speed_) {
+		reanchor(t_sim);
+		target = now;
+	}
+	const double frame_dt = 1.0 / 60.0;
+	if (now - last_frame_ >= frame_dt) {
+		if (rate_wall_ > 0 && now - rate_wall_ >= 0.5) {   // simulated seconds per wall second
+			achieved_ = (t_sim - rate_sim_) / (now - rate_wall_);
+			rate_wall_ = 0;
+		}
+		if (rate_wall_ <= 0) {
+			rate_wall_ = now;
+			rate_sim_ = t_sim;
+		}
+		render(t_sim, phase);
+		last_frame_ = wall();   // from the end of the frame: slow frames must not starve the simulation
+	}
+	if (now < target) {
+		double wait = target - now;
 		if (wait > 0.002)
 			Sleep(static_cast<DWORD>(wait * 1000));
-		else
-			break;
 	}
 }
 

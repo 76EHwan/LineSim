@@ -5,8 +5,8 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 17)
 
-if(NOT MSVC)
-  message(FATAL_ERROR "LineSim currently builds with MSVC (Windows Fibers, fixed-address flash mapping).")
+if(NOT MSVC AND NOT MINGW AND NOT (CMAKE_SYSTEM_NAME STREQUAL "Windows"))
+  message(FATAL_ERROR "LineSim currently builds with MSVC or MinGW-w64 targeting Windows (Windows Fibers, fixed-address flash mapping).")
 endif()
 
 set(FW_DIR      ${CMAKE_SOURCE_DIR}/firmware)
@@ -108,13 +108,27 @@ set(FW_INCLUDE_DIRS
   ${FW_DIR}/Drivers/BSP/SDcard
   ${FW_DIR}/Drivers/BSP/w25qxx
 )
-set(FW_C_WARNINGS /wd4244 /wd4305 /wd4267 /wd4311 /wd4312 /wd4018 /wd4146 /wd4090 /wd4101 /wd4996 /wd4068 /wd4113)
+if(MSVC)
+  set(FW_C_WARNINGS /wd4244 /wd4305 /wd4267 /wd4311 /wd4312 /wd4018 /wd4146 /wd4090 /wd4101 /wd4996 /wd4068 /wd4113)
+  set(FW_OPT_PRELUDE /FIsim_fw_prelude.h)
+  set(FW_OPT_COMPAT  /FIsim_compat.h)
+  set(FW_BASE_OPTS   /utf-8 /W3)
+  set(LINESIM_OPTS   /utf-8 /W3 /wd4996)
+  set(LINESIM_LINKS  /LARGEADDRESSAWARE:NO /DYNAMICBASE:NO /BASE:0x20000000 /STACK:8388608)
+else()
+  set(FW_C_WARNINGS -Wno-pointer-to-int-cast -Wno-int-to-pointer-cast -Wno-unused-function -Wno-unused-variable -Wno-unknown-pragmas -Wno-deprecated-declarations)
+  set(FW_OPT_PRELUDE -include sim_fw_prelude.h)
+  set(FW_OPT_COMPAT  -include sim_compat.h)
+  set(FW_BASE_OPTS   -fno-strict-aliasing)
+  set(LINESIM_OPTS   -Wno-deprecated-declarations)
+  set(LINESIM_LINKS  -Wl,--image-base,0x20000000 -Wl,--stack,8388608 -Wl,--dynamicbase,no)
+endif()
 
 # The firmware itself: every loop condition yields to the simulator (sim_fw_prelude.h).
 add_library(firmware STATIC ${FW_PATCHED_SOURCES})
 target_include_directories(firmware PUBLIC ${FW_INCLUDE_DIRS})
 target_compile_definitions(firmware PUBLIC _CRT_SECURE_NO_WARNINGS SIM_FW_REAL_MAIN_H="${FW_DIR}/Core/Inc/main.h")
-target_compile_options(firmware PRIVATE /utf-8 /W3 /FIsim_fw_prelude.h ${FW_C_WARNINGS})
+target_compile_options(firmware PRIVATE ${FW_BASE_OPTS} ${FW_OPT_PRELUDE} ${FW_C_WARNINGS})
 
 # HAL / device stand-ins and the simulator bridge: plain C, no loop hook.
 add_library(fw_shim STATIC
@@ -125,17 +139,25 @@ add_library(fw_shim STATIC
 )
 target_include_directories(fw_shim PUBLIC ${FW_INCLUDE_DIRS})
 target_compile_definitions(fw_shim PUBLIC _CRT_SECURE_NO_WARNINGS SIM_FW_REAL_MAIN_H="${FW_DIR}/Core/Inc/main.h")
-target_compile_options(fw_shim PRIVATE /utf-8 /W3 /FIsim_compat.h ${FW_C_WARNINGS})
+target_compile_options(fw_shim PRIVATE ${FW_BASE_OPTS} ${FW_OPT_COMPAT} ${FW_C_WARNINGS})
 
 # ---------------------------------------------------------------------------
 # MuJoCo (official prebuilt binaries)
 # ---------------------------------------------------------------------------
 add_library(mujoco SHARED IMPORTED)
-set_target_properties(mujoco PROPERTIES
-  IMPORTED_LOCATION ${MUJOCO_DIR}/bin/mujoco.dll
-  IMPORTED_IMPLIB   ${MUJOCO_DIR}/lib/mujoco.lib
-  INTERFACE_INCLUDE_DIRECTORIES ${MUJOCO_DIR}/include
-)
+if(MSVC)
+  set_target_properties(mujoco PROPERTIES
+    IMPORTED_LOCATION ${MUJOCO_DIR}/bin/mujoco.dll
+    IMPORTED_IMPLIB   ${MUJOCO_DIR}/lib/mujoco.lib
+    INTERFACE_INCLUDE_DIRECTORIES ${MUJOCO_DIR}/include
+  )
+else()
+  set_target_properties(mujoco PROPERTIES
+    IMPORTED_LOCATION ${MUJOCO_DIR}/bin/mujoco.dll
+    IMPORTED_IMPLIB   ${MUJOCO_DIR}/bin/mujoco.dll
+    INTERFACE_INCLUDE_DIRECTORIES ${MUJOCO_DIR}/include
+  )
+endif()
 
 # ---------------------------------------------------------------------------
 # Simulator
@@ -157,11 +179,9 @@ add_executable(linesim
 )
 target_include_directories(linesim PRIVATE sim ${SHIM_DIR}/include ${CMAKE_BINARY_DIR}/generated)
 target_link_libraries(linesim PRIVATE firmware fw_shim mujoco opengl32 gdi32 user32 winmm)
-target_compile_options(linesim PRIVATE /utf-8 /W3 /wd4996)
 target_compile_definitions(linesim PRIVATE _CRT_SECURE_NO_WARNINGS NOMINMAX WIN32_LEAN_AND_MEAN)
-# The firmware stores function pointers and RAM addresses in 32-bit integers
-# (menu.c "Last Used", HAL_FLASH_Program). Keep the whole process below 2 GB.
-target_link_options(linesim PRIVATE /LARGEADDRESSAWARE:NO /DYNAMICBASE:NO /BASE:0x20000000 /STACK:8388608)
+target_compile_options(linesim PRIVATE ${LINESIM_OPTS})
+target_link_options(linesim PRIVATE ${LINESIM_LINKS})
 
 add_custom_command(TARGET linesim POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_if_different ${MUJOCO_DIR}/bin/mujoco.dll $<TARGET_FILE_DIR:linesim>)

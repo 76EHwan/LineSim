@@ -46,6 +46,7 @@ typedef struct {
 	float yaw_kp, yaw_ki, lat_acc_max;   /* cascade steering (firmware with DRIVE_HAS_CASCADE_STEER, else ignored) */
 	float target_curve_gain;             /* drive 3/4 target_pos x gain in curves (DRIVE_HAS_TARGET_CURVE_GAIN) */
 	float slalom_ratio;                  /* drive 4: 45 deg segments at base + (max - base) x ratio (DRIVE_HAS_SLALOM_RATIO) */
+	float brake_margin_m;                /* straight braking margin before curve [m] (DRIVE_HAS_BRAKE_MARGIN) */
 	int   fan_en;
 } FwDriveParams;
 void fwb_get_drive_params(FwDriveParams *p);

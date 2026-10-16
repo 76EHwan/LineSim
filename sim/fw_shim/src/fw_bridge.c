@@ -211,6 +211,11 @@ void fwb_get_drive_params(FwDriveParams *p) {
 #else
 	p->slalom_ratio = 0.0f;
 #endif
+#ifdef DRIVE_HAS_BRAKE_MARGIN
+	p->brake_margin_m = driveData.brake_margin_m;
+#else
+	p->brake_margin_m = 0.06f;
+#endif
 }
 
 void fwb_set_drive_params(const FwDriveParams *p) {
@@ -234,6 +239,9 @@ void fwb_set_drive_params(const FwDriveParams *p) {
 #endif
 #ifdef DRIVE_HAS_SLALOM_RATIO
 	driveData.slalom_ratio = p->slalom_ratio;
+#endif
+#ifdef DRIVE_HAS_BRAKE_MARGIN
+	driveData.brake_margin_m = p->brake_margin_m;
 #endif
 }
 

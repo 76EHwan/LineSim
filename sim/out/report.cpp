@@ -52,15 +52,15 @@ void write_csv(const fs::path& p, const DriveResult& d) {
 	std::ofstream f(p);
 	f << "t,x,y,yaw_deg,v,wz_dps,lat_mm,s,pitch_deg,wheel_v_l,wheel_v_r,iq_l,iq_r,"
 	     "fw_target_base,fw_current_base,fw_target_pos,fw_odom,fw_yaw,fw_omega_t_l,fw_omega_t_r,"
-	     "fw_omega_m_l,fw_omega_m_r,fw_iq_cmd_l,fw_iq_cmd_r,fw_lost,fw_markers,body_contact,fw_cmd_mps\n";
+	     "fw_omega_m_l,fw_omega_m_r,fw_iq_cmd_l,fw_iq_cmd_r,fw_lost,fw_markers,body_contact,fw_cmd_mps,beta_deg\n";
 	char line[512];
 	for (const Sample& s : d.samples) {
 		std::snprintf(line, sizeof line,
 			"%.4f,%.5f,%.5f,%.3f,%.4f,%.2f,%.2f,%.4f,%.3f,%.4f,%.4f,%.4f,%.4f,"
-			"%.4f,%.4f,%.4f,%.4f,%.3f,%.2f,%.2f,%.2f,%.2f,%.4f,%.4f,%d,%d,%d,%.4f\n",
+			"%.4f,%.4f,%.4f,%.4f,%.3f,%.2f,%.2f,%.2f,%.2f,%.4f,%.4f,%d,%d,%d,%.4f,%.2f\n",
 			s.t, s.x, s.y, s.yaw_deg, s.v, s.wz_dps, s.lat_mm, s.s, s.pitch_deg, s.wheel_v[0], s.wheel_v[1], s.iq[0],
 			s.iq[1], s.tgt_base, s.cur_base, s.tgt_pos, s.odom, s.yaw_fw, s.omega_t[0], s.omega_t[1], s.omega_m[0],
-			s.omega_m[1], s.iq_cmd[0], s.iq_cmd[1], s.lost, s.markers, s.contact, s.cmd_mps);
+			s.omega_m[1], s.iq_cmd[0], s.iq_cmd[1], s.lost, s.markers, s.contact, s.cmd_mps, s.beta_deg);
 		f << line;
 	}
 }
@@ -138,11 +138,123 @@ void write_track_svg(const fs::path& p, const Track& track, const ScenarioResult
 			  << "\" stroke-linecap=\"round\" opacity=\"0.9\"/>\n";
 		}
 	}
+
+	struct OversteerEvent {
+		int drive;
+		double x, y;
+		double peak_beta;
+		double v;
+	};
+	std::vector<OversteerEvent> events;
+	double max_overall_beta = 0.0;
+
+	// Oversteer highlight lines on the track
+	for (size_t di = 0; di < res.drives.size(); di++) {
+		const DriveResult& d = res.drives[di];
+		const size_t step = 10;
+		bool in_event = false;
+		double cur_peak_beta = 0.0;
+		size_t cur_peak_idx = 0;
+
+		for (size_t i = 0; i + step < d.samples.size(); i += step) {
+			const Sample& a = d.samples[i];
+			const Sample& b = d.samples[i + step];
+			double dx = b.x - a.x;
+			double dy = b.y - a.y;
+			double dist = std::hypot(dx, dy);
+			double v_seg = 0.5 * (a.v + b.v);
+			double beta = 0.0;
+			if (dist > 1e-4 && v_seg >= 0.5) {
+				double th_traj = std::atan2(dy, dx) * 180.0 / 3.14159265358979323846;
+				double th_veh = b.yaw_deg;
+				beta = std::abs(std::remainder(th_veh - th_traj, 360.0));
+			}
+			max_overall_beta = std::max(max_overall_beta, beta);
+
+			if (beta >= 20.0) {
+				if (beta >= 28.0) {
+					// Severe oversteer: wide glowing red/magenta band
+					o << "<line x1=\"" << a.x << "\" y1=\"" << a.y << "\" x2=\"" << b.x << "\" y2=\"" << b.y
+					  << "\" stroke=\"#ff1744\" stroke-width=\"" << 8.0 / scale
+					  << "\" stroke-linecap=\"round\" opacity=\"0.6\"/>\n";
+					o << "<line x1=\"" << a.x << "\" y1=\"" << a.y << "\" x2=\"" << b.x << "\" y2=\"" << b.y
+					  << "\" stroke=\"#ff5252\" stroke-width=\"" << 4.0 / scale
+					  << "\" stroke-linecap=\"round\" opacity=\"0.95\"/>\n";
+				} else {
+					// Warning: orange band
+					o << "<line x1=\"" << a.x << "\" y1=\"" << a.y << "\" x2=\"" << b.x << "\" y2=\"" << b.y
+					  << "\" stroke=\"#ff9100\" stroke-width=\"" << 5.0 / scale
+					  << "\" stroke-linecap=\"round\" opacity=\"0.85\"/>\n";
+				}
+
+				if (!in_event) {
+					in_event = true;
+					cur_peak_beta = beta;
+					cur_peak_idx = i;
+				} else if (beta > cur_peak_beta) {
+					cur_peak_beta = beta;
+					cur_peak_idx = i;
+				}
+			} else {
+				if (in_event) {
+					if (cur_peak_beta >= 25.0) {
+						const Sample& pk = d.samples[cur_peak_idx];
+						events.push_back({d.n, pk.x, pk.y, cur_peak_beta, pk.v});
+					}
+					in_event = false;
+				}
+			}
+		}
+		if (in_event && cur_peak_beta >= 25.0) {
+			const Sample& pk = d.samples[cur_peak_idx];
+			events.push_back({d.n, pk.x, pk.y, cur_peak_beta, pk.v});
+		}
+	}
+
+	// Oversteer target pins on the map
+	for (const auto& ev : events) {
+		double r_out = (ev.peak_beta >= 32.0 ? 10.0 : 8.0) / scale;
+		double r_in = 3.0 / scale;
+		o << "<circle cx=\"" << ev.x << "\" cy=\"" << ev.y << "\" r=\"" << r_out
+		  << "\" fill=\"#ff1744\" stroke=\"#ffffff\" stroke-width=\"" << 2.0 / scale << "\" opacity=\"0.95\"/>\n";
+		o << "<circle cx=\"" << ev.x << "\" cy=\"" << ev.y << "\" r=\"" << r_in << "\" fill=\"#ffffff\"/>\n";
+	}
+
 	if (!res.drives.empty() && !res.drives.front().samples.empty()) {
 		const Sample& st = res.drives.front().samples.front();
 		o << "<circle cx=\"" << st.x << "\" cy=\"" << st.y << "\" r=\"" << 6.0 / scale << "\" fill=\"#4caf50\"/>\n";
 	}
 	o << "</g>\n";
+
+	// Oversteer badges in screen coordinates (upright, crisp text)
+	for (size_t ei = 0; ei < events.size(); ei++) {
+		const auto& ev = events[ei];
+		double sx = (ev.x - x0) * scale;
+		double sy = (y1 - ev.y) * scale;
+		double box_w = 145.0;
+		double box_h = 24.0;
+		double box_x = (sx + box_w + 16 > W) ? sx - box_w - 14 : sx + 14;
+		double box_y = (sy - 12 < 10) ? sy + 8 : sy - 12;
+		for (size_t prev = 0; prev < ei; prev++) {
+			double psx = (events[prev].x - x0) * scale;
+			double psy = (y1 - events[prev].y) * scale;
+			if (std::hypot(sx - psx, sy - psy) < 40.0)
+				box_y += 28.0;
+		}
+		char badge[128];
+		std::snprintf(badge, sizeof badge, "D%d beta=%.1f deg (%.1fm/s)", ev.drive, ev.peak_beta, ev.v);
+
+		o << "<g class=\"oversteer-badge\">\n";
+		o << "<line x1=\"" << sx << "\" y1=\"" << sy << "\" x2=\""
+		  << (box_x > sx ? box_x : box_x + box_w) << "\" y2=\"" << box_y + box_h / 2
+		  << "\" stroke=\"#ff1744\" stroke-width=\"1.5\" stroke-dasharray=\"3 3\"/>\n";
+		o << "<rect x=\"" << box_x << "\" y=\"" << box_y << "\" width=\"" << box_w << "\" height=\"" << box_h
+		  << "\" rx=\"4\" fill=\"#d50000\" stroke=\"#ffffff\" stroke-width=\"1.2\" opacity=\"0.95\"/>\n";
+		o << "<text x=\"" << box_x + 8 << "\" y=\"" << box_y + 16
+		  << "\" fill=\"#ffffff\" font-size=\"11\" font-weight=\"bold\">" << badge << "</text>\n";
+		o << "</g>\n";
+	}
+
 	// legend
 	o << "<g transform=\"translate(16," << H + 18 << ")\">\n";
 	for (int k = 0; k < 100; k++)
@@ -153,6 +265,16 @@ void write_track_svg(const fs::path& p, const Track& track, const ScenarioResult
 	o << "<text x=\"210\" y=\"11\" fill=\"#ddd\">" << buf << "</text>\n";
 	std::string desc = track.name() + " (" + std::to_string(static_cast<int>(track.length() * 100) / 100.0).substr(0, 5) + " m)";
 	o << "<text x=\"420\" y=\"11\" fill=\"#aaa\">" << desc << "</text>\n";
+
+	// Oversteer indicator in legend
+	o << "<line x1=\"600\" y1=\"6\" x2=\"630\" y2=\"6\" stroke=\"#ff1744\" stroke-width=\"5\" stroke-linecap=\"round\"/>\n";
+	o << "<circle cx=\"615\" cy=\"6\" r=\"4\" fill=\"#ff1744\" stroke=\"#fff\" stroke-width=\"1.5\"/>\n";
+	o << "<text x=\"640\" y=\"11\" fill=\"#ff5252\" font-weight=\"bold\">Oversteer (beta &gt;= 25 deg)</text>\n";
+	if (max_overall_beta > 0) {
+		char bbuf[64];
+		std::snprintf(bbuf, sizeof bbuf, "max beta: %.1f deg", max_overall_beta);
+		o << "<text x=\"840\" y=\"11\" fill=\"" << (max_overall_beta >= 25.0 ? "#ff5252" : "#aaa") << "\">" << bbuf << "</text>\n";
+	}
 	o << "</g>\n</svg>\n";
 }
 
@@ -210,6 +332,7 @@ void write_drive_plot(const fs::path& p, const DriveResult& d) {
 	Series v{"v", "#4fc3f7"}, cb{"fw base", "#ffb74d"}, tb{"fw target", "#777"};
 	Series cm{"fw command (after grip limit / pos atten)", "#fff176"};
 	Series lat{"lateral error [mm]", "#e57373"}, tp{"target_pos x10", "#81c784"};
+	Series beta{"sideslip beta [deg]", "#ff5252"}, wz{"yaw rate / 10 [dps]", "#ba68c8"};
 	Series il{"iq L", "#ba68c8"}, ir{"iq R", "#4db6ac"};
 	for (const Sample& s : d.samples) {
 		t.push_back(s.t - d.t_start);
@@ -219,20 +342,24 @@ void write_drive_plot(const fs::path& p, const DriveResult& d) {
 		cm.y.push_back(s.cmd_mps);
 		lat.y.push_back(s.lat_mm);
 		tp.y.push_back(s.tgt_pos * 10);
+		beta.y.push_back(s.beta_deg);
+		wz.y.push_back(s.wz_dps / 10.0f);
 		il.y.push_back(s.iq[0]);
 		ir.y.push_back(s.iq[1]);
 	}
-	const double W = 1200, ph = 220, px = 70, pw = W - 90;
+	const double W = 1200, ph = 190, px = 70, pw = W - 90;
 	std::ofstream o(p);
 	o.precision(6);
-	o << "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100%\" viewBox=\"0 0 " << W << " " << 3 * (ph + 30) + 40
+	o << "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"100%\" viewBox=\"0 0 " << W << " " << 4 * (ph + 30) + 40
 	  << "\" font-family=\"sans-serif\" font-size=\"12\">\n<rect width=\"100%\" height=\"100%\" fill=\"#15171a\"/>\n";
 	char title[160];
-	std::snprintf(title, sizeof title, "drive %d: speed [m/s] (%s, lap %.2f s)", d.n, d.outcome.c_str(), d.lap_time_fw);
+	std::snprintf(title, sizeof title, "drive %d: speed [m/s] (%s, lap %.2f s, max beta %.1f deg)",
+		d.n, d.outcome.c_str(), d.lap_time_fw, d.max_beta_deg);
 	plot_panel(o, px, 20, pw, ph, t, {tb, cb, cm, v}, title);
 	plot_panel(o, px, 20 + (ph + 30), pw, ph, t, {lat, tp}, "line tracking (sensor-bar center vs. line)");
-	plot_panel(o, px, 20 + 2 * (ph + 30), pw, ph, t, {il, ir}, "motor q-axis current [A]");
-	o << "<text x=\"" << px + pw / 2 << "\" y=\"" << 3 * (ph + 30) + 30
+	plot_panel(o, px, 20 + 2 * (ph + 30), pw, ph, t, {beta, wz}, "sideslip beta [deg] (oversteer) & yaw rate / 10 [dps]");
+	plot_panel(o, px, 20 + 3 * (ph + 30), pw, ph, t, {il, ir}, "motor q-axis current [A]");
+	o << "<text x=\"" << px + pw / 2 << "\" y=\"" << 4 * (ph + 30) + 30
 	  << "\" text-anchor=\"middle\" fill=\"#999\">time since drive start [s]</text>\n</svg>\n";
 }
 
@@ -262,13 +389,15 @@ void write_reports(const ScenarioOptions& opt, const ScenarioResult& res, const 
 		const FwDriveParams& p = res.params;
 		h << "<p>base " << p.base_mps << " m/s, max " << p.max_mps << " m/s, accel " << p.accel << ", decel " << p.decel
 		  << ", steer kp " << p.steer_kp << ", kd " << p.steer_kd << ", target_shift " << p.target_shift << "</p>\n";
-		h << "<table><tr><th>drive</th><th>outcome</th><th>lap [s]</th><th>max v</th><th>max lat [mm]</th>"
-		     "<th>rms lat [mm]</th><th>markers</th></tr>\n";
+		h << "<table><tr><th>drive</th><th>outcome</th><th>lap [s]</th><th>dist [m]</th><th>max v</th><th>max lat [mm]</th>"
+		     "<th>rms lat [mm]</th><th>max beta [deg]</th><th>markers</th></tr>\n";
 		for (const DriveResult& d : res.drives) {
 			char row[256];
+			const char* outcome_color = (d.outcome == "finished (oversteer)") ? "#ff9100" : (d.outcome == "finished" ? "#4caf50" : "#ff5252");
 			std::snprintf(row, sizeof row,
-				"<tr><td>%d</td><td class=\"l\">%s</td><td>%.2f</td><td>%.2f</td><td>%.1f</td><td>%.1f</td><td class=\"l\">",
-				d.n, d.outcome.c_str(), d.lap_time_fw, d.max_v, d.max_lat_mm, d.rms_lat_mm);
+				"<tr><td>%d</td><td class=\"l\" style=\"color:%s;font-weight:bold\">%s</td><td>%.2f</td><td>%.2f</td><td>%.2f</td><td>%.1f</td><td>%.1f</td><td style=\"color:%s;font-weight:bold\">%.1f</td><td class=\"l\">",
+				d.n, outcome_color, d.outcome.c_str(), d.lap_time_fw, d.dist_m, d.max_v, d.max_lat_mm, d.rms_lat_mm,
+				d.max_beta_deg >= 25.0 ? "#ff5252" : "#ddd", d.max_beta_deg);
 			h << row;
 			for (const FwMarker& m : d.markers)
 				h << marker_name(m.type) << " ";
@@ -300,7 +429,7 @@ void write_reports(const ScenarioOptions& opt, const ScenarioResult& res, const 
 		j << "    {\"drive\": " << d.n << ", \"outcome\": \"" << d.outcome << "\", \"lap_time_fw\": " << d.lap_time_fw
 		  << ", \"duration\": " << d.t_end - d.t_start << ", \"distance_m\": " << d.dist_m
 		  << ", \"max_speed\": " << d.max_v << ", \"max_lat_mm\": " << d.max_lat_mm << ", \"rms_lat_mm\": "
-		  << d.rms_lat_mm << ", \"markers\": \"";
+		  << d.rms_lat_mm << ", \"max_beta_deg\": " << d.max_beta_deg << ", \"markers\": \"";
 		for (const FwMarker& m : d.markers)
 			j << marker_name(m.type) << " ";
 		j << "\", \"marker_check\": \"" << esc(d.marker_check) << "\", \"lcd\": \"" << esc(d.lcd) << "\"}" << (i + 1 < res.drives.size() ? "," : "") << "\n";
@@ -309,16 +438,16 @@ void write_reports(const ScenarioOptions& opt, const ScenarioResult& res, const 
 }
 
 void print_summary(const ScenarioResult& res) {
-	std::printf("\n drive | outcome     | lap [s] | max v | max lat [mm] | rms lat [mm] | marker check | markers\n");
-	std::printf(" ------+-------------+---------+-------+--------------+--------------+--------------+--------\n");
+	std::printf("\n drive | outcome              | lap [s] | dist [m] | max v | max lat [mm] | rms lat [mm] | max beta [deg] | marker check | markers\n");
+	std::printf(" ------+----------------------+---------+----------+-------+--------------+--------------+----------------+--------------+--------\n");
 	for (const DriveResult& d : res.drives) {
 		std::string mk;
 		for (const FwMarker& m : d.markers) {
 			mk += marker_name(m.type);
 			mk += ' ';
 		}
-		std::printf("   %d   | %-11s | %7.2f | %5.2f | %12.1f | %12.1f | %-12s | %s\n", d.n, d.outcome.c_str(), d.lap_time_fw,
-			d.max_v, d.max_lat_mm, d.rms_lat_mm, d.marker_check.c_str(), mk.c_str());
+		std::printf("   %d   | %-20s | %7.2f | %8.2f | %5.2f | %12.1f | %12.1f | %14.1f | %-12s | %s\n", d.n, d.outcome.c_str(), d.lap_time_fw,
+			d.dist_m, d.max_v, d.max_lat_mm, d.rms_lat_mm, d.max_beta_deg, d.marker_check.c_str(), mk.c_str());
 	}
 	std::printf("\n simulated %.1f s in %.1f s wall clock (%.1fx real time)\n", res.sim_seconds, res.wall_seconds,
 		res.wall_seconds > 0 ? res.sim_seconds / res.wall_seconds : 0.0);

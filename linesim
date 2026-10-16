@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# LineSim wrapper script for Linux / Codespaces
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Find linesim.exe binary (check build/Release, build-linux, or build)
+EXE=""
+if [ -f "$HERE/build/Release/linesim.exe" ]; then
+    EXE="$HERE/build/Release/linesim.exe"
+elif [ -f "$HERE/build-linux/linesim.exe" ]; then
+    EXE="$HERE/build-linux/linesim.exe"
+elif [ -f "$HERE/build/linesim.exe" ]; then
+    EXE="$HERE/build/linesim.exe"
+fi
+
+if [ -z "$EXE" ]; then
+    echo "[LineSim] linesim.exe not found. Attempting MinGW build..."
+    bash "$HERE/scripts/build_mingw.sh" || {
+        echo "[LineSim ERROR] Build failed and no pre-built linesim.exe found." >&2
+        exit 1
+    }
+    EXE="$HERE/build-linux/linesim.exe"
+fi
+
+# If running GUI 'view' mode on Linux, ensure DISPLAY is set (default to :1 for desktop-lite noVNC)
+if [[ "$*" == *"view"* ]] && [ -z "$DISPLAY" ]; then
+    export DISPLAY=:1
+fi
+
+exec wine "$EXE" "$@"

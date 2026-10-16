@@ -10,7 +10,10 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <memory>
+#include <random>
+#include <regex>
 
 #include "core/json.h"
 #include "core/simulation.h"
@@ -117,6 +120,34 @@ double slip_pct(const std::vector<Sample>& smp) {
 	return n ? 100.0 * sum / n : 0.0;
 }
 
+// Returns true if vehicle experienced significant oversteer / spin-out / drift (sideslip beta > max_beta_deg)
+bool check_oversteer(const DriveResult& d, double max_beta_deg = 0.0, double min_v_mps = 0.6) {
+	if (max_beta_deg <= 0.0) {
+		static const double env_deg = std::getenv("LINESIM_MAX_BETA") ? std::atof(std::getenv("LINESIM_MAX_BETA")) : 25.0;
+		max_beta_deg = env_deg;
+	}
+	if (d.max_beta_deg > 0.0 && d.max_beta_deg < max_beta_deg)
+		return false;
+	if (d.samples.size() < 10)
+		return false;
+	for (size_t i = 1; i < d.samples.size(); ++i) {
+		const double dt = d.samples[i].t - d.samples[i - 1].t;
+		if (dt < 1e-5)
+			continue;
+		const double dx = d.samples[i].x - d.samples[i - 1].x;
+		const double dy = d.samples[i].y - d.samples[i - 1].y;
+		const double v = std::hypot(dx, dy) / dt;
+		if (v < min_v_mps)
+			continue;
+		const double th_traj = std::atan2(dy, dx) * 180.0 / 3.14159265358979323846;
+		const double th_veh = d.samples[i].yaw_deg;
+		const double diff = std::remainder(th_veh - th_traj, 360.0);
+		if (std::abs(diff) > max_beta_deg)
+			return true;
+	}
+	return false;
+}
+
 // Session auto-tune (A key): base speed, steer kp / kd (seconds), lat_acc_max and slalom_ratio for
 // the race. Endless, until A is pressed again.
 //
@@ -151,46 +182,105 @@ constexpr int kTuneCourses = 3;
 class GainTuner {
 public:
 	struct Set {
-		double kp = 0, kd = 0;     // steering PD, kd in seconds
-		double lat = 0, sl = 0;    // lat_acc_max [m/s2], slalom_ratio
+		double kp = 26.0, kd = 0.20;       // steering PD, kd in seconds
+		double lat = 13.4, sl = 0.05;      // lat_acc_max [m/s2], slalom_ratio
+		double target_shift = 0.40;         // target_shift_val
+		double target_curve_gain = 1.50;    // target_curve_gain
+		double brake_margin = 0.14;         // brake_margin_m [m]
+		double pos_atten = 0.0;             // pos_atten_gain (fixed 0.0)
+		double yaw_kp = 0.35, yaw_ki = 1.0; // yaw cascade
+		double accel = 10.0, decel = 10.0;  // accel/decel
+		double max_mps = 10.0;              // max speed
 	};
+
+	struct TrialRecord {
+		Set set;
+		double v = 0;
+		double score = 1e6;
+		double pace = 0;
+		bool safe = true;     // true if not oversteered or crashed
+		bool pass = false;
+		int state = 0;        // 1: lost/oversteer, 2: markers, 3: pass, 4: slower
+		std::string text;
+	};
+
+	struct Cell {
+		Set set;
+		int state = 0;        // 0 pending, 1 lost/oversteer, 2 markers, 3 pass, 4 slower
+		double score = 0, pace = 0;
+		double dist_diff = 0; // mean diff from nominal track length [m] (negative = cut inside)
+		double pred_mu = 0, pred_sigma = 0, p_safe = 1.0;
+		std::string role;     // "Exploit", "Global-Opt", "Damping", "Explore", etc.
+		std::string laps;
+		std::vector<double> lap_times; // 4th drive lap times [c1, c2, c3]
+	};
+
 	bool active = false;
 
 	void start(double v, const Set& from) {
 		active = true;
-		v_ = std::max(0.3, v);
-		dv_ = 0.1;
+		min_v_ = std::max(0.3, v);
+		v_ = min_v_;
+		dv_ = 0.08;
 		best_v_ = best_pace_ = 0;
+		best_dist_diff_ = 0;
 		best_laps_.clear();
+		best_lap_times_.clear();
 		best_ = from;
-		if (best_.lat <= 0)
-			best_.lat = 14.0;
-		gains_ = {best_.kp, best_.kd, std::max(0.5, best_.kp * 0.1), std::max(0.01, best_.kd * 0.15)};
-		curve_ = {best_.lat, best_.sl, 1.0, 0.03};
-		kind_ = 0;
+		best_.pos_atten = 0.0;
+		if (best_.lat <= 0) best_.lat = 13.4;
+		if (best_.target_shift < 0.20) best_.target_shift = 0.40;
+		if (best_.target_curve_gain < 1.10) best_.target_curve_gain = 1.50;
+		if (best_.brake_margin <= 0) best_.brake_margin = 0.14;
+		if (best_.accel <= 0) best_.accel = 10.0;
+		if (best_.decel <= 0) best_.decel = 10.0;
+		if (best_.max_mps <= 0) best_.max_mps = 10.0;
 		round_ = 0;
 		since_best_ = 0;
 		passed_at_v_ = false;
+		just_got_best_ = false;
 		last_.clear();
 		log_.clear();
 		plan();
 	}
+
 	double speed() const { return v_; }
+	size_t current_candidate_no() const { return db_.size() + 1; }
 	bool has_best() const { return best_v_ > 0; }
 	double best_v() const { return best_v_; }
-	double best_pace() const { return best_pace_; }   // drive 4 pace of BEST [s / 10 m], 0 = none yet
+	double best_pace() const { return best_pace_; }
+	double best_dist_diff() const { return best_dist_diff_; }
 	const std::string& best_laps() const { return best_laps_; }
-	const Set& best() const { return best_; }          // the starting values until something passes
+	const std::vector<double>& best_lap_times() const { return best_lap_times_; }
+	bool has_best_laps() const { return !best_lap_times_.empty(); }
+
+	// Returns true ONLY when all courses renew (beat) their 4th drive lap time
+	bool all_courses_improved(const std::vector<double>& cur_laps) const {
+		if (best_lap_times_.empty())
+			return true;   // Initial baseline
+		if (cur_laps.size() != best_lap_times_.size())
+			return false;
+		for (size_t i = 0; i < cur_laps.size(); i++) {
+			if (cur_laps[i] >= best_lap_times_[i] - 1e-4)
+				return false;   // Even if a single course fails to improve, reject!
+		}
+		return true;
+	}
+
+	const Set& best() const { return best_; }
 	const Set& next() const { return cells_[done_].set; }
 	bool round_complete() const { return done_ == cells_.size(); }
-	// drives without a new BEST before a course is replaced, counted like the lap list's #numbers
-	// (every drive 1, drive 4 and stress drive; LINESIM_TUNE_STALE=n overrides, for tests)
+	bool just_found_best() {
+		bool res = just_got_best_;
+		just_got_best_ = false;
+		return res;
+	}
+
 	static int stale_drives() {
-		static const int n = std::getenv("LINESIM_TUNE_STALE") ? std::max(1, std::atoi(std::getenv("LINESIM_TUNE_STALE"))) : 100;
+		static const int n = std::getenv("LINESIM_TUNE_STALE") ? std::max(1, std::atoi(std::getenv("LINESIM_TUNE_STALE"))) : 60;
 		return n;
 	}
-	// Time for another course: no new BEST for stale_drives() drives, and no pass in this round that
-	// would still become one when the round ends.
+
 	bool stale() const {
 		if (since_best_ < stale_drives())
 			return false;
@@ -200,163 +290,290 @@ public:
 		return true;
 	}
 
-	// lost: lost the line or unstable with more lag. pass: every drive right and stable. A pass with
-	// a pace no better than BEST is dropped (state 4). drives: how many the trial took.
-	void record(bool lost, bool pass, double score, double pace, const std::string& laps, int drives,
-		const std::string& text) {
+	// AI Gaussian Process RBF kernel
+	double kernel(const Set& a, double va, const Set& b, double vb) const {
+		const double d_kp = (a.kp - b.kp) / 3.0;
+		const double d_kd = (a.kd - b.kd) / 0.030;
+		const double d_lat = (a.lat - b.lat) / 1.5;
+		const double d_sl = (a.sl - b.sl) / 0.03;
+		const double d_tshift = (a.target_shift - b.target_shift) / 0.05;
+		const double d_tcgain = (a.target_curve_gain - b.target_curve_gain) / 0.10;
+		const double d_brake = (a.brake_margin - b.brake_margin) / 0.03;
+		const double d_yaw_p = (a.yaw_kp - b.yaw_kp) / 0.10;
+		const double d_v = (va - vb) / 0.15;
+		const double d2 = d_kp * d_kp + d_kd * d_kd + d_lat * d_lat + d_sl * d_sl +
+		                  d_tshift * d_tshift + d_tcgain * d_tcgain + d_brake * d_brake +
+		                  d_yaw_p * d_yaw_p + d_v * d_v;
+		return std::exp(-0.5 * d2);
+	}
+
+	struct AIPrediction {
+		double mu = 40.0;
+		double sigma = 1.0;
+		double p_safe = 0.95;
+		double acq = 40.0;
+	};
+
+	AIPrediction predict(const Set& s, double v, double kappa = 1.8) const {
+		AIPrediction p;
+		if (db_.empty()) {
+			p.mu = 35.0;
+			p.sigma = 1.0;
+			p.p_safe = 0.95;
+			p.acq = p.mu - kappa * p.sigma * 8.0;
+			return p;
+		}
+		double w_sum = 0.0, weighted_score = 0.0, density = 0.0;
+		double safe_w = 0.0, total_w = 0.0;
+		for (const auto& tr : db_) {
+			double k = kernel(s, v, tr.set, tr.v);
+			density += k;
+			total_w += k;
+			if (tr.safe) {
+				safe_w += k;
+				if (tr.score < 400.0) {
+					w_sum += k;
+					weighted_score += k * tr.score;
+				}
+			}
+		}
+		p.p_safe = (safe_w + 0.4) / (total_w + 0.8);
+		p.sigma = 1.0 / (1.0 + 0.45 * density);
+		if (w_sum > 1e-4) {
+			p.mu = weighted_score / w_sum;
+		} else {
+			p.mu = (best_pace_ > 0 ? best_pace_ * 10.0 + 10.0 : 35.0);
+		}
+		// Constrained Lower Confidence Bound
+		const double risk_penalty = (1.0 - p.p_safe) * 60.0;
+		p.acq = p.mu - kappa * p.sigma * 8.0 + risk_penalty;
+		return p;
+	}
+
+	void record(bool lost, bool pass, double score, double pace, double dist_diff, const std::string& laps,
+		const std::vector<double>& lap_times, int drives, const std::string& text) {
 		Cell& c = cells_[done_];
-		const bool slower = pass && best_pace_ > 0 && pace >= best_pace_;
+		const bool improved_all = pass && all_courses_improved(lap_times);
+		const bool slower = pass && !improved_all;
 		c.state = slower ? 4 : pass ? 3 : lost ? 1 : 2;
 		c.score = score;
 		c.pace = pace;
+		c.dist_diff = dist_diff;
 		c.laps = laps;
+		c.lap_times = lap_times;
 		since_best_ += drives;
-		log_.push_back(fmt("%.2f %s%s  %s%s", v_, c.extra ? "fit " : "", label(c.set).c_str(), text.c_str(),
-			slower ? fmt(" >= %.3f: dropped", best_pace_).c_str() : ""));
-		if (log_.size() > 4)
+
+		// Add to AI Experience Database
+		TrialRecord tr;
+		tr.set = c.set;
+		tr.v = v_;
+		tr.score = score;
+		tr.pace = pace;
+		tr.safe = !lost && (text.find("oversteer") == std::string::npos);
+		tr.pass = pass && improved_all;
+		tr.state = c.state;
+		tr.text = text;
+		db_.push_back(tr);
+
+		char log_buf[160];
+		std::snprintf(log_buf, sizeof log_buf, "#%02zu [%.4s] kp%.1f/d%.0f: %s%s",
+			db_.size(), c.role.c_str(), c.set.kp, c.set.kd / 0.0005, text.c_str(),
+			slower ? " (slow)" : "");
+		log_.push_back(log_buf);
+		if (log_.size() > 5)
 			log_.erase(log_.begin());
 		done_++;
-		if (done_ == 9)
-			add_fitted_point();
 	}
 
 	void finish_round() {
 		round_++;
-		auto cell = [&](int i, int j) -> const Cell& { return cells_[i * 3 + j]; };
-		auto stable = [&](int i, int j) {   // no block neighbour lost the line / was unstable
-			if (cell(i, j).state == 1)
-				return false;
-			const int d[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
-			for (const auto& o : d) {
-				int a = i + o[0], b = j + o[1];
-				if (a >= 0 && a < 3 && b >= 0 && b < 3 && cell(a, b).state == 1)
-					return false;
+		// Find best pass in this round where ALL courses were renewed
+		const Cell* winner = nullptr;
+		for (const auto& c : cells_) {
+			if (c.state == 3) {
+				if (!winner || c.score < winner->score)
+					winner = &c;
 			}
-			return true;
-		};
-		// candidates: grid passes with stable neighbours, and the fitted point when its nearest grid
-		// point is stable
-		std::vector<size_t> cand;
-		for (int i = 0; i < 3; i++)
-			for (int j = 0; j < 3; j++)
-				if (cell(i, j).state == 3 && stable(i, j))
-					cand.push_back(static_cast<size_t>(i * 3 + j));
-		if (cells_.size() > 9 && cells_[9].state == 3 &&
-			stable(static_cast<int>(std::lround(fit_u_)) + 1, static_cast<int>(std::lround(fit_v_)) + 1))
-			cand.push_back(9);
-		double best = 1e9;
-		for (size_t k : cand)
-			best = std::min(best, cells_[k].score);
-		auto a_of = [&](const Set& s) { return kind_ == 0 ? s.kp : s.lat; };
-		auto b_of = [&](const Set& s) { return kind_ == 0 ? s.kd : s.sl; };
-		const Cell* p = nullptr;   // gentlest within 1 %: lower kp / lat, then lower kd / slalom
-		size_t pk = 0;
-		for (size_t k : cand)
-			if (cells_[k].score <= best * 1.01 &&
-				(!p || a_of(cells_[k].set) < a_of(p->set) - 1e-12 ||
-					(std::fabs(a_of(cells_[k].set) - a_of(p->set)) < 1e-12 && b_of(cells_[k].set) < b_of(p->set)))) {
-				p = &cells_[k];
-				pk = k;
-			}
-		Axes& ax = kind_ == 0 ? gains_ : curve_;
-		const char* what = kind_ == 0 ? "gains" : "curve entry";
-		if (p) {   // every pass beat BEST's pace (slower ones were dropped)
+		}
+
+		if (winner) {
 			best_v_ = v_;
-			best_ = p->set;
-			best_pace_ = p->pace;
-			best_laps_ = p->laps;
+			best_ = winner->set;
+			best_pace_ = winner->pace;
+			best_laps_ = winner->laps;
+			best_lap_times_ = winner->lap_times;
+			best_dist_diff_ = winner->dist_diff;
 			passed_at_v_ = true;
 			since_best_ = 0;
-			if (pk == 4 || pk == 9) {   // the middle or the fitted point: look closer
-				ax.da *= 0.5;
-				ax.db *= 0.5;
-			}
-			ax.a = a_of(best_);
-			ax.b = b_of(best_);
-			last_ = fmt("%.3f m/s %s: new BEST %.3f s/10m (%s%s)", v_, what, p->pace, pk == 9 ? "fit " : "",
-				label(p->set).c_str());
+			just_got_best_ = true;
+			last_ = fmt("%.3f m/s [%s]: ALL %zu COURSES RENEWED! (laps: %s, dist %+.2fm)", v_, winner->role.c_str(),
+				winner->lap_times.size(), winner->laps.c_str(), best_dist_diff_);
 		} else {
-			ax.da *= 0.5;
-			ax.db *= 0.5;
-			last_ = fmt("%.3f m/s %s: no faster stable pass, finer steps", v_, what);
+			last_ = fmt("%.3f m/s: explored (no candidate renewed all courses)", v_);
 		}
-		// smallest steps: kp 0.25, kd 0.005 s, lat 0.25 m/s2, slalom 0.01
-		ax.da = std::max(ax.da, 0.25);
-		ax.db = std::max(ax.db, kind_ == 0 ? 0.005 : 0.01);
-		if (kind_ == 0) {   // curve entry next, same speed
-			kind_ = 1;
-		} else {            // both pairs done at this speed
-			kind_ = 0;
-			if (passed_at_v_) {
-				last_ += fmt(" -> try %.3f", v_ + dv_);
-				v_ += dv_;
-			} else if (best_v_ > 0) {
-				if (dv_ > 0.01 + 1e-9)
-					dv_ = std::max(0.01, dv_ * 0.5);
-				last_ += fmt(" -> %.3f", best_v_ + dv_);
-				v_ = best_v_ + dv_;
-			} else {
-				last_ += " -> slower";
-				v_ = std::max(0.3, v_ - dv_);
-			}
+
+		// Speed policy: Never drop below user's starting base speed (min_v_)
+		if (passed_at_v_) {
+			v_ += dv_;
 			passed_at_v_ = false;
+			last_ += fmt(" -> try %.2f m/s", v_);
+		} else if (best_v_ > 0) {
+			dv_ = std::max(0.02, dv_ * 0.7);
+			v_ = std::max(min_v_, best_v_ + dv_);
+			last_ += fmt(" -> aim %.2f m/s", v_);
+		} else {
+			// Do NOT drop below the user's starting base speed!
+			// If 4th drive can run at base speed, 1st drive can also run at base speed.
+			// Keep tuning gains at min_v_ until a passing combination is found!
+			v_ = min_v_;
+			last_ += fmt(" -> re-tuning at %.2f m/s", v_);
 		}
+
 		plan();
+	}
+
+	void plan() {
+		cells_.clear();
+		done_ = 0;
+		std::mt19937 rng(1337 + static_cast<unsigned>(round_) * 31);
+		std::normal_distribution<double> norm(0.0, 1.0);
+		std::uniform_real_distribution<double> unif(0.0, 1.0);
+
+		// Always keep current best as 1st anchor
+		Cell c0;
+		c0.set = best_;
+		c0.role = "Best-Anchor";
+		AIPrediction p0 = predict(c0.set, v_);
+		c0.pred_mu = p0.mu; c0.pred_sigma = p0.sigma; c0.p_safe = p0.p_safe;
+		cells_.push_back(c0);
+
+		// Generate 150 Monte Carlo candidate parameters in continuous space
+		struct Candidate {
+			Set set;
+			AIPrediction pred;
+			std::string role;
+		};
+		std::vector<Candidate> cand_pool;
+
+		// 1. Local perturbation around best (Exploitation)
+		for (int i = 0; i < 60; i++) {
+			Set s = best_;
+			s.kp = std::clamp(best_.kp + norm(rng) * 1.5, 16.0, 42.0);
+			s.kd = std::clamp(best_.kd + norm(rng) * 0.015, 0.08, 0.45);
+			s.lat = std::clamp(best_.lat + norm(rng) * 0.5, 10.0, 15.0); // 타이어 한계 내 안전한 상한 (15.0)
+			s.sl = std::clamp(best_.sl + norm(rng) * 0.02, 0.01, 0.25);
+			s.target_shift = std::clamp(best_.target_shift + norm(rng) * 0.04, 0.25, 0.65);
+			s.target_curve_gain = std::clamp(best_.target_curve_gain + norm(rng) * 0.08, 1.25, 2.10);
+			s.brake_margin = std::clamp(best_.brake_margin + norm(rng) * 0.02, 0.06, 0.30);
+			s.yaw_kp = std::clamp(best_.yaw_kp + norm(rng) * 0.03, 0.10, 0.70);
+			s.yaw_ki = std::clamp(best_.yaw_ki + norm(rng) * 0.15, 0.0, 3.0);
+			s.pos_atten = 0.0; // pos_atten_gain 고정 (0.0)
+			AIPrediction pr = predict(s, v_, 1.2);
+			cand_pool.push_back({s, pr, "AI-Exploit"});
+		}
+
+		// 2. Anti-Oversteer & Braking Margin 특화 후보 (곡선 진입 전 여유 감속 + 인코스 선행 바이어스)
+		for (int i = 0; i < 45; i++) {
+			Set s = best_;
+			s.brake_margin = 0.10 + unif(rng) * 0.15;        // 0.10 ~ 0.25 m 여유 있는 직선 감속
+			s.target_shift = 0.35 + unif(rng) * 0.22;        // 0.35 ~ 0.57 인코스 선행 타겟
+			s.target_curve_gain = 1.35 + unif(rng) * 0.55;   // 1.35 ~ 1.90 곡선 구간 타겟 배율
+			s.lat = 11.5 + unif(rng) * 2.8;                  // 11.5 ~ 14.3 접지 한계 감속으로 안정성 유지
+			s.kp = 22.0 + unif(rng) * 12.0;
+			s.kd = 0.15 + unif(rng) * 0.20;
+			s.sl = 0.03 + unif(rng) * 0.08;
+			s.yaw_kp = 0.25 + unif(rng) * 0.25;
+			s.yaw_ki = 0.8 + unif(rng) * 1.0;
+			s.pos_atten = 0.0; // pos_atten_gain 고정 (0.0)
+			AIPrediction pr = predict(s, v_, 1.5);
+			cand_pool.push_back({s, pr, "AI-AntiOver"});
+		}
+
+		// 3. Global Exploration (전역 탐색)
+		for (int i = 0; i < 45; i++) {
+			Set s;
+			s.kp = 18.0 + unif(rng) * 20.0;
+			s.kd = 0.10 + unif(rng) * 0.25;
+			s.lat = 11.0 + unif(rng) * 4.0;
+			s.sl = 0.02 + unif(rng) * 0.15;
+			s.target_shift = 0.30 + unif(rng) * 0.28;        // 0.30 ~ 0.58
+			s.target_curve_gain = 1.25 + unif(rng) * 0.70;   // 1.25 ~ 1.95
+			s.brake_margin = 0.08 + unif(rng) * 0.18;
+			s.yaw_kp = 0.15 + unif(rng) * 0.40;
+			s.yaw_ki = 0.5 + unif(rng) * 1.5;
+			s.pos_atten = 0.0; // pos_atten_gain 고정 (0.0)
+			s.accel = best_.accel;
+			s.decel = best_.decel;
+			s.max_mps = best_.max_mps;
+			AIPrediction pr = predict(s, v_, 2.2);
+			cand_pool.push_back({s, pr, "AI-Explore"});
+		}
+
+		// Sort candidate pool by Acquisition score (lowest is best)
+		std::sort(cand_pool.begin(), cand_pool.end(), [](const Candidate& a, const Candidate& b) {
+			return a.pred.acq < b.pred.acq;
+		});
+
+		// Select top 5 diverse candidates
+		for (const auto& cd : cand_pool) {
+			if (cells_.size() >= 6)
+				break;
+			bool too_close = false;
+			for (const auto& exist : cells_) {
+				if (std::fabs(exist.set.kp - cd.set.kp) < 0.4 &&
+					std::fabs(exist.set.kd - cd.set.kd) < 0.008 &&
+					std::fabs(exist.set.lat - cd.set.lat) < 0.3 &&
+					std::fabs(exist.set.brake_margin - cd.set.brake_margin) < 0.015 &&
+					std::fabs(exist.set.target_shift - cd.set.target_shift) < 0.02) {
+					too_close = true;
+					break;
+				}
+			}
+			if (too_close)
+				continue;
+
+			Cell c;
+			c.set = cd.set;
+			c.pred_mu = cd.pred.mu;
+			c.pred_sigma = cd.pred.sigma;
+			c.p_safe = cd.pred.p_safe;
+			c.role = cd.role;
+			cells_.push_back(c);
+		}
 	}
 
 	std::vector<std::string> status(double dt, const std::string& courses) const {
 		std::vector<std::string> v;
-		v.push_back(fmt("AUTO-TUNE  round %d: %s  (A: stop, keep BEST)", round_ + 1,
-			kind_ == 0 ? "gains kp x kd" : "curve entry lat acc max x slalom"));
-		v.push_back(fmt("testing  %.3f m/s   pair %zu / %zu   no new BEST for %d / %d drives", v_,
-			std::min(done_ + 1, cells_.size()), cells_.size(), since_best_, stale_drives()));
-		v.push_back("courses  " + courses);
-		v.push_back(fmt("lag stress x%.2g / x%.3g, speed step %.3f", kStressLag[0], kStressLag[1], dv_));
-		v.push_back("lat = curve rms [mm], pace = drive 4 s / 10 m");
-		if (best_v_ > 0)
-			v.push_back(fmt("BEST  %.3f m/s  kp %.2f  kd %.4f s (fw %.0f)  lat max %.2f  slalom %.2f  4th %.3f s/10m (%s)",
-				best_v_, best_.kp, best_.kd, best_.kd / dt, best_.lat, best_.sl, best_pace_, best_laps_.c_str()));
-		else
-			v.push_back("BEST  none yet");
-		v.push_back(last_);
-		// this round's block: . pending, x lost / unstable, m markers, s passed but slower than BEST,
-		// number = score
-		const Axes& ax = kind_ == 0 ? gains_ : curve_;
-		std::string h = kind_ == 0 ? "kp \\ kd  " : "lat \\ sl  ";
-		for (int j = 0; j < 3; j++)
-			h += kind_ == 0 ? fmt("%8.4f", cells_[j].set.kd) : fmt("%8.2f", cells_[j].set.sl);
-		h += kind_ == 0 ? fmt("   (steps %.2f / %.4f)", ax.da, ax.db) : fmt("   (steps %.2f / %.2f)", ax.da, ax.db);
-		v.push_back(h);
-		auto mark = [&](const Cell& c, int w) {
-			return c.state == 0 ? fmt("%*s", w, ".") : c.state == 1 ? fmt("%*s", w, "x") : c.state == 2 ? fmt("%*s", w, "m")
-				: c.state == 4 ? fmt("%*s", w, "s") : fmt("%*.1f", w, c.score);
-		};
-		for (int i = 0; i < 3; i++) {
-			const Set& rs = cells_[i * 3].set;
-			std::string r = fmt("%7.2f  ", kind_ == 0 ? rs.kp : rs.lat);
-			for (int j = 0; j < 3; j++)
-				r += mark(cells_[i * 3 + j], 8);
-			v.push_back(r);
+		v.push_back(fmt("AI BAYESIAN TUNER  R#%d  (A: stop/save)", round_ + 1));
+		v.push_back("Surrogate: RBF Gaussian Process + Safety");
+		int safe_cnt = 0, over_cnt = 0;
+		for (const auto& tr : db_) {
+			if (tr.safe) safe_cnt++; else over_cnt++;
 		}
-		if (cells_.size() > 9)
-			v.push_back("fit  " + label(cells_[9].set) + "  " + mark(cells_[9], 1));
+		v.push_back(fmt("Dataset: %zu runs (%d safe, %d oversteer)", db_.size(), safe_cnt, over_cnt));
+		v.push_back("courses: " + courses);
+		if (best_v_ > 0)
+			v.push_back(fmt("BEST: %.2fm/s (laps: %s, dist %+.2fm) kp%.1f kd%.0f lat%.1f shf%.2f",
+				best_v_, best_laps_.c_str(), best_dist_diff_, best_.kp, best_.kd / dt, best_.lat, best_.target_shift));
+		else
+			v.push_back("BEST: searching initial frontier...");
+
+		// Current candidate details
+		if (done_ < cells_.size()) {
+			const Cell& cur = cells_[done_];
+			v.push_back(fmt("Target #%zu [%.4s] (cell %zu/%zu) v=%.2f:", db_.size() + 1, cur.role.c_str(), done_ + 1, cells_.size(), v_));
+			v.push_back(fmt("  kp%.1f kd%.0f lat%.1f brk%.2fm shf%.2f crv%.2f",
+				cur.set.kp, cur.set.kd / dt, cur.set.lat, cur.set.brake_margin, cur.set.target_shift, cur.set.target_curve_gain));
+			v.push_back(fmt("  AI: μ=%.1f  σ=%.2f  Safe=%.0f%%",
+				cur.pred_mu, cur.pred_sigma, cur.p_safe * 100.0));
+		}
+		v.push_back(last_);
 		for (const std::string& l : log_)
 			v.push_back(l);
 		return v;
 	}
 
 private:
-	struct Axes {
-		double a = 0, b = 0;     // centre: kp, kd [s]  or  lat_acc_max, slalom_ratio
-		double da = 0, db = 0;   // steps
-	};
-	struct Cell {
-		Set set;
-		bool extra = false;   // the point from the quadratic fit
-		int state = 0;        // 0 pending, 1 lost / unstable, 2 markers wrong, 3 pass, 4 pass but slower than BEST
-		double score = 0, pace = 0;
-		std::string laps;
-	};
 	static std::string fmt(const char* f, ...) {
 		char buf[240];
 		va_list ap;
@@ -365,105 +582,119 @@ private:
 		va_end(ap);
 		return buf;
 	}
+
 	std::string label(const Set& s) const {
-		return kind_ == 0 ? fmt("kp%.2f kd%.4f", s.kp, s.kd) : fmt("lat%.2f sl%.2f", s.lat, s.sl);
-	}
-	void plan() {   // the 3 x 3 block around the centre, row by row, gentle (low kp / lat) first
-		cells_.clear();
-		const Axes& ax = kind_ == 0 ? gains_ : curve_;
-		// keep the block inside the valid range: kp >= 1, kd >= 0, lat >= 2, 0 <= slalom <= 1
-		const double lo_a = kind_ == 0 ? 1.0 : 2.0, lo_b = 0.0, hi_b = kind_ == 0 ? 1e9 : 1.0;
-		ca_ = std::max(ax.a, lo_a + ax.da);
-		cb_ = std::clamp(ax.b, lo_b + ax.db, hi_b - ax.db);
-		for (int i = -1; i <= 1; i++)
-			for (int j = -1; j <= 1; j++)
-				cells_.push_back(make_cell(i, j));
-		done_ = 0;
-	}
-	Cell make_cell(double u, double v) const {
-		const Axes& ax = kind_ == 0 ? gains_ : curve_;
-		Cell c;
-		c.set = best_;
-		if (kind_ == 0) {
-			c.set.kp = ca_ + u * ax.da;
-			c.set.kd = cb_ + v * ax.db;
-		} else {
-			c.set.lat = ca_ + u * ax.da;
-			c.set.sl = cb_ + v * ax.db;
-		}
-		return c;
-	}
-	// Least-squares quadratic z = c0 + c1 u + c2 v + c3 u^2 + c4 v^2 + c5 u v over the scored grid
-	// points (u, v in -1, 0, 1). A minimum inside the block, away from the tried points, becomes a
-	// 10th trial.
-	void add_fitted_point() {
-		double A[6][7] = {};
-		int n = 0;
-		for (int i = 0; i < 3; i++)
-			for (int j = 0; j < 3; j++) {
-				const Cell& c = cells_[i * 3 + j];
-				if (c.state != 3 && c.state != 4)
-					continue;
-				const double u = i - 1, v = j - 1, f[6] = {1, u, v, u * u, v * v, u * v};
-				for (int r = 0; r < 6; r++) {
-					for (int k = 0; k < 6; k++)
-						A[r][k] += f[r] * f[k];
-					A[r][6] += f[r] * c.score;
-				}
-				n++;
-			}
-		if (n < 6)
-			return;
-		for (int col = 0; col < 6; col++) {   // Gauss-Jordan with partial pivoting
-			int piv = col;
-			for (int r = col + 1; r < 6; r++)
-				if (std::fabs(A[r][col]) > std::fabs(A[piv][col]))
-					piv = r;
-			if (std::fabs(A[piv][col]) < 1e-9)
-				return;   // the scored points do not pin down a quadratic
-			for (int k = 0; k < 7; k++)
-				std::swap(A[col][k], A[piv][k]);
-			for (int r = 0; r < 6; r++)
-				if (r != col) {
-					const double m = A[r][col] / A[col][col];
-					for (int k = col; k < 7; k++)
-						A[r][k] -= m * A[col][k];
-				}
-		}
-		double cf[6];
-		for (int r = 0; r < 6; r++)
-			cf[r] = A[r][6] / A[r][r];
-		const double h11 = 2 * cf[3], h22 = 2 * cf[4], h12 = cf[5], det = h11 * h22 - h12 * h12;
-		if (h11 <= 0 || det <= 0)
-			return;   // not a bowl: no minimum to aim at
-		double u = (-cf[1] * h22 + cf[2] * h12) / det, v = (-cf[2] * h11 + cf[1] * h12) / det;
-		u = std::clamp(u, -1.0, 1.0);
-		v = std::clamp(v, -1.0, 1.0);
-		if (std::fabs(u - std::round(u)) < 0.2 && std::fabs(v - std::round(v)) < 0.2)
-			return;   // (about) a point already tried
-		fit_u_ = u;
-		fit_v_ = v;
-		Cell c = make_cell(u, v);
-		c.extra = true;
-		cells_.push_back(c);
+		return fmt("kp%.1f kd%.0f lat%.1f brk%.2fm shf%.2f", s.kp, s.kd / 0.0005, s.lat, s.brake_margin, s.target_shift);
 	}
 
-	double v_ = 1.5, dv_ = 0.1, best_v_ = 0, best_pace_ = 0;
+	double v_ = 1.9, min_v_ = 1.9, dv_ = 0.08, best_v_ = 0, best_pace_ = 0, best_dist_diff_ = 0;
 	std::string best_laps_;
+	std::vector<double> best_lap_times_;
 	Set best_;
-	Axes gains_, curve_;
-	double ca_ = 0, cb_ = 0;    // this block's centre (after keeping it in range)
-	double fit_u_ = 0, fit_v_ = 0;
-	int kind_ = 0;              // 0 gains round, 1 curve entry round
 	int round_ = 0;
-	int since_best_ = 0;        // drives since the last new BEST (or the start)
-	bool passed_at_v_ = false;  // something passed at this speed (gains or curve round)
+	int since_best_ = 0;
+	bool passed_at_v_ = false;
+	bool just_got_best_ = false;
 	size_t done_ = 0;
 	std::string last_;
 	std::vector<Cell> cells_;
+	std::vector<TrialRecord> db_;
 	std::vector<std::string> log_;
 };
 }  // namespace
+
+bool save_drive_params_to_firmware_file(const FwDriveParams& p, std::string* out_path) {
+	const std::vector<std::string> candidates = {
+		"firmware/Main/Src/drive.c",
+		"../firmware/Main/Src/drive.c",
+		"../../firmware/Main/Src/drive.c",
+		"../../../firmware/Main/Src/drive.c"
+	};
+	std::string found_path;
+	for (const auto& path : candidates) {
+		std::error_code ec;
+		if (fs::exists(path, ec)) {
+			found_path = fs::canonical(path, ec).string();
+			if (found_path.empty())
+				found_path = path;
+			break;
+		}
+	}
+	if (found_path.empty()) {
+		std::fprintf(stderr, "[SAVE ERROR] Could not find firmware/Main/Src/drive.c\n");
+		return false;
+	}
+
+	if (out_path)
+		*out_path = found_path;
+
+	std::ifstream in(found_path, std::ios::binary);
+	if (!in.is_open()) {
+		std::fprintf(stderr, "[SAVE ERROR] Cannot open %s for reading\n", found_path.c_str());
+		return false;
+	}
+	std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+	in.close();
+
+	const std::string marker = "DriveParam_t driveData";
+	size_t pos_marker = content.find(marker);
+	if (pos_marker == std::string::npos) {
+		std::fprintf(stderr, "[SAVE ERROR] 'DriveParam_t driveData' not found in %s\n", found_path.c_str());
+		return false;
+	}
+	size_t open_brace = content.find('{', pos_marker);
+	if (open_brace == std::string::npos) {
+		std::fprintf(stderr, "[SAVE ERROR] '{' not found after marker in %s\n", found_path.c_str());
+		return false;
+	}
+	size_t close_brace = content.find("};", open_brace);
+	if (close_brace == std::string::npos) {
+		std::fprintf(stderr, "[SAVE ERROR] '};' not found after '{' in %s\n", found_path.c_str());
+		return false;
+	}
+
+	char new_body[1024];
+	std::snprintf(new_body, sizeof new_body,
+		"\n    .base_mps = %.2ff,"
+		"\n    .max_mps = %.2ff,"
+		"\n    .accel = %.1ff,"
+		"\n    .decel = %.1ff,"
+		"\n    .steer_gain_p = %.2ff,"
+		"\n    .steer_gain_d = %.1ff,"
+		"\n    .pos_atten_gain = %.2ff,"
+		"\n    .pit_in_distance_m = %.2ff,"
+		"\n    .fan_en = %d,"
+		"\n\t.target_shift_val = %.2ff,"
+		"\n\t.yaw_gain_p = %.2ff,"
+		"\n\t.yaw_gain_i = %.1ff,"
+		"\n\t.lat_acc_max = %.2ff,"
+		"\n\t.target_curve_gain = %.2ff,"
+		"\n\t.slalom_ratio = %.2ff,"
+		"\n\t.brake_margin_m = %.2ff,\n",
+		p.base_mps, p.max_mps > 0 ? p.max_mps : 10.0f,
+		p.accel > 0 ? p.accel : 10.0f, p.decel > 0 ? p.decel : 10.0f,
+		p.steer_kp, p.steer_kd, p.pos_atten_gain,
+		p.pit_in_m > 0 ? p.pit_in_m : 0.15f, p.fan_en,
+		p.target_shift,
+		p.yaw_kp, p.yaw_ki,
+		p.lat_acc_max,
+		p.target_curve_gain,
+		p.slalom_ratio,
+		p.brake_margin_m > 0 ? p.brake_margin_m : 0.12f
+	);
+
+	content.replace(open_brace + 1, close_brace - (open_brace + 1), new_body);
+
+	std::ofstream out(found_path, std::ios::binary | std::ios::trunc);
+	if (!out.is_open()) {
+		std::fprintf(stderr, "[SAVE ERROR] Cannot open %s for writing\n", found_path.c_str());
+		return false;
+	}
+	out << content;
+	out.close();
+	std::printf("[SAVE] Parameters written directly to %s\n", found_path.c_str());
+	return true;
+}
 
 bool apply_param(FwDriveParams* p, const std::string& key, double v) {
 	if (key == "base_mps") p->base_mps = (float) v;
@@ -482,6 +713,7 @@ bool apply_param(FwDriveParams* p, const std::string& key, double v) {
 	else if (key == "lat_acc_max") p->lat_acc_max = (float) v;
 	else if (key == "target_curve_gain") p->target_curve_gain = (float) v;   // drive 3/4: target_pos x gain in curves
 	else if (key == "slalom_ratio") p->slalom_ratio = (float) v;             // drive 4: 45 deg speed ratio
+	else if (key == "brake_margin_m" || key == "brake_margin") p->brake_margin_m = (float) v;
 	else return false;
 	return true;
 }
@@ -657,6 +889,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 	bool drive1_ok = false;       // the last drive 1 read the course's marker sequence: drives 2-4 may run
 	int lap_no = 0;               // drives so far (lap list in the viewer)
 	std::string lap_key, lap_label;   // course of the next laps in the list ("" = the one on the floor)
+	std::string lap_tag;          // explicit attempt tag for auto-tune (e.g. "#15-1")
 	bool ramp_seen = false, ramp_done = false;
 	double t_finished = 0;
 	bool lifted = false;
@@ -754,6 +987,30 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 		smp.lost = tm.lost;
 		smp.markers = tm.marker_count;
 		smp.contact = r.chassis_contact();
+		smp.beta_deg = 0.0f;
+		if (cur->samples.size() >= 5) {
+			const Sample& pv = cur->samples[cur->samples.size() - 5];
+			double dt = smp.t - pv.t;
+			if (dt > 1e-5 && smp.v >= 0.5f) {
+				double dx = smp.x - pv.x;
+				double dy = smp.y - pv.y;
+				double th_traj = std::atan2(dy, dx) * 180.0 / 3.14159265358979323846;
+				double diff = std::remainder((double) smp.yaw_deg - th_traj, 360.0);
+				smp.beta_deg = static_cast<float>(std::abs(diff));
+			}
+		} else if (!cur->samples.empty()) {
+			const Sample& pv = cur->samples.back();
+			double dt = smp.t - pv.t;
+			if (dt > 1e-5 && smp.v >= 0.5f) {
+				double dx = smp.x - pv.x;
+				double dy = smp.y - pv.y;
+				double th_traj = std::atan2(dy, dx) * 180.0 / 3.14159265358979323846;
+				double diff = std::remainder((double) smp.yaw_deg - th_traj, 360.0);
+				smp.beta_deg = static_cast<float>(std::abs(diff));
+			}
+		}
+		if (smp.v >= 0.5f)
+			cur->max_beta_deg = std::max(cur->max_beta_deg, (double) smp.beta_deg);
 		if (!cur->samples.empty()) {
 			const Sample& pv = cur->samples.back();
 			cur->dist_m += std::hypot(smp.x - pv.x, smp.y - pv.y);
@@ -795,8 +1052,9 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 		cur->t_start = sim->t();
 		if (live)
 			live->drive_started();
+		const std::string attempt_tag = lap_tag.empty() ? ("#" + std::to_string(++lap_no)) : lap_tag;
 		if (!opt.quiet)
-			std::printf("[%8.3f s] drive %d start\n", sim->t(), n);
+			std::printf("[%8.3f s] drive %d (%s) start\n", sim->t(), n, attempt_tag.c_str());
 		auto w0 = std::chrono::steady_clock::now();
 		uint64_t r0 = sim->resumes, s0 = sim->sleeps, f0[16];
 		std::memcpy(f0, sim->fired, sizeof f0);
@@ -829,6 +1087,8 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 			cur->outcome = lift_reason;
 		else if (cur->lcd.find("Line Lost") != std::string::npos)
 			cur->outcome = "line_lost";
+		else if (cur->max_beta_deg >= 25.0 && cur->max_lat_mm <= 70.0)
+			cur->outcome = "finished (oversteer)";
 		else
 			cur->outcome = "finished";
 
@@ -847,17 +1107,34 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 		else
 			std::snprintf(buf, sizeof buf, "%zu of %zu markers", got.size(), want.size()), cur->marker_check = buf;
 
-		if (!opt.quiet)
-			std::printf("[%8.3f s] drive %d %s, lap %.2f s, markers %s\n", sim->t(), n, cur->outcome.c_str(),
-				cur->lap_time_fw, cur->marker_check.c_str());
+		if (!opt.quiet) {
+			const double d_diff = cur->dist_m - track.length();
+			if (cur->outcome == "finished (oversteer)") {
+				std::printf("[%8.3f s] drive %d (%s) finished (oversteer occurred, completed within track limits), lap %.2f s, dist %.2fm (%+4.2fm), markers %s, max beta %.1f deg\n",
+					sim->t(), n, attempt_tag.c_str(), cur->lap_time_fw, cur->dist_m, d_diff, cur->marker_check.c_str(), cur->max_beta_deg);
+			} else if (cur->max_beta_deg >= 20.0) {
+				const bool limit_exceeded = !cur->is_finished() || cur->max_lat_mm > 70.0;
+				std::printf("[%8.3f s] drive %d (%s) %s, lap %.2f s, dist %.2fm (%+4.2fm), markers %s, max beta %.1f deg%s\n",
+					sim->t(), n, attempt_tag.c_str(), cur->outcome.c_str(), cur->lap_time_fw, cur->dist_m, d_diff, cur->marker_check.c_str(),
+					cur->max_beta_deg,
+					cur->max_beta_deg >= 25.0 ? (limit_exceeded ? " (OVERSTEER: OFF LIMIT)" : " (DRIFT: LIMIT OK)") : "");
+			} else {
+				std::printf("[%8.3f s] drive %d (%s) %s, lap %.2f s, dist %.2fm (%+4.2fm), markers %s\n", sim->t(), n, attempt_tag.c_str(),
+					cur->outcome.c_str(), cur->lap_time_fw, cur->dist_m, d_diff, cur->marker_check.c_str());
+			}
+		}
 		if (n == 1)
-			drive1_ok = cur->outcome == "finished" && cur->marker_check == "OK";
+			drive1_ok = cur->is_finished() && cur->marker_check == "OK";
 		if (live) {   // lap list on the left: the firmware's lap time, else the time driven until it stopped
-			const bool ok = cur->outcome == "finished" && cur->marker_check == "OK" && cur->lap_time_fw > 0;
+			const bool ok = cur->is_finished() && cur->marker_check == "OK" && cur->lap_time_fw > 0;
 			char what[160];
 			if (cur->lap_time_fw > 0) {
-				std::snprintf(what, sizeof what, "%6.2f s %s", cur->lap_time_fw,
-					cur->marker_check == "OK" ? "OK" : cur->marker_check.c_str());
+				const char* mk = cur->marker_check == "OK" ? "OK" : cur->marker_check.c_str();
+				const double d_diff = cur->dist_m - track.length();
+				if (cur->outcome == "finished (oversteer)")
+					std::snprintf(what, sizeof what, "%6.2f s %s (%+4.2fm, ov)", cur->lap_time_fw, mk, d_diff);
+				else
+					std::snprintf(what, sizeof what, "%6.2f s %s (%+4.2fm)", cur->lap_time_fw, mk, d_diff);
 			} else {
 				double t0 = -1, t1 = 0;
 				for (const Sample& smp : cur->samples)
@@ -870,7 +1147,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 					cur->marker_check == "OK" ? "" : cur->marker_check.c_str());
 			}
 			live->record_lap(lap_key.empty() ? track.name() : lap_key, lap_label.empty() ? track.name() : lap_label, n,
-				++lap_no, ok, cur->lap_time_fw, what);
+				attempt_tag, ok, cur->lap_time_fw, what);
 		}
 		cur = nullptr;
 	};
@@ -883,10 +1160,11 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 		d.outcome = "skipped";
 		d.marker_check = "drive 1 markers wrong";
 		d.t_start = d.t_end = sim->t();
+		const std::string attempt_tag = lap_tag.empty() ? ("#" + std::to_string(++lap_no)) : lap_tag;
 		if (!opt.quiet)
-			std::printf("[%8.3f s] drive %d skipped: drive 1 did not read the markers right\n", sim->t(), n);
+			std::printf("[%8.3f s] drive %d (%s) skipped: drive 1 did not read the markers right\n", sim->t(), n, attempt_tag.c_str());
 		if (live)
-			live->record_lap(track.name(), track.name(), n, ++lap_no, false, 0.0, "skipped (drive 1 markers wrong)");
+			live->record_lap(track.name(), track.name(), n, attempt_tag, false, 0.0, "skipped (drive 1 markers wrong)");
 	};
 	auto run_or_skip = [&](int n) {
 		if (n >= 2 && !drive1_ok)
@@ -1028,6 +1306,15 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 						from.kd = session.params.steer_kd * dt;
 						from.lat = session.params.lat_acc_max;
 						from.sl = session.params.slalom_ratio;
+						from.target_shift = session.params.target_shift;
+						from.target_curve_gain = session.params.target_curve_gain;
+						from.brake_margin = session.params.brake_margin_m;
+						from.pos_atten = 0.0;
+						from.yaw_kp = session.params.yaw_kp;
+						from.yaw_ki = session.params.yaw_ki;
+						from.accel = session.params.accel;
+						from.decel = session.params.decel;
+						from.max_mps = session.params.max_mps;
 						// the courses: the one on the floor and kTuneCourses - 1 random ones
 						tune_courses.clear();
 						if (std::string here = read_text(res.track_path_used); !here.empty())
@@ -1057,18 +1344,43 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 					session.params.steer_kd = static_cast<float>(ts.kd / dt);
 					session.params.lat_acc_max = static_cast<float>(ts.lat);
 					session.params.slalom_ratio = static_cast<float>(ts.sl);
+					session.params.target_shift = static_cast<float>(ts.target_shift);
+					session.params.target_curve_gain = static_cast<float>(ts.target_curve_gain);
+					session.params.brake_margin_m = static_cast<float>(ts.brake_margin);
+					session.params.pos_atten_gain = 0.0f;
+					session.params.yaw_kp = static_cast<float>(ts.yaw_kp);
+					session.params.yaw_ki = static_cast<float>(ts.yaw_ki);
+					session.params.accel = static_cast<float>(ts.accel);
+					session.params.decel = static_cast<float>(ts.decel);
+					session.params.max_mps = static_cast<float>(ts.max_mps);
 					fwb_set_drive_params(&session.params);
 					res.params = session.params;
 					session.tune_lines = tuner.status(dt, course_list());
 					int trial_drives = 0;
+					const size_t cand_no = tuner.current_candidate_no();
 					auto drive = [&](int n) {
 						trial_drives++;
+						lap_tag = "#" + std::to_string(cand_no) + "-" + std::to_string(trial_drives);
 						run_one(n);
+						lap_tag.clear();
 						DriveResult d = std::move(res.drives.back());
 						res.drives.pop_back();   // endless: keep the scores, not every drive's samples
 						return d;
 					};
-					auto lost_line = [](const DriveResult& d) { return d.outcome != "finished" || d.max_lat_mm > 70.0; };
+					auto track_limit_mm = []() {
+						static const double lim = std::getenv("LINESIM_TRACK_LIMIT_MM") ? std::atof(std::getenv("LINESIM_TRACK_LIMIT_MM")) : 70.0;
+						return lim;
+					};
+					auto lost_line = [&](const DriveResult& d) {
+						return !d.is_finished() || d.max_lat_mm > track_limit_mm();
+					};
+					auto oversteered = [&](const DriveResult& d) {
+						// Oversteer / drifting is permitted as long as the vehicle does NOT exceed track limits.
+						// It only fails for oversteer if it exceeds track limits with oversteer, or spins out (beta >= 90 deg).
+						const bool spinout = check_oversteer(d, 90.0);
+						const bool limit_exceeded = lost_line(d) && check_oversteer(d, 25.0);
+						return spinout || limit_exceeded;
+					};
 					// accuracy (lower = better): line error in the curves, steering weave, wheel slip (odometry error)
 					auto accuracy = [&](double lat_c, double weave, double slip) { return lat_c + weave / 20.0 + slip / 2.0; };
 					auto use_course = [&](size_t m) {
@@ -1079,8 +1391,10 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 					bool lost = false, pass = true, stopped = false;
 					double score = 0, acc_sum = 0, pace_sum = 0, weave_first = 0;
 					double lat1_sum = 0, lat4_sum = 0;
+					double dist_ratio_sum = 0, dist_diff_sum = 0;
 					std::string laps;
 					char text[240] = "";
+					std::vector<double> cur_lap_times;
 					for (size_t m = 0; m < tune_courses.size(); m++) {
 						use_course(m);
 						char tag[96];
@@ -1097,12 +1411,15 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 						const double clean1 = accuracy(latc1, weave1, slip1);   // drive 1: accuracy only
 						if (m == 0)
 							weave_first = weave1;
-						if (lost_line(d1) || d1.marker_check != "OK") {
-							lost = lost_line(d1);
+						if (lost_line(d1) || d1.marker_check != "OK" || oversteered(d1)) {
+							const bool ov = oversteered(d1);
+							lost = lost_line(d1) || ov;
 							pass = false;
 							score = lost ? 1000 : 500 + clean1;
-							std::snprintf(text, sizeof text, "c%zu 1: %s", m + 1,
-								lost ? d1.outcome.c_str() : ("markers " + d1.marker_check).c_str());
+							const char* reason = ov ? "oversteer"
+								: (!d1.is_finished() ? d1.outcome.c_str()
+								: (d1.max_lat_mm > track_limit_mm() ? "track limit" : ("markers " + d1.marker_check).c_str()));
+							std::snprintf(text, sizeof text, "c%zu 1: %s", m + 1, reason);
 							break;
 						}
 						const DriveResult d4 = drive(4);
@@ -1110,41 +1427,66 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 							stopped = true;
 							break;
 						}
-						if (lost_line(d4) || d4.marker_check != "OK" || d4.lap_time_fw <= 0) {
-							lost = lost_line(d4);
+						if (lost_line(d4) || d4.marker_check != "OK" || d4.lap_time_fw <= 0 || oversteered(d4)) {
+							const bool ov = oversteered(d4);
+							lost = lost_line(d4) || ov;
 							pass = false;
 							score = (lost ? 300.0 : 200.0) + clean1;
-							std::snprintf(text, sizeof text, "c%zu 1: lat %.1f | 4: %s", m + 1, latc1,
-								lost ? d4.outcome.c_str() : ("markers " + d4.marker_check).c_str());
+							const char* reason = ov ? "oversteer"
+								: (!d4.is_finished() ? d4.outcome.c_str()
+								: (d4.max_lat_mm > track_limit_mm() ? "track limit" : ("markers " + d4.marker_check).c_str()));
+							std::snprintf(text, sizeof text, "c%zu 1: lat %.1f | 4: %s", m + 1, latc1, reason);
 							break;
 						}
 						const double weave4 = weave_dps(d4.samples), slip4 = slip_pct(d4.samples);
 						const double latc4 = curve_rms_lat(d4.samples, track);
-						acc_sum += clean1 + accuracy(latc4, weave4, slip4);   // drive 4: accuracy + time (below)
+						// 4차 주행(고속 레이스 주행)의 최종 목표는 최단 랩타임(pace)입니다.
+						// 인코스를 파고들어 타이어 횡가속/슬립을 줄이는 target_shift/target_curve_gain은
+						// 흰색 라인과의 단순 오차(lat_mm)를 늘리지만 실제로는 더 빠르고 안전합니다.
+						// 따라서 4차 주행 점수는 pace(10m당 랩타임)가 지배하며, 라인 중심선 오차가 아닌 조향 떨림/슬립만 소량 페널티로 부여합니다.
+						const double stab4 = (weave4 / 50.0) + (slip4 / 20.0);
+						acc_sum += stab4;
 						pace_sum += 10.0 * d4.lap_time_fw / track.length();
 						lat1_sum += latc1;
 						lat4_sum += latc4;
+						cur_lap_times.push_back(d4.lap_time_fw);
+
+						// Traveled distance calculation & ratio against nominal track centerline
+						const double trk_len = track.length();
+						const double d_ratio = (trk_len > 0) ? (d4.dist_m / trk_len) : 1.0;
+						const double d_diff = d4.dist_m - trk_len;
+						dist_ratio_sum += d_ratio;
+						dist_diff_sum += d_diff;
+
 						char lap[16];
 						std::snprintf(lap, sizeof lap, "%s%.2f", laps.empty() ? "" : "/", d4.lap_time_fw);
 						laps += lap;
 					}
 					lap_key.clear();
 					lap_label.clear();
+					lap_tag.clear();
 					if (stopped)
 						continue;
 					double pace = 0;
+					double mean_dist_diff = 0;
 					if (pass) {
 						const double n = static_cast<double>(tune_courses.size());
 						pace = pace_sum / n;
-						score = acc_sum / n + 10.0 * pace;
-						std::snprintf(text, sizeof text, "4: %.3f (%s) lat %.1f/%.1f", pace, laps.c_str(), lat1_sum / n,
-							lat4_sum / n);
-						// slower than BEST: record() drops it, so the stress drives would be wasted
-						if (tuner.best_pace() <= 0 || pace < tuner.best_pace()) {
-							// Model-error stress on the first course: the steering lag (sensor_delay, fitted to one
-							// gyro log) may be larger on the real robot. Drive 1 again with it x1.4 (must keep the
-							// line, weave at most 1.5 x nominal + 10 dps) and x1.85 (must keep the line). Failing
-							// counts as unstable.
+						mean_dist_diff = dist_diff_sum / n;
+						const double mean_dist_ratio = dist_ratio_sum / n;
+
+						// Traveled distance optimization term:
+						// Rewards cutting inside on curves (dist_m < track.length) and penalizes wide lines or weaving.
+						static const double kDistWeight = std::getenv("LINESIM_DIST_WEIGHT")
+							? std::atof(std::getenv("LINESIM_DIST_WEIGHT")) : 25.0;
+						const double dist_penalty = kDistWeight * (mean_dist_ratio - 1.0);
+						score = 10.0 * pace + acc_sum / n + dist_penalty;
+
+						// Require that ALL courses renew (beat) their 4th drive times to prevent overfitting
+						const bool all_renewed = (cur_lap_times.size() == tune_courses.size()) && tuner.all_courses_improved(cur_lap_times);
+						if (all_renewed) {
+							std::snprintf(text, sizeof text, "4: %.3f (%s) dist %+.2fm [ALL RENEWED]", pace, laps.c_str(), mean_dist_diff);
+							// Model-error stress on the first course only if all courses renewed
 							use_course(0);
 							lap_key = tune_courses[0].name + " lag";   // lap times with more lag: a list of their own
 							lap_label = "c1 " + tune_courses[0].name + ", lag stress x1.4 / x1.85";
@@ -1152,19 +1494,20 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 							std::string why;
 							ir.set_delay(nominal * kStressLag[0]);
 							const DriveResult s1 = drive(1);
-							if (lost_line(s1))
-								why = "x1.4: " + s1.outcome;
+							if (lost_line(s1) || oversteered(s1))
+								why = oversteered(s1) ? "x1.4: oversteer" : ("x1.4: " + (!s1.is_finished() ? s1.outcome : "track limit"));
 							else if (weave_dps(s1.samples) > 1.5 * weave_first + 10.0)
 								why = "x1.4: weave " + std::to_string(static_cast<int>(weave_dps(s1.samples))) + " dps";
 							if (why.empty() && session.auto_tune) {
 								ir.set_delay(nominal * kStressLag[1]);
 								const DriveResult s2 = drive(1);
-								if (lost_line(s2))
-									why = "x1.85: " + s2.outcome;
+								if (lost_line(s2) || oversteered(s2))
+									why = oversteered(s2) ? "x1.85: oversteer" : ("x1.85: " + (!s2.is_finished() ? s2.outcome : "track limit"));
 							}
 							ir.set_delay(nominal);
 							lap_key.clear();
 							lap_label.clear();
+							lap_tag.clear();
 							if (!session.auto_tune)
 								continue;
 							if (!why.empty()) {
@@ -1173,15 +1516,59 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 								score = 250.0 + acc_sum / n;
 								std::snprintf(text, sizeof text, "4: %.3f s/10m but lag %s", pace, why.c_str());
 							}
+						} else {
+							// Did not renew all courses: pinpoint which course was slower
+							std::string slower_list;
+							const auto& b_laps = tuner.best_lap_times();
+							for (size_t k = 0; k < cur_lap_times.size() && k < b_laps.size(); k++) {
+								if (cur_lap_times[k] >= b_laps[k] - 1e-4) {
+									if (!slower_list.empty()) slower_list += ",";
+									slower_list += "c" + std::to_string(k + 1);
+								}
+							}
+							std::snprintf(text, sizeof text, "4: (%s) dist %+.2fm [slower in %s]", laps.c_str(), mean_dist_diff, slower_list.c_str());
 						}
 					}
-					tuner.record(lost, pass, score, pace, laps, trial_drives, text);
+					tuner.record(lost, pass, score, pace, mean_dist_diff, laps, cur_lap_times, trial_drives, text);
 					if (tuner.round_complete()) {
 						tuner.finish_round();
+						if (tuner.just_found_best()) {
+							FwDriveParams to_save = session.params;
+							to_save.base_mps = static_cast<float>(tuner.best_v());
+							to_save.steer_kp = static_cast<float>(tuner.best().kp);
+							to_save.steer_kd = static_cast<float>(tuner.best().kd / dt);
+							to_save.lat_acc_max = static_cast<float>(tuner.best().lat);
+							to_save.slalom_ratio = static_cast<float>(tuner.best().sl);
+							to_save.target_shift = static_cast<float>(tuner.best().target_shift);
+							to_save.target_curve_gain = static_cast<float>(tuner.best().target_curve_gain);
+							to_save.brake_margin_m = static_cast<float>(tuner.best().brake_margin);
+							to_save.pos_atten_gain = 0.0f;
+							to_save.yaw_kp = static_cast<float>(tuner.best().yaw_kp);
+							to_save.yaw_ki = static_cast<float>(tuner.best().yaw_ki);
+							to_save.accel = static_cast<float>(tuner.best().accel);
+							to_save.decel = static_cast<float>(tuner.best().decel);
+							to_save.max_mps = static_cast<float>(tuner.best().max_mps);
+							session.params = to_save;
+							fwb_set_drive_params(&session.params);
+							std::string path_out;
+							if (save_drive_params_to_firmware_file(to_save, &path_out)) {
+								char save_msg[180];
+								std::snprintf(save_msg, sizeof save_msg,
+									"[SAVED] BEST (all renewed: %s, dist %+.2fm) v=%.2f kp=%.1f kd=%.0f lat=%.1f brk=%.2f shf=%.2f",
+									tuner.best_laps().c_str(), tuner.best_dist_diff(),
+									to_save.base_mps, to_save.steer_kp, to_save.steer_kd, to_save.lat_acc_max,
+									to_save.brake_margin_m, to_save.target_shift);
+								session.history.push_back(save_msg);
+								if (!opt.quiet) {
+									std::printf("[%8.3f s] %s\n", sim->t(), save_msg);
+									std::fflush(stdout);
+								}
+							}
+						}
 						if (!opt.quiet) {
 							const std::vector<std::string> st = tuner.status(dt, course_list());
-							std::printf("[%8.3f s] auto-tune %s | %s | %s\n", sim->t(), st[0].c_str() + 11, st[5].c_str(),
-								st.size() > 6 ? st[6].c_str() : "");
+							std::printf("[%8.3f s] %s | %s\n", sim->t(), st[0].c_str(),
+								st.size() > 4 ? st[4].c_str() : "");
 							std::fflush(stdout);
 						}
 					}
@@ -1223,20 +1610,37 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 					session.params.steer_kd = static_cast<float>(b.kd / dt);
 					session.params.lat_acc_max = static_cast<float>(b.lat);
 					session.params.slalom_ratio = static_cast<float>(b.sl);
+					session.params.target_shift = static_cast<float>(b.target_shift);
+					session.params.target_curve_gain = static_cast<float>(b.target_curve_gain);
+					session.params.brake_margin_m = static_cast<float>(b.brake_margin);
+					session.params.pos_atten_gain = 0.0f;
+					session.params.yaw_kp = static_cast<float>(b.yaw_kp);
+					session.params.yaw_ki = static_cast<float>(b.yaw_ki);
+					session.params.accel = static_cast<float>(b.accel);
+					session.params.decel = static_cast<float>(b.decel);
+					session.params.max_mps = static_cast<float>(b.max_mps);
 					fwb_set_drive_params(&session.params);
 					if (!tune_courses.empty() && cur_course != 0 && load_course(tune_courses[0].text, tune_courses[0].label))
 						cur_course = 0;   // back to the course the tuning started on
 					session.busy = false;
-					char line[240];
-					if (tuner.has_best())
+					char line[260];
+					if (tuner.has_best()) {
 						std::snprintf(line, sizeof line,
-							"auto-tune: best %.3f m/s, kp %.2f, kd %.4f s (fw %.0f), lat max %.2f, slalom %.2f, 4th %.3f s/10m (%s s)",
-							tuner.best_v(), b.kp, b.kd, b.kd / dt, b.lat, b.sl, tuner.best_pace(), tuner.best_laps().c_str());
-					else
+							"auto-tune: best %.3f m/s, kp %.2f, kd %.0f, lat %.1f, sl %.2f, brk %.2fm, shf %.2f, 4th %.3f s/10m (%s s)",
+							tuner.best_v(), b.kp, b.kd / dt, b.lat, b.sl, b.brake_margin, b.target_shift, tuner.best_pace(), tuner.best_laps().c_str());
+						std::string saved_path;
+						if (save_drive_params_to_firmware_file(session.params, &saved_path)) {
+							session.message = "auto-tune ended: BEST saved to drive.c!";
+							std::printf("[AUTO-SAVED] Final best saved to %s\n", saved_path.c_str());
+						} else {
+							session.message = "kept the best found (drive 1-4 to try it)";
+						}
+					} else {
 						std::snprintf(line, sizeof line, "auto-tune: nothing passed yet (kept kp %.2f, kd %.4f s, lat max %.2f, slalom %.2f)",
 							b.kp, b.kd, b.lat, b.sl);
+						session.message = "auto-tune ended: nothing passed yet";
+					}
 					session.history.push_back(line);
-					session.message = "kept the best found (drive 1-4 to try it)";
 					session.tune_lines.clear();
 				}
 				if (session.request_new_map) {
@@ -1258,9 +1662,12 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 					session.busy = false;
 					const DriveResult& d = res.drives.back();
 					char line[160];
-					std::snprintf(line, sizeof line, "drive %d  %-9s lap %5.2f s  vmax %.2f  markers %s", n, d.outcome.c_str(),
-						d.lap_time_fw, d.max_v, d.marker_check.c_str());
+					const double d_diff = d.dist_m - track.length();
+					std::snprintf(line, sizeof line, "drive %d  %-20s lap %5.2f s (%+4.2fm)  vmax %.2f", n, d.outcome.c_str(),
+						d.lap_time_fw, d_diff, d.max_v);
 					session.history.push_back(line);
+					if (d.outcome == "finished (oversteer)")
+						session.message = "drive " + std::to_string(n) + " finished (oversteer occurred, completed within track limits)";
 				} else {
 					sim_fw_sleep_until_ns(sim_now_ns() + 1000000);
 				}

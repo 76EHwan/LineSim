@@ -262,6 +262,8 @@ bool Robot::init(const RobotParams& p, const std::string& mjcf_out_path, std::st
 		wheel_dof_[s] = m_->jnt_dofadr[jid];
 		act_[s] = mj_name2id(m_, mjOBJ_ACTUATOR, an[s]);
 	}
+	current_alpha_ = 1.0 - std::exp(-p_.timestep / p_.motor.current_tau);
+	lag_alpha_ = (p_.motor.drive_lag > 0) ? (1.0 - std::exp(-p_.timestep / p_.motor.drive_lag)) : 1.0;
 	return true;
 }
 
@@ -296,21 +298,20 @@ void Robot::step() {
 	const MotorParams& mo = p_.motor;
 	const double lambda = mo.kt / 1.5;   // flux linkage, pole pairs = 1 (foc.h MOTOR_FLUX_LINKAGE)
 	const double vmax = mo.voltage_ratio * p_.vbat;
-	const double alpha = 1.0 - std::exp(-p_.timestep / mo.current_tau);
 	for (int s = 0; s < 2; s++) {
 		if (powered_[s]) {
 			double e = motor_speed_fw(s) * lambda;
 			double hi = (vmax - e) / mo.r_phase;
 			double lo = (-vmax - e) / mo.r_phase;
 			double target = std::clamp(iq_cmd_[s], std::min(lo, hi), std::max(lo, hi));
-			iq_[s] += (target - iq_[s]) * alpha;
+			iq_[s] += (target - iq_[s]) * current_alpha_;
 		} else {
 			iq_[s] = 0;
 		}
 		double t_fw = mo.kt * iq_[s];
 		double t_wheel = t_fw * mo.gear * mo.efficiency;
 		if (mo.drive_lag > 0)
-			torque_[s] += (t_wheel - torque_[s]) * (1.0 - std::exp(-p_.timestep / mo.drive_lag));
+			torque_[s] += (t_wheel - torque_[s]) * lag_alpha_;
 		else
 			torque_[s] = t_wheel;
 		d_->ctrl[act_[s]] = (s == 0) ? torque_[s] : -torque_[s];

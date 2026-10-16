@@ -17,14 +17,17 @@ struct Sample {
 	float cmd_mps;          // firmware's commanded wheel speed (after pos_atten / lat_acc_max)
 	float omega_t[2], omega_m[2], iq_cmd[2];
 	int lost, markers, contact;
+	float beta_deg;         // sideslip angle [deg]
 };
 
 struct DriveResult {
 	int n = 0;
-	std::string outcome;    // finished / line_lost / timeout / off_track / not_started
+	std::string outcome;    // finished / finished (oversteer) / line_lost / timeout / off_track / not_started
+	bool is_finished() const { return outcome.rfind("finished", 0) == 0; }
 	double t_start = 0, t_end = 0;
 	double lap_time_fw = -1;            // from the firmware's LCD ("T:x.xxs")
 	double max_lat_mm = 0, rms_lat_mm = 0, max_v = 0, dist_m = 0;
+	double max_beta_deg = 0;            // peak sideslip angle [deg]
 	std::vector<FwMarker> markers;
 	std::vector<Sample> samples;
 	std::string lcd;
@@ -61,3 +64,4 @@ struct ScenarioResult {
 ScenarioResult run_scenario(const ScenarioOptions& opt);
 bool load_scenario_file(const std::string& path, ScenarioOptions* opt, std::string* err);
 bool apply_param(FwDriveParams* p, const std::string& key, double v);
+bool save_drive_params_to_firmware_file(const FwDriveParams& p, std::string* out_path = nullptr);

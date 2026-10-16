@@ -5,6 +5,7 @@
 #include <GL/gl.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -120,9 +121,14 @@ bool Viewer::open(int width, int height, const char* title, std::string* err) {
 		return false;
 	}
 	glrc_ = rc;
+	typedef BOOL(WINAPI* PFNWGLSWAPINTERVALEXTPROC)(int interval);
+	auto wglSwapIntervalEXT = reinterpret_cast<PFNWGLSWAPINTERVALEXTPROC>(wglGetProcAddress("wglSwapIntervalEXT"));
+	if (wglSwapIntervalEXT) {
+		wglSwapIntervalEXT(0); // 0 = Disable VSync to decouple GPU buffer swaps from monitor refresh rate
+	}
 	const char* vendor = reinterpret_cast<const char*>(glGetString(GL_VENDOR));
 	const char* renderer = reinterpret_cast<const char*>(glGetString(GL_RENDERER));
-	std::fprintf(stderr, "viewer: OpenGL %s / %s\n", vendor ? vendor : "?", renderer ? renderer : "?");
+	std::fprintf(stderr, "viewer: OpenGL %s / %s (VSync OFF for max tuning throughput)\n", vendor ? vendor : "?", renderer ? renderer : "?");
 	RECT cr;
 	GetClientRect(hwnd, &cr);
 	width_ = cr.right;
@@ -195,6 +201,17 @@ void Viewer::sensor_cam(void* camp) const {
 	c->distance = 0.3;
 	c->elevation = -89.9;
 	c->azimuth = std::atan2(xm[3], xm[0]) * 57.29577951308232;
+}
+
+void Viewer::map_cam(void* camp) const {
+	mjvCamera* c = static_cast<mjvCamera*>(camp);
+	c->type = mjCAMERA_FREE;
+	c->lookat[0] = cx_;
+	c->lookat[1] = cy_;
+	c->lookat[2] = 0;
+	c->distance = extent_ * 1.30;
+	c->elevation = -89.9;
+	c->azimuth = 90;
 }
 
 void Viewer::toggle_shadows() {
@@ -324,10 +341,10 @@ long long Viewer::handle(unsigned msg, unsigned long long wp, long long lp) {
 	}
 }
 
-void Viewer::add_trail(double x, double y, double speed) {
+void Viewer::add_trail(double x, double y, double speed, double beta, double lat_mm) {
 	if (trail_.size() >= kMaxTrail)
 		trail_.erase(trail_.begin(), trail_.begin() + kMaxTrail / 10);
-	trail_.push_back({static_cast<float>(x), static_cast<float>(y), static_cast<float>(speed)});
+	trail_.push_back({static_cast<float>(x), static_cast<float>(y), static_cast<float>(speed), static_cast<float>(beta), static_cast<float>(lat_mm)});
 	trail_vmax_ = std::max(trail_vmax_, speed);
 }
 
@@ -356,26 +373,50 @@ void Viewer::overlay(int grid, int left, int bottom, int width, int height, cons
 	// line pitch of mjr_overlay: about 1.17 character heights (measured on screen: 33 px at 28 px)
 	const int lh = static_cast<int>(im_->con.charHeight * 1.17 + 0.5);
 	const bool from_bottom = grid == mjGRID_BOTTOMLEFT || grid == mjGRID_BOTTOMRIGHT;
-	// Right-aligned text: mjr_overlay would align every piece on its own widest line, so pieces of
-	// different widths would start at different x. Draw them all left-aligned from the x where the
-	// widest line of the whole text fits instead.
-	if (pieces.size() > 1 && (grid == mjGRID_TOPRIGHT || grid == mjGRID_BOTTOMRIGHT)) {
-		int widest = 0, w = 0;
-		for (char c : text) {
+	const bool is_right = grid == mjGRID_TOPRIGHT || grid == mjGRID_BOTTOMRIGHT;
+
+	auto measure_line_width = [&](const std::string& s) {
+		int max_w = 0, cur_w = 0;
+		for (char c : s) {
 			if (c == '\n') {
-				widest = std::max(widest, w);
-				w = 0;
+				max_w = std::max(max_w, cur_w);
+				cur_w = 0;
+			} else if (c == '\r') {
+				continue;
 			} else if (static_cast<unsigned char>(c) < 127) {
-				w += im_->con.charWidth[static_cast<unsigned char>(c)];
+				cur_w += im_->con.charWidth[static_cast<unsigned char>(c)];
 			}
 		}
-		widest = std::max(widest, w);
-		const int margin = im_->con.charHeight;   // the padding mjr_overlay puts around its text
-		const int x = std::max(left, left + width - widest - 2 * margin);
-		width -= x - left;
-		left = x;
-		grid = grid == mjGRID_TOPRIGHT ? mjGRID_TOPLEFT : mjGRID_BOTTOMLEFT;
+		return std::max(max_w, cur_w);
+	};
+
+	if (is_right) {
+		const int margin = im_->con.charHeight;
+
+		// 1. Measure the global maximum line width across ALL pieces
+		int max_w = 0;
+		for (const auto& piece : pieces) {
+			max_w = std::max(max_w, measure_line_width(piece));
+		}
+
+		// 2. Single unified left position and unified width across all pieces docked to right edge
+		const int unified_left = std::max(left, left + width - max_w - 2 * margin);
+		const int unified_width = max_w + 2 * margin;
+		const int piece_grid = from_bottom ? mjGRID_BOTTOMLEFT : mjGRID_TOPLEFT;
+
+		int off = 0;
+		for (size_t k = 0; k < pieces.size(); k++) {
+			const size_t i = from_bottom ? pieces.size() - 1 - k : k;
+			mjrRect r{unified_left, from_bottom ? bottom + off : bottom, unified_width, height - off};
+			if (r.height > lh)
+				mjr_overlay(mjFONT_NORMAL, piece_grid, r, pieces[i].c_str(), nullptr, &im_->con);
+			off += rows[i] * lh;
+		}
+		return;
 	}
+
+
+	// Normal (left-aligned) overlay
 	int off = 0;
 	for (size_t k = 0; k < pieces.size(); k++) {
 		const size_t i = from_bottom ? pieces.size() - 1 - k : k;   // stack away from the anchor corner
@@ -406,16 +447,62 @@ void Viewer::render(const ViewerHud& hud) {
 	for (size_t i = 1; i < trail_.size() && scn.ngeom < scn.maxgeom; i++) {
 		const TrailPt& a = trail_[i - 1];
 		const TrailPt& b = trail_[i];
-		if (std::hypot(b.x - a.x, b.y - a.y) > 0.2)
+		if (std::hypot(b.x - a.x, b.y - a.y) > 0.3)
 			continue;   // robot was put back on the start line
 		float c[4];
-		speed_rgb(b.v / trail_vmax_, c);
+		const bool is_off_limit = (std::fabs(b.lat_mm) > 70.0f);
+		const bool is_oversteer = (b.beta >= 25.0f);
+
+		int line_width = 3;
+		float emission = 0.8f;
+		if (is_off_limit && is_oversteer) {
+			// Red: Oversteer causing track limit violation!
+			c[0] = 1.0f; c[1] = 0.05f; c[2] = 0.15f; c[3] = 1.0f;
+			line_width = 6;
+			emission = 1.0f;
+		} else if (is_off_limit) {
+			// Magenta: Line departure / Track limit violation (> 70mm)
+			c[0] = 1.0f; c[1] = 0.10f; c[2] = 0.85f; c[3] = 1.0f;
+			line_width = 5;
+			emission = 1.0f;
+		} else if (is_oversteer) {
+			// Orange/Gold: Controlled drift / oversteer within limits
+			c[0] = 1.0f; c[1] = (b.beta >= 32.0f) ? 0.35f : 0.65f; c[2] = 0.05f; c[3] = 1.0f;
+			line_width = 5;
+			emission = 1.0f;
+		} else {
+			speed_rgb(b.v / trail_vmax_, c);
+		}
 		mjvGeom* g = &scn.geoms[scn.ngeom++];
 		mjv_initGeom(g, mjGEOM_LINE, nullptr, nullptr, nullptr, c);
 		mjtNum p0[3] = {a.x, a.y, 0.0012}, p1[3] = {b.x, b.y, 0.0012};
-		mjv_connector(g, mjGEOM_LINE, 3, p0, p1);
+		mjv_connector(g, mjGEOM_LINE, line_width, p0, p1);
 		g->category = mjCAT_DECOR;
-		g->emission = 1;
+		g->emission = emission;
+	}
+
+	// Floor indicators for drift and off-track events
+	for (size_t i = 1; i < trail_.size() && scn.ngeom < scn.maxgeom; i += 4) {
+		const TrailPt& b = trail_[i];
+		const bool is_off_limit = (std::fabs(b.lat_mm) > 70.0f);
+		const bool is_oversteer = (b.beta >= 25.0f);
+		if (is_off_limit || is_oversteer) {
+			mjtNum pos[3] = {b.x, b.y, 0.0014};
+			double r = (is_off_limit && is_oversteer) ? 0.016 : 0.011;
+			mjtNum size[3] = {r, r, 0.0004};
+			float rgba[4];
+			if (is_off_limit && is_oversteer) {
+				rgba[0] = 1.0f; rgba[1] = 0.05f; rgba[2] = 0.15f; rgba[3] = 0.90f; // Red
+			} else if (is_off_limit) {
+				rgba[0] = 1.0f; rgba[1] = 0.10f; rgba[2] = 0.85f; rgba[3] = 0.90f; // Magenta
+			} else {
+				rgba[0] = 1.0f; rgba[1] = (b.beta >= 32.0f) ? 0.35f : 0.65f; rgba[2] = 0.05f; rgba[3] = 0.85f; // Orange
+			}
+			mjvGeom* g = &scn.geoms[scn.ngeom++];
+			mjv_initGeom(g, mjGEOM_CYLINDER, size, pos, nullptr, rgba);
+			g->category = mjCAT_DECOR;
+			g->emission = 1.0f;
+		}
 	}
 
 	// IR sensor spots on the floor under the bar (seen in the sensor view)
@@ -435,27 +522,56 @@ void Viewer::render(const ViewerHud& hud) {
 		}
 	}
 
+	// Robot position marker on floor (hidden by default)
+	static const bool show_floor_disc = (std::getenv("LINESIM_SHOW_DISC") != nullptr);
+	if (show_floor_disc && scn.ngeom < scn.maxgeom) {
+		const mjtNum* xp = d_->xpos + 3 * follow_body_;
+		mjtNum pos[3] = {xp[0], xp[1], 0.0020};
+		mjtNum size[3] = {0.035, 0.035, 0.0006};
+		float rgba[4] = {0.2f, 0.95f, 0.35f, 0.95f}; // Green: Normal
+		const bool is_off_limit = (std::fabs(hud.live_lat_mm) > 70.0);
+		const bool is_oversteer = (hud.live_beta >= 25.0);
+		if (is_off_limit && is_oversteer) {
+			rgba[0] = 1.0f; rgba[1] = 0.05f; rgba[2] = 0.15f; rgba[3] = 1.0f; // Red: Oversteer Off
+		} else if (is_off_limit) {
+			rgba[0] = 1.0f; rgba[1] = 0.10f; rgba[2] = 0.85f; rgba[3] = 1.0f; // Magenta: Line Out
+		} else if (is_oversteer) {
+			rgba[0] = 1.0f; rgba[1] = 0.65f; rgba[2] = 0.10f; rgba[3] = 1.0f; // Orange: Drift
+		}
+		mjvGeom* g = &scn.geoms[scn.ngeom++];
+		mjv_initGeom(g, mjGEOM_CYLINDER, size, pos, nullptr, rgba);
+		g->category = mjCAT_DECOR;
+		g->emission = 1.0f;
+	}
+
 	mjrRect view{0, 0, width_, height_};
 	mjr_render(view, &scn, &im_->con);
 
-	if (inset_ && cam_mode_ != kSensor) {   // same scene, second camera, bottom-right corner
-		const int iw = std::max(200, width_ * 27 / 100), ih = iw * 3 / 4;
+	if (inset_mode_ != kInsetOff && cam_mode_ != kSensor && cam_mode_ != kTop) {
+		const int iw = std::max(220, width_ * 28 / 100), ih = iw * 3 / 4;
 		mjrRect r{width_ - iw - 12, 12, iw, ih};
-		mjr_rectangle({r.left - 3, r.bottom - 3, r.width + 6, r.height + 6}, 0.8f, 0.8f, 0.85f, 1);
-		sensor_cam(&im_->inset_cam);
-		mjv_updateCamera(m_, d_, &im_->inset_cam, &scn);
-		// see through the robot: the sensor board would hide the line
-		std::vector<float> alpha(scn.ngeom);
-		for (int i = 0; i < scn.ngeom; i++) {
-			mjvGeom& g = scn.geoms[i];
-			alpha[i] = g.rgba[3];
-			if (g.objtype == mjOBJ_GEOM && g.objid >= 0 && m_->geom_bodyid[g.objid] != 0)
-				g.rgba[3] = std::min(g.rgba[3], 0.12f);
+		mjr_rectangle({r.left - 3, r.bottom - 3, r.width + 6, r.height + 6}, 0.25f, 0.25f, 0.3f, 1);
+		if (inset_mode_ == kInsetMap) {
+			map_cam(&im_->inset_cam);
+			mjv_updateCamera(m_, d_, &im_->inset_cam, &scn);
+			mjr_render(r, &scn, &im_->con);
+			mjr_overlay(mjFONT_NORMAL, mjGRID_TOPLEFT, r, "track map (M: switch view)", nullptr, &im_->con);
+		} else {
+			sensor_cam(&im_->inset_cam);
+			mjv_updateCamera(m_, d_, &im_->inset_cam, &scn);
+			// see through the robot: the sensor board would hide the line
+			std::vector<float> alpha(scn.ngeom);
+			for (int i = 0; i < scn.ngeom; i++) {
+				mjvGeom& g = scn.geoms[i];
+				alpha[i] = g.rgba[3];
+				if (g.objtype == mjOBJ_GEOM && g.objid >= 0 && m_->geom_bodyid[g.objid] != 0)
+					g.rgba[3] = std::min(g.rgba[3], 0.12f);
+			}
+			mjr_render(r, &scn, &im_->con);
+			for (int i = 0; i < scn.ngeom; i++)
+				scn.geoms[i].rgba[3] = alpha[i];
+			mjr_overlay(mjFONT_NORMAL, mjGRID_TOPLEFT, r, "sensor view (V)", nullptr, &im_->con);
 		}
-		mjr_render(r, &scn, &im_->con);
-		for (int i = 0; i < scn.ngeom; i++)
-			scn.geoms[i].rgba[3] = alpha[i];
-		mjr_overlay(mjFONT_NORMAL, mjGRID_TOPLEFT, r, "sensor view (V)", nullptr, &im_->con);
 	}
 
 	overlay(mjGRID_TOPLEFT, view.left, view.bottom, view.width, view.height, hud.status);

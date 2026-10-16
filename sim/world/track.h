@@ -19,6 +19,10 @@ struct PathPiece {
 	double radius = 0;
 	int turn = 0;          // +1 left (CCW), -1 right
 	Vec2 center;           // arcs only
+	double ux = 1.0, uy = 0.0; // precomputed cos(th0), sin(th0)
+	double a0 = 0.0;           // precomputed arc start angle
+	double sweep = 0.0;        // precomputed len / radius
+	double minx = -1e9, miny = -1e9, maxx = 1e9, maxy = 1e9; // bounding box
 
 	Pose2 at(double ds) const;
 };
@@ -33,6 +37,7 @@ struct Shape {
 	double hw = 0;          // half width
 	double R = 0, a0 = 0, sweep = 0;   // ArcBand: radius, start angle, signed sweep
 	double minx = 0, miny = 0, maxx = 0, maxy = 0;
+	double r_in_sq = 0, r_out_sq = 0;   // Precomputed squared radius limits for fast circle rejection
 
 	bool contains(Vec2 p) const;
 	void compute_bounds();
@@ -112,4 +117,5 @@ private:
 	double gx0_ = 0, gy0_ = 0, cell_ = 0.05;
 	int gnx_ = 0, gny_ = 0;
 	std::vector<std::vector<int>> grid_;
+	mutable size_t last_piece_idx_ = 0;
 };

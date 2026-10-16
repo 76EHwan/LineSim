@@ -4,6 +4,16 @@
   "version": "0.2.0",
   "configurations": [
     {
+      "name": "LineSim: 3D session (practice board)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/Release/linesim.exe",
+      "args": ["view", "--session", "--track", "tracks/practice_board.json", "--robot", "robots/full.json", "--out", "runs/latest"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "preLaunchTask": "LineSim: Build (Release)"
+    },
+    {
       "name": "LineSim: 3D session (random course)",
       "type": "cppvsdbg",
       "request": "launch",

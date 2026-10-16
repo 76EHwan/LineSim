@@ -150,4 +150,6 @@ private:
 	double iq_cmd_[2]{}, iq_[2]{};
 	double torque_[2]{};   // wheel torque after drive_lag
 	double fan_duty_ = 0;
+	double current_alpha_ = 1.0;
+	double lag_alpha_ = 1.0;
 };

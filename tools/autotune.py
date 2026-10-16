@@ -141,7 +141,7 @@ def sim(course, robot, drives, speed, kp, kd, extra, out, reuse, robot_params=()
 
 
 def lost_line(d):
-    return d["outcome"] != "finished" or d["max_lat_mm"] > MAX_LAT_MM
+    return not d["outcome"].startswith("finished") or d["max_lat_mm"] > MAX_LAT_MM
 
 
 def run(course, robot, speed, kp, kd, lat, extra, out, reuse, lag, mu, seed=1):

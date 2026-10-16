@@ -42,7 +42,12 @@ public:
 	void hold_until_closed();
 	bool stop_requested() const { return stop_; }
 	// A drive is starting: the trail shows this drive only.
-	void drive_started() { v_.clear_trail(); }
+	void drive_started() {
+		v_.clear_trail();
+		has_trail_pose_ = false;
+		live_beta_ = 0;
+		max_beta_seen_ = 0;
+	}
 	// New course: the lap records start over.
 	void clear_laps() { courses_.clear(); }
 	// A course left the auto-tune set: its records go.
@@ -55,9 +60,9 @@ public:
 	}
 	// Lap list on the left, per course (lap times only compare on the same course) and drive 1-4:
 	// the latest attempt (finished or not) and the best finished one with every marker right.
-	// course: key of the course, label: its heading; no = attempt number over all drives;
+	// course: key of the course, label: its heading; tag = attempt tag over all drives (e.g. #15-1 or #1);
 	// ok = counts as a lap.
-	void record_lap(const std::string& course, const std::string& label, int drive, int no, bool ok, double lap_s,
+	void record_lap(const std::string& course, const std::string& label, int drive, const std::string& tag, bool ok, double lap_s,
 		const std::string& what) {
 		if (drive < 1 || drive > 4)
 			return;
@@ -71,11 +76,12 @@ public:
 		}
 		c->label = label;
 		LapSlot& l = c->d[drive - 1];
+		std::string full_tag = (tag.empty() || tag[0] == '#') ? tag : ("#" + tag);
 		char buf[160];
-		std::snprintf(buf, sizeof buf, "last #%-3d %s", no, what.c_str());
+		std::snprintf(buf, sizeof buf, "last %-8s %s", full_tag.c_str(), what.c_str());
 		l.last = buf;
-		if (ok && (l.best_no == 0 || lap_s < l.best_s)) {
-			l.best_no = no;
+		if (ok && (l.best_tag.empty() || lap_s < l.best_s)) {
+			l.best_tag = full_tag;
 			l.best_s = lap_s;
 		}
 	}
@@ -99,8 +105,8 @@ private:
 	bool paused_ = false;
 	bool show_trail_ = true;
 	struct LapSlot {
-		std::string last;   // latest attempt, empty = none yet
-		int best_no = 0;    // 0 = no finished lap yet
+		std::string last;      // latest attempt, empty = none yet
+		std::string best_tag;  // e.g. "#15-2" or "#1"
 		double best_s = 0;
 	};
 	struct CourseLaps {
@@ -116,10 +122,15 @@ private:
 	double fps_ = 60;
 	double achieved_ = 0, rate_wall_ = 0, rate_sim_ = 0;   // measured playback speed
 	double last_render_ = 0;                               // wall time of the last frame [s]
+	double last_pump_ = 0;                                 // wall time of the last window message pump
 	int shot_no_ = 0;
 	bool script_loaded_ = false, script_active_ = false, script_waiting_drive_ = false, script_saw_busy_ = false;
 	int script_wait_ticks_ = 0;
 	double script_end_wall_ = 0;
 	std::vector<std::string> script_;
 	double auto_shot_ = 0, next_auto_shot_ = 0;   // LINESIM_AUTOSHOT=<sim seconds>: periodic screenshots
+	Pose2 last_trail_pose_{};
+	bool has_trail_pose_ = false;
+	double live_beta_ = 0;
+	double max_beta_seen_ = 0;
 };

@@ -1,0 +1,37 @@
+{
+  "name": "LineSim (iPad / Codespaces)",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
+  "features": {
+    "ghcr.io/devcontainers/features/desktop-lite:1": {
+      "version": "latest",
+      "password": "none",
+      "webPort": 6080
+    },
+    "ghcr.io/devcontainers/features/python:1": {
+      "version": "3.10"
+    }
+  },
+  "forwardPorts": [6080, 8080],
+  "portsAttributes": {
+    "6080": {
+      "label": "3D Desktop (noVNC for iPad)",
+      "onAutoForward": "openBrowser"
+    },
+    "8080": {
+      "label": "Telemetry Report Server",
+      "onAutoForward": "silent"
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "bash"
+      },
+      "extensions": [
+        "ms-vscode.cpptools",
+        "ms-vscode.cmake-tools"
+      ]
+    }
+  },
+  "postCreateCommand": "bash scripts/codespaces_setup.sh"
+}

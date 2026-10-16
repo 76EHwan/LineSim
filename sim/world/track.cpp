@@ -62,12 +62,17 @@ void Shape::compute_bounds() {
 		maxy = std::max(a.y, b.y) + hw;
 		break;
 	}
-	case ArcBand:
+	case ArcBand: {
 		minx = a.x - R - hw;
 		maxx = a.x + R + hw;
 		miny = a.y - R - hw;
 		maxy = a.y + R + hw;
+		double rin = std::max(0.0, R - hw);
+		double rout = R + hw;
+		r_in_sq = rin * rin;
+		r_out_sq = rout * rout;
 		break;
+	}
 	case Rect: {
 		double ex = std::fabs(u.x) * hl + std::fabs(u.y) * hw;
 		double ey = std::fabs(u.y) * hl + std::fabs(u.x) * hw;
@@ -91,8 +96,8 @@ bool Shape::contains(Vec2 p) const {
 		return t >= 0 && t <= len && std::fabs(n) <= hw;
 	}
 	case ArcBand: {
-		double r = std::sqrt(dx * dx + dy * dy);
-		if (std::fabs(r - R) > hw)
+		double d2 = dx * dx + dy * dy;
+		if (d2 < r_in_sq || d2 > r_out_sq)
 			return false;
 		double ang = wrap_pi(std::atan2(dy, dx) - a0);
 		if (sweep >= 0) {
@@ -164,6 +169,8 @@ bool Track::load_text(const std::string& text, const std::string& path, std::str
 		if (sg.has("straight")) {
 			p.arc = false;
 			p.len = sg.num("straight", 0);
+			p.ux = std::cos(p.th0);
+			p.uy = std::sin(p.th0);
 		} else if (sg.has("arc")) {
 			double deg = sg.num("arc", 0);
 			p.arc = true;
@@ -172,6 +179,10 @@ bool Track::load_text(const std::string& text, const std::string& path, std::str
 			p.len = std::fabs(deg) * kPi / 180.0 * p.radius;
 			Vec2 n = left_normal(cur.th);
 			p.center = {cur.x + p.turn * p.radius * n.x, cur.y + p.turn * p.radius * n.y};
+			p.ux = std::cos(p.th0);
+			p.uy = std::sin(p.th0);
+			p.a0 = std::atan2(p.p0.y - p.center.y, p.p0.x - p.center.x);
+			p.sweep = p.len / p.radius;
 			double a = std::fabs(deg);
 			if (std::fabs(p.radius - kRuleRadius) > 1e-9 || std::fabs(a / 45.0 - std::round(a / 45.0)) > 1e-6 || a < 45 ||
 				a > 270)
@@ -184,6 +195,18 @@ bool Track::load_text(const std::string& text, const std::string& path, std::str
 		if (p.len <= 0) {
 			*err = path + ": zero-length segment";
 			return false;
+		}
+		if (!p.arc) {
+			Vec2 p1 = {p.p0.x + p.len * p.ux, p.p0.y + p.len * p.uy};
+			p.minx = std::min(p.p0.x, p1.x);
+			p.maxx = std::max(p.p0.x, p1.x);
+			p.miny = std::min(p.p0.y, p1.y);
+			p.maxy = std::max(p.p0.y, p1.y);
+		} else {
+			p.minx = p.center.x - p.radius;
+			p.maxx = p.center.x + p.radius;
+			p.miny = p.center.y - p.radius;
+			p.maxy = p.center.y + p.radius;
 		}
 		pieces_.push_back(p);
 		cur = p.at(p.len);
@@ -311,55 +334,72 @@ Pose2 Track::pose_at(double s) const {
 }
 
 bool Track::nearest(Vec2 q, double* lateral, double* s_out) const {
-	double best = 1e9, best_lat = 0, best_s = 0;
-	for (const PathPiece& p : pieces_) {
-		double lat, s;
+	if (pieces_.empty())
+		return false;
+
+	double best_d2 = 1e18, best_lat = 0, best_s = 0;
+	size_t best_idx = last_piece_idx_ < pieces_.size() ? last_piece_idx_ : 0;
+
+	auto eval_piece = [&](size_t idx, const PathPiece& p) {
 		if (!p.arc) {
-			double ux = std::cos(p.th0), uy = std::sin(p.th0);
 			double dx = q.x - p.p0.x, dy = q.y - p.p0.y;
-			double t = std::clamp(dx * ux + dy * uy, 0.0, p.len);
-			double px = p.p0.x + t * ux, py = p.p0.y + t * uy;
+			double t = std::clamp(dx * p.ux + dy * p.uy, 0.0, p.len);
+			double px = p.p0.x + t * p.ux, py = p.p0.y + t * p.uy;
 			double ex = q.x - px, ey = q.y - py;
-			lat = -ex * uy + ey * ux;
-			double d = std::sqrt(ex * ex + ey * ey);
-			s = p.s0 + t;
-			if (d < best) {
-				best = d;
-				best_lat = lat;
-				best_s = s;
+			double d2 = ex * ex + ey * ey;
+			if (d2 < best_d2) {
+				best_d2 = d2;
+				best_lat = -ex * p.uy + ey * p.ux;
+				best_s = p.s0 + t;
+				best_idx = idx;
 			}
 		} else {
 			double dx = q.x - p.center.x, dy = q.y - p.center.y;
-			double r = std::sqrt(dx * dx + dy * dy);
-			double a0 = std::atan2(p.p0.y - p.center.y, p.p0.x - p.center.x);
-			double ang = wrap_pi(std::atan2(dy, dx) - a0) * p.turn;
+			double ang = wrap_pi(std::atan2(dy, dx) - p.a0) * p.turn;
 			if (ang < -1e-9)
 				ang += 2 * kPi;
-			double sweep = p.len / p.radius;
-			double t;
-			if (ang <= sweep) {
-				t = ang * p.radius;
-			} else {   // beyond the arc: snap to the closer end
-				t = (ang - sweep < 2 * kPi - ang) ? p.len : 0.0;
-			}
+			double t = (ang <= p.sweep) ? ang * p.radius
+			         : ((ang - p.sweep < 2 * kPi - ang) ? p.len : 0.0);
 			Pose2 pp = p.at(t);
 			double ex = q.x - pp.x, ey = q.y - pp.y;
-			double d = std::sqrt(ex * ex + ey * ey);
-			lat = -ex * std::sin(pp.th) + ey * std::cos(pp.th);
-			(void) r;
-			s = p.s0 + t;
-			if (d < best) {
-				best = d;
-				best_lat = lat;
-				best_s = s;
+			double d2 = ex * ex + ey * ey;
+			if (d2 < best_d2) {
+				best_d2 = d2;
+				best_lat = -ex * std::sin(pp.th) + ey * std::cos(pp.th);
+				best_s = p.s0 + t;
+				best_idx = idx;
 			}
 		}
+	};
+
+	// 1. Evaluate cached nearest piece first for temporal continuity
+	eval_piece(best_idx, pieces_[best_idx]);
+
+	// 2. Evaluate other pieces with bounding-box distance rejection
+	for (size_t i = 0; i < pieces_.size(); i++) {
+		if (i == best_idx)
+			continue;
+		const PathPiece& p = pieces_[i];
+		double d_box_x = 0;
+		if (q.x < p.minx) d_box_x = p.minx - q.x;
+		else if (q.x > p.maxx) d_box_x = q.x - p.maxx;
+
+		double d_box_y = 0;
+		if (q.y < p.miny) d_box_y = p.miny - q.y;
+		else if (q.y > p.maxy) d_box_y = q.y - p.maxy;
+
+		if (d_box_x * d_box_x + d_box_y * d_box_y >= best_d2)
+			continue;
+
+		eval_piece(i, p);
 	}
+
+	last_piece_idx_ = best_idx;
 	if (lateral)
 		*lateral = best_lat;
 	if (s_out)
 		*s_out = best_s;
-	return best < 1e8;
+	return best_d2 < 1e16;
 }
 
 void Track::build_index() {
@@ -375,10 +415,13 @@ void Track::build_index() {
 	gnx_ = static_cast<int>((x1 - gx0_) / cell_) + 2;
 	gny_ = static_cast<int>((y1 - gy0_) / cell_) + 2;
 	grid_.assign(static_cast<size_t>(gnx_) * gny_, {});
+	const double margin = 0.020; // 20 mm sensor margin covers max 2.5 * sigma
 	for (int k = 0; k < static_cast<int>(shapes_.size()); k++) {
 		const Shape& s = shapes_[k];
-		int ix0 = static_cast<int>((s.minx - gx0_) / cell_), ix1 = static_cast<int>((s.maxx - gx0_) / cell_);
-		int iy0 = static_cast<int>((s.miny - gy0_) / cell_), iy1 = static_cast<int>((s.maxy - gy0_) / cell_);
+		int ix0 = std::max(0, static_cast<int>((s.minx - margin - gx0_) / cell_));
+		int ix1 = std::min(gnx_ - 1, static_cast<int>((s.maxx + margin - gx0_) / cell_));
+		int iy0 = std::max(0, static_cast<int>((s.miny - margin - gy0_) / cell_));
+		int iy1 = std::min(gny_ - 1, static_cast<int>((s.maxy + margin - gy0_) / cell_));
 		for (int ix = ix0; ix <= ix1; ix++)
 			for (int iy = iy0; iy <= iy1; iy++)
 				grid_[static_cast<size_t>(iy) * gnx_ + ix].push_back(k);
@@ -386,8 +429,8 @@ void Track::build_index() {
 }
 
 bool Track::white(Vec2 p) const {
-	int ix = static_cast<int>(std::floor((p.x - gx0_) / cell_));
-	int iy = static_cast<int>(std::floor((p.y - gy0_) / cell_));
+	int ix = static_cast<int>((p.x - gx0_) / cell_);
+	int iy = static_cast<int>((p.y - gy0_) / cell_);
 	if (ix < 0 || iy < 0 || ix >= gnx_ || iy >= gny_)
 		return false;
 	for (int k : grid_[static_cast<size_t>(iy) * gnx_ + ix])
@@ -397,10 +440,25 @@ bool Track::white(Vec2 p) const {
 }
 
 double Track::coverage(Vec2 p, double sigma) const {
+	int ix = static_cast<int>((p.x - gx0_) / cell_);
+	int iy = static_cast<int>((p.y - gy0_) / cell_);
+	if (ix < 0 || iy < 0 || ix >= gnx_ || iy >= gny_)
+		return 0.0;
+
+	const auto& cg = grid_[static_cast<size_t>(iy) * gnx_ + ix];
+	if (cg.empty())
+		return 0.0;
+
 	double c = 0;
-	for (int k = 0; k < 25; k++)
-		if (white({p.x + kSpot.ox[k] * sigma, p.y + kSpot.oy[k] * sigma}))
-			c += kSpot.w[k];
+	for (int k = 0; k < 25; k++) {
+		Vec2 sp = {p.x + kSpot.ox[k] * sigma, p.y + kSpot.oy[k] * sigma};
+		for (int sk : cg) {
+			if (shapes_[sk].contains(sp)) {
+				c += kSpot.w[k];
+				break;
+			}
+		}
+	}
 	return c;
 }
 

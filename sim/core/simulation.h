@@ -78,7 +78,7 @@ private:
 	uint64_t next_[kSourceCount];
 	uint64_t period_[kSourceCount];
 	uint64_t phys_t_ = 0;          // time of the last physics step
-	uint64_t quantum_ = 10000;     // virtual time of one firmware main-loop pass [ns]
+	uint64_t quantum_ = 50000;     // virtual time of one firmware main-loop pass [ns]
 
 	void* sim_fiber_ = nullptr;
 	void* fw_fiber_ = nullptr;

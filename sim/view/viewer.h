@@ -17,6 +17,8 @@ struct ViewerHud {
 	bool lcd_inverted = false;
 	float sensors[18] = {};             // normalized IR values 0..1 (bottom bar)
 	bool sensor_on[18] = {};
+	double live_beta = 0.0;
+	double live_lat_mm = 0.0;
 };
 
 class Viewer {
@@ -31,7 +33,7 @@ public:
 
 	bool pump();                        // handle window messages; false once the window is closed
 	void render(const ViewerHud& hud);
-	void add_trail(double x, double y, double speed);
+	void add_trail(double x, double y, double speed, double beta = 0.0, double lat_mm = 0.0);
 	void clear_trail() {
 		trail_.clear();
 		trail_vmax_ = 1.0;
@@ -46,10 +48,16 @@ public:
 	int cam_mode() const { return cam_mode_; }
 	void set_cam_mode(int m);
 	void toggle_shadows();
-	void toggle_inset() { inset_ = !inset_; }
+	enum InsetMode { kInsetOff = 0, kInsetMap = 1, kInsetSensor = 2 };
+	void cycle_inset() { inset_mode_ = (inset_mode_ + 1) % 3; }
+	void toggle_inset() { inset_mode_ = (inset_mode_ == kInsetOff) ? kInsetMap : kInsetOff; }
+	int inset_mode() const { return inset_mode_; }
+	void set_inset_mode(int m) { inset_mode_ = m; }
 	void set_sensor_offset(double x) { sensor_x_ = x; }   // axle -> sensor bar [m], for the sensor view
 	// IR sensor spots (robot frame x, y), drawn on the floor; colored by ViewerHud::sensor_on
 	void set_sensor_points(const std::vector<std::array<double, 2>>& pts) { sensor_pts_ = pts; }
+	void set_fast_mode(bool fast) { fast_mode_ = fast; }
+	bool fast_mode() const { return fast_mode_; }
 
 private:
 	static long long __stdcall wndproc(void* hwnd, unsigned msg, unsigned long long wp, long long lp);
@@ -71,7 +79,7 @@ private:
 	Impl* im_ = nullptr;
 
 	std::string shot_path_;
-	struct TrailPt { float x, y, v; };
+	struct TrailPt { float x, y, v, beta, lat_mm; };
 	std::vector<TrailPt> trail_;
 	double trail_vmax_ = 1.0;
 
@@ -82,8 +90,10 @@ private:
 	int cam_mode_ = kFollow;
 	double follow_az_ = 0;
 	std::vector<std::array<double, 2>> sensor_pts_;
-	bool inset_ = true;       // small "above the sensor bar" view in the corner
+	int inset_mode_ = kInsetMap;   // default to Track Map in corner
 	double sensor_x_ = 0.13;
 	void sensor_cam(void* cam) const;   // follow camera azimuth relative to the robot heading [deg]
+	void map_cam(void* cam) const;      // top-down track map view
 	double cx_ = 0, cy_ = 0, extent_ = 2;   // track center / size for the top view
+	bool fast_mode_ = false;
 };

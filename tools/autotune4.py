@@ -35,17 +35,17 @@ import autotune as at   # noqa: E402
 
 ROOT = at.ROOT
 #          name                lo     hi    start   step   resolution
-PARAMS = [("base_mps",         1.3,   2.2,  1.7,    0.1,   0.02),
-          ("max_mps",          2.5,   6.0,  4.5,    0.5,   0.1),
-          ("accel",            4.0,  14.0, 10.0,    2.0,   0.5),
-          ("decel",            4.0,  14.0, 10.0,    2.0,   0.5),
-          ("steer_kp",        12.0,  32.0, 28.0,    3.0,   0.5),
-          ("steer_kd_s",       0.0,   0.4,  0.2125, 0.05,  0.01),
-          ("lat_acc_max",      9.0,  15.0, 12.6,    1.0,   0.2),
-          ("target_shift",     0.0,   0.5,  0.3,    0.1,   0.02),
-          ("target_curve_gain", 0.5,  2.5,  1.0,    0.3,   0.05),
-          ("slalom_ratio",     0.0,   0.12, 0.05,   0.03,  0.005),
-          ("pos_atten_gain",   0.0,   0.6,  0.0,    0.1,   0.02)]
+PARAMS = [("base_mps",         1.6,   2.2,  1.9,    0.1,   0.02),
+          ("max_mps",         10.0,  10.0, 10.0,    0.0,   0.0),     # max_mps 10.0 고정
+          ("accel",           10.0,  10.0, 10.0,    0.0,   0.0),     # accel 10.0 고정
+          ("decel",           10.0,  10.0, 10.0,    0.0,   0.0),     # decel 10.0 고정
+          ("steer_kp",        20.0,  34.0, 28.0,    2.0,   1.0),     # 깔끔한 정수 KP 보장
+          ("steer_kd_s",       0.1,   0.3,  0.2125, 0.025, 0.0125),
+          ("lat_acc_max",     12.0,  16.0, 13.6,    0.5,   0.2),
+          ("target_shift",     0.1,   0.4,  0.25,   0.05,  0.02),
+          ("target_curve_gain", 0.8,  1.5,  1.15,   0.1,   0.05),
+          ("slalom_ratio",     0.01,  0.10, 0.06,   0.02,  0.01),
+          ("pos_atten_gain",   0.0,   0.4,  0.0,    0.0,   0.0)]
 NAMES = [p[0] for p in PARAMS]
 MIN_GAIN_S = 0.01          # a move must save more than this much drive-4 lap time
 OUT = os.path.join(ROOT, "runs", "tune4")
@@ -81,7 +81,7 @@ def drive_pair(course, robot, vals, extra, tag, robot_params=(), seed=1):
     if d4 is None or d4["outcome"] == "skipped":
         return False, "4: did not run", None, None
     if at.lost_line(d4):
-        return False, "4: " + (d4["outcome"] if d4["outcome"] != "finished" else "line far off"), None, d4
+        return False, "4: " + (d4["outcome"] if not d4["outcome"].startswith("finished") else "line far off"), None, d4
     if d4.get("marker_check") != "OK" or d4["lap_time_fw"] <= 0:
         return False, "4: markers " + d4.get("marker_check", "?"), None, d4
     return True, "", d4["lap_time_fw"], d4

@@ -20,13 +20,17 @@
 #include <stdarg.h>
 #include <math.h>
 
+#if defined(_MSC_VER) && !defined(__GNUC__) && !defined(__clang__)
 #define __attribute__(x)
+#endif
 
+#ifndef __GNUC__
 static __inline int sim_popcount32(uint32_t v) {
 	v = v - ((v >> 1) & 0x55555555u);
 	v = (v & 0x33333333u) + ((v >> 2) & 0x33333333u);
 	return (int) ((((v + (v >> 4)) & 0x0F0F0F0Fu) * 0x01010101u) >> 24);
 }
 #define __builtin_popcount(x) sim_popcount32((uint32_t)(x))
+#endif
 
 #endif /* SIM_COMPAT_H */

@@ -1,17 +1,21 @@
 {
   // Ctrl+Shift+B: build.   Terminal > Run Task...: the LineSim tasks below.
   // The run tasks open the 3D window. Results go to runs/latest (index.html, summary.json, ...).
-  //
-  // Executables are given with absolute paths: for "process" tasks VS Code resolves a bare
-  // command name against the task's cwd (the workspace), not against PATH.
+  // Cross-platform support for Windows (MSVC) and Linux (GitHub Codespaces / iPad via Wine).
   "version": "2.0.0",
   "options": { "cwd": "${workspaceFolder}" },
   "tasks": [
     {
       "label": "LineSim: Build (Release)",
       "type": "process",
-      "command": "${env:SystemRoot}\\System32\\cmd.exe",
-      "args": ["/d", "/c", "${workspaceFolder}\\build.bat", "Release"],
+      "windows": {
+        "command": "${env:SystemRoot}\\System32\\cmd.exe",
+        "args": ["/d", "/c", "${workspaceFolder}\\build.bat", "Release"]
+      },
+      "linux": {
+        "command": "bash",
+        "args": ["${workspaceFolder}/scripts/build_mingw.sh"]
+      },
       "group": { "kind": "build", "isDefault": true },
       "problemMatcher": "$msCompile",
       "presentation": { "reveal": "always", "clear": true }
@@ -19,8 +23,14 @@
     {
       "label": "LineSim: Build (Debug)",
       "type": "process",
-      "command": "${env:SystemRoot}\\System32\\cmd.exe",
-      "args": ["/d", "/c", "${workspaceFolder}\\build.bat", "Debug"],
+      "windows": {
+        "command": "${env:SystemRoot}\\System32\\cmd.exe",
+        "args": ["/d", "/c", "${workspaceFolder}\\build.bat", "Debug"]
+      },
+      "linux": {
+        "command": "bash",
+        "args": ["${workspaceFolder}/scripts/build_mingw.sh"]
+      },
       "group": "build",
       "problemMatcher": "$msCompile",
       "presentation": { "reveal": "always", "clear": true }
@@ -29,7 +39,12 @@
       "label": "LineSim: 3D session",
       "detail": "Keep driving in the 3D window: 1-4 start a drive, arrows edit parameters, N = new random course",
       "type": "process",
-      "command": "${workspaceFolder}\\build\\Release\\linesim.exe",
+      "windows": {
+        "command": "${workspaceFolder}\\build\\Release\\linesim.exe"
+      },
+      "linux": {
+        "command": "${workspaceFolder}/linesim"
+      },
       "args": ["view", "--session", "--track", "${input:track}", "--robot", "robots/full.json", "--out", "runs/latest",
                "--set", "base_mps=${input:baseSpeed}", "--set", "max_mps=${input:maxSpeed}", "--set", "accel=${input:accel}", "--set", "decel=${input:decel}", "${input:extraArgs}"],
       "dependsOn": "LineSim: Build (Release)",
@@ -41,7 +56,12 @@
       "label": "LineSim: 3D scenario",
       "detail": "A scenario file (fixed drives) in the 3D window",
       "type": "process",
-      "command": "${workspaceFolder}\\build\\Release\\linesim.exe",
+      "windows": {
+        "command": "${workspaceFolder}\\build\\Release\\linesim.exe"
+      },
+      "linux": {
+        "command": "${workspaceFolder}/linesim"
+      },
       "args": ["view", "${input:scenario}", "--out", "runs/latest",
                "--set", "base_mps=${input:baseSpeed}", "--set", "max_mps=${input:maxSpeed}", "--set", "accel=${input:accel}", "--set", "decel=${input:decel}", "${input:extraArgs}"],
       "dependsOn": "LineSim: Build (Release)",
@@ -52,7 +72,12 @@
       "label": "LineSim: 3D interactive firmware menu",
       "detail": "Boots to the firmware menu; arrows = U/D/L/R buttons, Enter = K",
       "type": "process",
-      "command": "${workspaceFolder}\\build\\Release\\linesim.exe",
+      "windows": {
+        "command": "${workspaceFolder}\\build\\Release\\linesim.exe"
+      },
+      "linux": {
+        "command": "${workspaceFolder}/linesim"
+      },
       "args": ["view", "--interactive", "--track", "${input:track}", "--robot", "robots/full.json", "--out", "runs/latest"],
       "dependsOn": "LineSim: Build (Release)",
       "problemMatcher": [],
@@ -62,7 +87,12 @@
       "label": "LineSim: Generate random course",
       "detail": "tracks/random_<seed>.json, ZETIN rules (R 25 cm, 45 deg steps, right-angle crossings)",
       "type": "process",
-      "command": "${workspaceFolder}\\build\\Release\\linesim.exe",
+      "windows": {
+        "command": "${workspaceFolder}\\build\\Release\\linesim.exe"
+      },
+      "linux": {
+        "command": "${workspaceFolder}/linesim"
+      },
       "args": ["gen", "${input:genArgs}"],
       "dependsOn": "LineSim: Build (Release)",
       "problemMatcher": [],
@@ -72,7 +102,12 @@
       "label": "LineSim: Run scenario (no window)",
       "detail": "Headless, as fast as possible; output in runs/latest",
       "type": "process",
-      "command": "${workspaceFolder}\\build\\Release\\linesim.exe",
+      "windows": {
+        "command": "${workspaceFolder}\\build\\Release\\linesim.exe"
+      },
+      "linux": {
+        "command": "${workspaceFolder}/linesim"
+      },
       "args": ["run", "${input:scenario}", "--out", "runs/latest",
                "--set", "base_mps=${input:baseSpeed}", "--set", "max_mps=${input:maxSpeed}", "--set", "accel=${input:accel}", "--set", "decel=${input:decel}", "${input:extraArgs}"],
       "dependsOn": "LineSim: Build (Release)",
@@ -80,20 +115,16 @@
       "presentation": { "reveal": "always", "clear": true, "focus": true }
     },
     {
-      "label": "LineSim: Auto-tune steering gains (target speed)",
-      "detail": "Searches steer kp x kd on 4 random courses at the target speed (drive 1); result in runs/tune/<speed>/result.txt",
-      "type": "process",
-      "command": "${workspaceFolder}\\tools\\.venv\\Scripts\\python.exe",
-      "args": ["tools/autotune.py", "${input:tuneSpeed}"],
-      "dependsOn": "LineSim: Build (Release)",
-      "problemMatcher": [],
-      "presentation": { "reveal": "always", "clear": true, "focus": true }
-    },
-    {
       "label": "LineSim: Open results in browser",
       "type": "process",
-      "command": "${env:SystemRoot}\\explorer.exe",
-      "args": ["${workspaceFolder}\\runs\\latest\\index.html"],
+      "windows": {
+        "command": "${env:SystemRoot}\\explorer.exe",
+        "args": ["${workspaceFolder}\\runs\\latest\\index.html"]
+      },
+      "linux": {
+        "command": "python3",
+        "args": ["${workspaceFolder}/tools/serve_report.py"]
+      },
       "problemMatcher": [],
       "presentation": { "reveal": "silent" }
     },
@@ -110,8 +141,14 @@
       "label": "LineSim: Import Full.step (robot model)",
       "detail": "robots/Full.step -> robots/full.json + robots/mesh/*.stl (needs tools/.venv)",
       "type": "process",
-      "command": "${workspaceFolder}\\tools\\.venv\\Scripts\\python.exe",
-      "args": ["tools/step_import.py", "robots/Full.step", "--total-mass", "0.4"],
+      "windows": {
+        "command": "${workspaceFolder}\\tools\\.venv\\Scripts\\python.exe",
+        "args": ["tools/step_import.py", "robots/Full.step", "--total-mass", "0.4"]
+      },
+      "linux": {
+        "command": "python3",
+        "args": ["tools/step_import.py", "robots/Full.step", "--total-mass", "0.4"]
+      },
       "problemMatcher": [],
       "presentation": { "reveal": "always", "clear": true }
     }
@@ -131,11 +168,11 @@
       "options": ["scenarios/figure8_all.json", "scenarios/oval_first.json"],
       "default": "scenarios/figure8_all.json"
     },
-    { "id": "baseSpeed", "type": "promptString", "description": "base speed [m/s] (driveData.base_mps)", "default": "1.8" },
+    { "id": "baseSpeed", "type": "promptString", "description": "base speed [m/s] (driveData.base_mps)", "default": "2.04" },
     { "id": "maxSpeed", "type": "promptString", "description": "max speed on straights [m/s] (driveData.max_mps, drives 2 and 4)", "default": "4.0" },
     { "id": "accel", "type": "promptString", "description": "acceleration [m/s^2] (driveData.accel)", "default": "5.5" },
     { "id": "decel", "type": "promptString", "description": "deceleration [m/s^2] (driveData.decel)", "default": "5.5" },
-    { "id": "tuneSpeed", "type": "promptString", "description": "target speed [m/s] to tune steer kp / kd for (takes a few minutes)", "default": "2.0" },
+    { "id": "tuneSpeed", "type": "promptString", "description": "target speed [m/s] to tune steer kp / kd for (takes a few minutes)", "default": "2.04" },
     {
       "id": "extraArgs",
       "type": "promptString",
