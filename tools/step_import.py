@@ -29,7 +29,7 @@ ROOT = os.path.dirname(HERE)
 GROUPS = [
     (r"^Tire", "tires", [0.08, 0.08, 0.08, 1]),
     (r"^(Wheel|Spur Gear|bearing|Wheel_Axis)", "wheels", [0.72, 0.72, 0.75, 1]),
-    (r"^(GearFrame|0 \(5\))", "drive", [0.55, 0.57, 0.6, 1]),
+    (r"^(GearFrame|0 \(5\)|connector)", "drive", [0.55, 0.57, 0.6, 1]),
     (r"^GNB", "battery", [0.15, 0.3, 0.75, 1]),
     (r"^plate", "plate", [0.12, 0.12, 0.13, 1]),
     (r"^OPTO-SMD_ITR8307", "ir_sensors", [0.2, 0.2, 0.22, 1]),
@@ -96,27 +96,65 @@ def main(step_path):
         m.apply_transform(T)
         parts.append((base_name(node), m))
 
-    # ---- frame: from the four tires ----
+    # ---- frame: from the four tires and sensors ----
     tires = [m for n, m in parts if n.startswith("Tire")]
     if len(tires) not in (2, 4):
         sys.exit(f"expected 2 or 4 parts named Tire*, found {len(tires)}")
     tc = np.array([t.bounds.mean(0) for t in tires])
-    radius = float(np.mean([max(t.extents[1], t.extents[2]) for t in tires]) / 2)
-    width = float(np.mean([t.extents[0] for t in tires]))
     origin = tc.mean(0)                       # middle of the axles, wheel-center height
-    front_sign = -1.0                         # sensor board is at -z
+
+    # Automatically detect CAD orientation axes:
+    # 1. Axle axis is the one with the largest spread among wheel centers (track ~187mm)
+    span = np.ptp(tc, axis=0)
+    axle_axis = int(np.argmax(span))
+
+    # 2. Forward axis points towards the IR sensors (or sensor board / neck)
+    sens_parts = [m for n, m in parts if "ITR8307" in n or "OPTO" in n or "SENSOR NECK" in n or "Board~p9Sd" in n]
+    if sens_parts:
+        sensor_center = np.mean([m.bounds.mean(0) for m in sens_parts], axis=0)
+        fwd_vec = sensor_center - origin
+        fwd_vec[axle_axis] = 0.0
+        fwd_axis = int(np.argmax(np.abs(fwd_vec)))
+        fwd_sign = 1.0 if fwd_vec[fwd_axis] > 0 else -1.0
+    else:
+        fwd_axis = 2
+        fwd_sign = -1.0
+
+    # 3. Vertical axis is the remaining axis (upwards from tires towards PCB/battery)
+    vert_axis = [i for i in (0, 1, 2) if i not in (axle_axis, fwd_axis)][0]
+    board_parts = [m for n, m in parts if "Board~ypt3" in n or "GNB" in n or "plate" in n]
+    if board_parts:
+        vert_vec = np.mean([m.bounds.mean(0) for m in board_parts], axis=0) - origin
+        vert_sign = 1.0 if vert_vec[vert_axis] > 0 else -1.0
+    else:
+        vert_sign = 1.0
+
+    u_fwd = np.zeros(3)
+    u_fwd[fwd_axis] = fwd_sign
+
+    u_up = np.zeros(3)
+    u_up[vert_axis] = vert_sign
+
+    u_left = np.cross(u_up, u_fwd)
+
+    R3 = np.vstack([u_fwd, u_left, u_up])
+    R = np.eye(4)
+    R[:3, :3] = R3
+    Tm = R @ trimesh.transformations.translation_matrix(-origin)
 
     def to_robot(p):
         p = np.asarray(p, dtype=float) - origin
-        # robot x = -z_step (forward), robot y = -x_step (left), robot z = y_step (up)
-        return np.stack([front_sign * p[..., 2], -p[..., 0], p[..., 1]], axis=-1)
+        return p @ R3.T
 
-    R = np.zeros((4, 4))
-    R[0, 2] = front_sign
-    R[1, 0] = -1
-    R[2, 1] = 1
-    R[3, 3] = 1
-    Tm = R @ trimesh.transformations.translation_matrix(-origin)
+    # Dimensions in robot frame
+    tire_radii, tire_widths = [], []
+    for t in tires:
+        vr = to_robot(t.vertices)
+        ex = np.ptp(vr, axis=0)
+        tire_radii.append(max(ex[0], ex[2]) / 2.0)
+        tire_widths.append(ex[1])
+    radius = float(np.mean(tire_radii))
+    width = float(np.mean(tire_widths))
 
     wheels = to_robot(tc)
     wheels = wheels[np.lexsort((-wheels[:, 0], -wheels[:, 1]))]   # left first, front first
@@ -128,7 +166,7 @@ def main(step_path):
     if opto:
         cents = clusters([to_robot(m.bounds.mean(0)) for m in opto], 0.004)
         sens = sorted(cents, key=lambda c: -c[1])   # left (+y) first
-    ground_z = float(min(t.bounds[0][1] for t in tires) - origin[1])   # tire bottom, robot frame z
+    ground_z = float(min(to_robot(t.vertices)[:, 2].min() for t in tires))   # tire bottom, robot frame z
 
     # ---- meshes per group ----
     mesh_dir = os.path.join(ROOT, "robots", "mesh")
@@ -180,7 +218,7 @@ def main(step_path):
         ms = [m for n, m in parts if pred(n)]
         if not ms:
             return None
-        b = np.array([to_robot(m.bounds) for m in ms]).reshape(-1, 3)
+        b = np.vstack([to_robot(m.vertices) for m in ms])
         lo, hi = b.min(0), b.max(0)
         c, h = (lo + hi) / 2, (hi - lo) / 2
         return [round(float(v), 5) for v in list(c) + list(h)]
@@ -224,7 +262,8 @@ def main(step_path):
         except Exception:
             v = 1e-12
         gvol[g] += v
-        pinfo.append((g, v, to_robot(m.bounds.mean(0)), np.abs(R[:3, :3] @ m.extents)))
+        vr = to_robot(m.vertices)
+        pinfo.append((g, v, vr.mean(0), np.ptp(vr, axis=0)))
     pts = [(ASSUMED_MASS.get(g, 0.0) * v / gvol[g], c, e) for g, v, c, e in pinfo if gvol[g] > 0]
     wheel_mass = (ASSUMED_MASS["wheels"] + ASSUMED_MASS["tires"]) / len(tires)
     body = [(m, c, e) for (m, c, e), (g, *_ ) in zip(pts, pinfo) if g not in ("wheels", "tires")]
