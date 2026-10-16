@@ -11,6 +11,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <memory>
 #include <random>
 #include <regex>
@@ -925,17 +926,44 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 	};
 
 	// Session: replace the course by a new random one (firmware idle, between events).
+	// Background prefetch queue so the next random map is already built while the robot is driving.
+	std::future<std::pair<std::string, unsigned>> prefetched_map;
+	auto start_map_prefetch = [&]() {
+		if (!prefetched_map.valid()) {
+			const unsigned next_seed = ++map_seed;
+			prefetched_map = std::async(std::launch::async, [next_seed]() {
+				TrackGenOptions g;
+				g.seed = next_seed;
+				std::string e;
+				return std::make_pair(generate_track(g, &e), next_seed);
+			});
+		}
+	};
+	if (opt.session)
+		start_map_prefetch();
+
 	// Session: a new random course (saved into the output folder), "" on failure.
 	auto make_map = [&](std::string* label) {
-		TrackGenOptions g;
-		g.seed = ++map_seed;
-		std::string e;
-		std::string text = generate_track(g, &e);
-		if (text.empty()) {
-			session.message = "map generator: " + e;
-			return text;
+		std::string text;
+		unsigned used_seed = 0;
+		if (prefetched_map.valid()) {
+			auto res_pair = prefetched_map.get();
+			text = std::move(res_pair.first);
+			used_seed = res_pair.second;
 		}
-		*label = save_generated(text, g.seed);   // load_course() makes it the course on the floor
+		start_map_prefetch();   // immediately start generating the next map in the background
+		if (text.empty()) {
+			TrackGenOptions g;
+			g.seed = ++map_seed;
+			used_seed = g.seed;
+			std::string e;
+			text = generate_track(g, &e);
+			if (text.empty()) {
+				session.message = "map generator: " + e;
+				return text;
+			}
+		}
+		*label = save_generated(text, used_seed);   // load_course() makes it the course on the floor
 		return text;
 	};
 	// Session: put a course on the floor (firmware idle, between events).

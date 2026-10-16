@@ -153,6 +153,346 @@ void push_arc(Pieces* ps, int deg, double gap) {
 		ps->push_back({false, gap, 0});
 	ps->push_back({true, 0, deg});
 }
+
+double wrap_pi_gen(double a) {
+	while (a > kPi) a -= 2 * kPi;
+	while (a < -kPi) a += 2 * kPi;
+	return a;
+}
+
+struct FPiece {
+	bool arc;
+	int turn;
+	double s0, len;
+	double x0, y0, th0, ux, uy;
+	double x1, y1;
+	double cx, cy, a0, sweep;
+	double minx, maxx, miny, maxy;
+	double sb, sa; // contiguous straight length before start and after end
+};
+
+struct FCrossing {
+	double s1, s2;
+};
+
+inline double dist_sq_pt_seg(double px, double py, const FPiece& s) {
+	const double dx = px - s.x0, dy = py - s.y0;
+	const double t = std::clamp(dx * s.ux + dy * s.uy, 0.0, s.len);
+	const double ex = dx - t * s.ux, ey = dy - t * s.uy;
+	return ex * ex + ey * ey;
+}
+
+inline double dist_sq_pt_arc(double px, double py, const FPiece& a) {
+	const double dx = px - a.cx, dy = py - a.cy;
+	double ang = wrap_pi_gen(std::atan2(dy, dx) - a.a0) * a.turn;
+	if (ang < -1e-9)
+		ang += 2 * kPi;
+	if (ang <= a.sweep) {
+		const double r = std::sqrt(dx * dx + dy * dy);
+		const double dr = r - kR;
+		return dr * dr;
+	}
+	const double d0 = (px - a.x0) * (px - a.x0) + (py - a.y0) * (py - a.y0);
+	const double d1 = (px - a.x1) * (px - a.x1) + (py - a.y1) * (py - a.y1);
+	return std::min(d0, d1);
+}
+
+// Exact closed-form minimum squared distance between two non-adjacent pieces
+inline double exact_piece_dist_sq(const FPiece& A, const FPiece& B) {
+	if (!A.arc && !B.arc) {
+		double d2 = std::min(dist_sq_pt_seg(A.x0, A.y0, B), dist_sq_pt_seg(A.x1, A.y1, B));
+		d2 = std::min(d2, std::min(dist_sq_pt_seg(B.x0, B.y0, A), dist_sq_pt_seg(B.x1, B.y1, A)));
+		return d2;
+	}
+	if (!A.arc && B.arc) {
+		const double dx = B.cx - A.x0, dy = B.cy - A.y0;
+		const double tc = dx * A.ux + dy * A.uy;
+		const double h = -dx * A.uy + dy * A.ux;
+		const double t0 = std::clamp(tc, 0.0, A.len);
+		double d2 = std::min(dist_sq_pt_arc(A.x0, A.y0, B), dist_sq_pt_arc(A.x1, A.y1, B));
+		d2 = std::min(d2, dist_sq_pt_arc(A.x0 + t0 * A.ux, A.y0 + t0 * A.uy, B));
+		if (std::fabs(h) < kR) {
+			const double dt = std::sqrt(std::max(0.0, kR * kR - h * h));
+			const double t1 = std::clamp(tc - dt, 0.0, A.len);
+			const double t2 = std::clamp(tc + dt, 0.0, A.len);
+			d2 = std::min(d2, dist_sq_pt_arc(A.x0 + t1 * A.ux, A.y0 + t1 * A.uy, B));
+			d2 = std::min(d2, dist_sq_pt_arc(A.x0 + t2 * A.ux, A.y0 + t2 * A.uy, B));
+		}
+		d2 = std::min(d2, std::min(dist_sq_pt_seg(B.x0, B.y0, A), dist_sq_pt_seg(B.x1, B.y1, A)));
+		return d2;
+	}
+	if (A.arc && !B.arc) {
+		return exact_piece_dist_sq(B, A);
+	}
+	// Arc - Arc
+	const double cdx = B.cx - A.cx, cdy = B.cy - A.cy;
+	const double cdist2 = cdx * cdx + cdy * cdy;
+	double d2 = std::min(dist_sq_pt_arc(A.x0, A.y0, B), dist_sq_pt_arc(A.x1, A.y1, B));
+	d2 = std::min(d2, std::min(dist_sq_pt_arc(B.x0, B.y0, A), dist_sq_pt_arc(B.x1, B.y1, A)));
+	if (cdist2 > 1e-12) {
+		const double cdist = std::sqrt(cdist2);
+		const double ux = cdx / cdist, uy = cdy / cdist;
+		// Points on circle A along the line of centers towards/away from B
+		for (int s : {1, -1}) {
+			const double px = A.cx + s * kR * ux, py = A.cy + s * kR * uy;
+			double ang = wrap_pi_gen(std::atan2(py - A.cy, px - A.cx) - A.a0) * A.turn;
+			if (ang < -1e-9) ang += 2 * kPi;
+			if (ang <= A.sweep)
+				d2 = std::min(d2, dist_sq_pt_arc(px, py, B));
+		}
+		// Circle-circle intersection candidates when centers are within 2R
+		if (cdist < 2 * kR) {
+			const double h = std::sqrt(std::max(0.0, kR * kR - 0.25 * cdist2));
+			const double mx = 0.5 * (A.cx + B.cx), my = 0.5 * (A.cy + B.cy);
+			for (int s : {1, -1}) {
+				const double px = mx - s * h * uy, py = my + s * h * ux;
+				double angA = wrap_pi_gen(std::atan2(py - A.cy, px - A.cx) - A.a0) * A.turn;
+				if (angA < -1e-9) angA += 2 * kPi;
+				double angB = wrap_pi_gen(std::atan2(py - B.cy, px - B.cx) - B.a0) * B.turn;
+				if (angB < -1e-9) angB += 2 * kPi;
+				if (angA <= A.sweep && angB <= B.sweep)
+					return 0.0;
+			}
+		}
+	}
+	return d2;
+}
+
+// Fast analytic course validator: replaces JSON serialization + parsing + 10,000-pt sampling inside the growth loop
+bool fast_check_course(const Pieces& ps, double max_w, double max_h, double max_len, double* out_len, int* out_cross) {
+	const size_t n = ps.size();
+	if (n == 0)
+		return false;
+
+	static thread_local std::vector<FPiece> fp;
+	static thread_local std::vector<FCrossing> xings;
+	fp.resize(n);
+	xings.clear();
+
+	double x = 0, y = 0, th = 0, s = 0;
+	double bx0 = 1e9, by0 = 1e9, bx1 = -1e9, by1 = -1e9;
+	for (size_t i = 0; i < n; i++) {
+		const Piece& src = ps[i];
+		FPiece& p = fp[i];
+		p.arc = src.arc;
+		p.s0 = s;
+		p.x0 = x;
+		p.y0 = y;
+		p.th0 = th;
+		p.ux = std::cos(th);
+		p.uy = std::sin(th);
+		if (!src.arc) {
+			if (src.len <= 0)
+				return false;
+			p.turn = 0;
+			p.len = src.len;
+			p.x1 = x + p.len * p.ux;
+			p.y1 = y + p.len * p.uy;
+			p.minx = std::min(p.x0, p.x1);
+			p.maxx = std::max(p.x0, p.x1);
+			p.miny = std::min(p.y0, p.y1);
+			p.maxy = std::max(p.y0, p.y1);
+			x = p.x1;
+			y = p.y1;
+		} else {
+			const int a = std::abs(src.deg);
+			if (a < 45 || a > 270 || a % 45 != 0)
+				return false;
+			p.turn = src.deg > 0 ? 1 : -1;
+			const double phi = src.deg * kPi / 180.0;
+			p.sweep = std::fabs(phi);
+			p.len = kR * p.sweep;
+			p.cx = x - p.turn * kR * p.uy;
+			p.cy = y + p.turn * kR * p.ux;
+			p.a0 = std::atan2(y - p.cy, x - p.cx);
+			const double rx = x - p.cx, ry = y - p.cy;
+			const double c = std::cos(phi), sn = std::sin(phi);
+			p.x1 = p.cx + rx * c - ry * sn;
+			p.y1 = p.cy + rx * sn + ry * c;
+			p.minx = p.cx - kR;
+			p.maxx = p.cx + kR;
+			p.miny = p.cy - kR;
+			p.maxy = p.cy + kR;
+			x = p.x1;
+			y = p.y1;
+			th += phi;
+		}
+		bx0 = std::min(bx0, p.minx);
+		bx1 = std::max(bx1, p.maxx);
+		by0 = std::min(by0, p.miny);
+		by1 = std::max(by1, p.maxy);
+		s += p.len;
+		p.sb = p.sa = 0;
+	}
+
+	if (s > max_len)
+		return false;
+	// Marker & line width margin (~0.05m total across both sides)
+	if ((bx1 - bx0) + 0.05 > max_w || (by1 - by0) + 0.05 > max_h)
+		return false;
+	if (std::hypot(x, y) > 0.001 || std::fabs(wrap_pi_gen(th)) > 0.001)
+		return false;
+
+	// Precompute contiguous straight runs before/after each straight piece in O(N)
+	for (size_t i = 0; i < n; i++) {
+		if (fp[i].arc)
+			continue;
+		double b = 0, a = 0;
+		for (size_t k = 1; k < n; k++) {
+			const size_t j = (i + n - k) % n;
+			if (fp[j].arc) break;
+			b += fp[j].len;
+		}
+		for (size_t k = 1; k < n; k++) {
+			const size_t j = (i + k) % n;
+			if (fp[j].arc) break;
+			a += fp[j].len;
+		}
+		fp[i].sb = b;
+		fp[i].sa = a;
+	}
+
+	auto circ = [&](double a, double b) {
+		const double d = std::fabs(a - b);
+		return std::min(d, s - d);
+	};
+
+	// 1. Analytic crossing detection between straight segments
+	for (size_t i = 0; i < n; i++) {
+		const FPiece& A = fp[i];
+		if (A.arc)
+			continue;
+		for (size_t j = i + 1; j < n; j++) {
+			const FPiece& B = fp[j];
+			if (B.arc)
+				continue;
+			if (A.maxx < B.minx - 1e-4 || B.maxx < A.minx - 1e-4 ||
+			    A.maxy < B.miny - 1e-4 || B.maxy < A.miny - 1e-4)
+				continue;
+			const double den = A.ux * B.uy - A.uy * B.ux;
+			if (std::fabs(den) < 1e-9)
+				continue;
+			const double dx = B.x0 - A.x0, dy = B.y0 - A.y0;
+			const double t = (dx * B.uy - dy * B.ux) / den;
+			const double u = (dx * A.uy - dy * A.ux) / den;
+			if (t < -1e-4 || t > A.len + 1e-4 || u < -1e-4 || u > B.len + 1e-4)
+				continue;
+			const double s1 = A.s0 + std::clamp(t, 0.0, A.len);
+			const double s2 = B.s0 + std::clamp(u, 0.0, B.len);
+			if (circ(s1, s2) < 0.30)
+				continue;
+			// Must intersect at 90 degrees
+			if (std::fabs(A.ux * B.ux + A.uy * B.uy) > 0.04)
+				return false;
+			// Must not be on the end-mark straight (goal_s=0.2, start_s=0.65, +-0.25m margin)
+			if (s1 < 0.90 || s1 > s - 0.05 || s2 < 0.90 || s2 > s - 0.05)
+				return false;
+			// Must have >= 40 cm straight before and >= 20 cm straight after on both branches
+			const double bef1 = A.sb + t, aft1 = A.sa + (A.len - t);
+			const double bef2 = B.sb + u, aft2 = B.sa + (B.len - u);
+			if (bef1 < 0.40 - 1e-4 || aft1 < 0.20 - 1e-4 || bef2 < 0.40 - 1e-4 || aft2 < 0.20 - 1e-4)
+				return false;
+			for (const FCrossing& x : xings)
+				if (circ(x.s1, s1) < 0.15 || circ(x.s2, s1) < 0.15 || circ(x.s1, s2) < 0.15 || circ(x.s2, s2) < 0.15)
+					return false;
+			xings.push_back({s1, s2});
+		}
+	}
+
+	auto piece_near_crossing = [&](const FPiece& P) {
+		for (const FCrossing& x : xings) {
+			if (circ(P.s0, x.s1) < P.len + 0.32 || circ(P.s0 + P.len, x.s1) < P.len + 0.32 ||
+			    circ(P.s0, x.s2) < P.len + 0.32 || circ(P.s0 + P.len, x.s2) < P.len + 0.32)
+				return true;
+		}
+		return false;
+	};
+
+	// 2. Analytic pairwise clearance check (>= 0.20 m) with AABB + exact closed-form pruning
+	constexpr double kClear = 0.20;
+	constexpr double kClearSq = kClear * kClear;
+	for (size_t i = 0; i < n; i++) {
+		const FPiece& A = fp[i];
+		for (size_t j = i + 1; j < n; j++) {
+			const FPiece& B = fp[j];
+			if (A.maxx + kClear < B.minx || B.maxx + kClear < A.minx ||
+			    A.maxy + kClear < B.miny || B.maxy + kClear < A.miny)
+				continue;
+
+			// Closed-form exact minimum distance between piece A and piece B:
+			// If the two pieces are everywhere >= 20 cm apart, no sub-sampling is ever needed!
+			if (exact_piece_dist_sq(A, B) >= kClearSq - 1e-5)
+				continue;
+
+			// Minimum arc-length separation between any point on A and any point on B
+			const double d00 = circ(A.s0, B.s0);
+			const double d01 = circ(A.s0, B.s0 + B.len);
+			const double d10 = circ(A.s0 + A.len, B.s0);
+			const double d11 = circ(A.s0 + A.len, B.s0 + B.len);
+			const double min_s_dist = std::min(std::min(d00, d01), std::min(d10, d11));
+
+			// If non-adjacent in s and neither piece is near a crossing, exact_piece_dist_sq < kClearSq is a true collision!
+			if (min_s_dist >= 0.45 && !piece_near_crossing(A) && !piece_near_crossing(B))
+				return false;
+
+			// Immediately consecutive ZETIN pieces (Straight+Straight, Straight+Arc<=270, or opposite Arc+Arc<=270)
+			// meet tangentially and mathematically cannot come within 20 cm at arc-length separation >= 45 cm.
+			if (j == i + 1 || (i == 0 && j == n - 1))
+				continue;
+
+			// Localized sub-segment check only for pairs that actually come within 20 cm near a joint or crossing
+			const int na = std::max(1, static_cast<int>(std::ceil(A.len / 0.02)));
+			const int nb = std::max(1, static_cast<int>(std::ceil(B.len / 0.02)));
+			for (int ka = 0; ka <= na; ka++) {
+				const double ta = A.len * ka / na;
+				const double sa = A.s0 + ta;
+				bool skip_a = false;
+				for (const FCrossing& x : xings)
+					if (circ(sa, x.s1) < 0.30 || circ(sa, x.s2) < 0.30) { skip_a = true; break; }
+				if (skip_a) continue;
+
+				double ax, ay;
+				if (!A.arc) {
+					ax = A.x0 + ta * A.ux;
+					ay = A.y0 + ta * A.uy;
+				} else {
+					const double phi = A.turn * (ta / kR);
+					const double rx = A.x0 - A.cx, ry = A.y0 - A.cy;
+					ax = A.cx + rx * std::cos(phi) - ry * std::sin(phi);
+					ay = A.cy + rx * std::sin(phi) + ry * std::cos(phi);
+				}
+
+				for (int kb = 0; kb <= nb; kb++) {
+					const double tb = B.len * kb / nb;
+					const double sb = B.s0 + tb;
+					if (circ(sa, sb) < 0.45)
+						continue;
+					bool skip_b = false;
+					for (const FCrossing& x : xings)
+						if (circ(sb, x.s1) < 0.30 || circ(sb, x.s2) < 0.30) { skip_b = true; break; }
+					if (skip_b) continue;
+
+					double bx, by;
+					if (!B.arc) {
+						bx = B.x0 + tb * B.ux;
+						by = B.y0 + tb * B.uy;
+					} else {
+						const double phi = B.turn * (tb / kR);
+						const double rx = B.x0 - B.cx, ry = B.y0 - B.cy;
+						bx = B.cx + rx * std::cos(phi) - ry * std::sin(phi);
+						by = B.cy + rx * std::sin(phi) + ry * std::cos(phi);
+					}
+					if ((ax - bx) * (ax - bx) + (ay - by) * (ay - by) < kClearSq)
+						return false;
+				}
+			}
+		}
+	}
+
+	*out_len = s;
+	*out_cross = static_cast<int>(xings.size());
+	return true;
+}
 }  // namespace
 
 std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* attempts_out) {
@@ -163,19 +503,16 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 	auto len_q = [&](double a, double b) { return round_to(uni(a, b), 0.05); };
 	auto rand_deg = [&](int max_steps) { return 45 * (1 + pick(max_steps)); };   // 45 .. 45*max_steps
 	const double R = kR, start_len = 1.0, goal_s = 0.2, start_s = 0.65;
+	const double bw = opt.board_w - 0.2, bh = opt.board_h - 0.2;
 	const double target = uni(opt.min_length, opt.max_length);
 	const int want_cross = opt.crossings >= 0 ? opt.crossings : std::max(opt.min_crossings, 1 + pick(3));
 
-	auto check = [&](const Pieces& ps, Track* t) {
+	auto full_check = [&](const Pieces& ps, Track* t) {
 		std::string e;
 		if (!t->load_text(to_json(ps, opt.seed, goal_s, start_s), "random", &e))
 			return false;
-		if (!t->rule_problems(opt.board_w - 0.2, opt.board_h - 0.2).empty())
+		if (!t->rule_problems(bw, bh).empty())
 			return false;
-		// beyond the rules: 40 cm of straight before every crossing (20 cm after it), so the robot
-		// is square to the line again when it gets there. Coming out of a tight curve with 20 cm the
-		// sensor bar meets the crossing at an angle: both marker sensors fire without the full bar
-		// (that reads as the end mark), which also happens on a real course.
 		for (const TrackCrossing& x : t->crossings())
 			for (double s : {x.s1, x.s2}) {
 				double before, after;
@@ -195,34 +532,38 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 			{false, R + u + h, 0}, {true, 0, 90}, {false, z, 0}, {true, 0, 90}, {false, h - R, 0}, {true, 0, -90}}, sgn());
 	};
 	auto detour = [&]() -> Pieces {
-		const int kind = pick(10);
+		const int kind = pick(12);
 		const int s = sgn();
-		if (kind == 0) {   // snake of 1, 3 or 5 lobes of 270 deg
-			int lobes = 1 + 2 * pick(3);
+		if (kind == 0) {   // snake of 1 or 3 lobes of 270 deg
+			int lobes = 1 + 2 * pick(2);
 			Pieces m = {{true, 0, 135 * s}};
 			for (int k = 0; k < lobes; k++)
 				m.push_back({true, 0, (k % 2 ? 270 : -270) * s});
 			m.push_back({true, 0, 135 * s});
 			return m;
 		}
-		if (kind == 1) {   // finger: out, U-turn (or a round bulb), back
-			double d = len_q(0.3, 1.8);
-			if (uni(0, 1) < 0.5)
+		if (kind == 1 || kind == 2 || kind == 3) {   // deep finger: compact span (1.0m), adds 2*d length and 2 new straights!
+			double d = len_q(0.4, 2.2);
+			if (uni(0, 1) < 0.65)
 				return mirror({{true, 0, 90}, {false, d, 0}, {true, 0, -180}, {false, d, 0}, {true, 0, 90}}, s);
 			return mirror({{true, 0, 90}, {false, d, 0}, {true, 0, 45}, {true, 0, -270}, {true, 0, 45}, {false, d, 0},
 				{true, 0, 90}}, s);
 		}
-		if (kind == 2) {   // chicane (45 deg slalom)
+		if (kind == 4 || kind == 5) {   // rectangular box lobe: adds 2*d + w length and 3 new straights for recursive growth!
+			double d = len_q(0.35, 1.8), w = len_q(0.25, 1.2);
+			return mirror({{true, 0, 90}, {false, d, 0}, {true, 0, -90}, {false, w, 0}, {true, 0, -90}, {false, d, 0},
+				{true, 0, 90}}, s);
+		}
+		if (kind == 6) {   // chicane (45 deg slalom)
 			double a = len_q(0.2, 0.8), b = len_q(0.2, 1.2);
 			return mirror({{true, 0, 45}, {false, a, 0}, {true, 0, -45}, {false, b, 0}, {true, 0, -45}, {false, a, 0},
 				{true, 0, 45}}, s);
 		}
-		if (kind == 3) {   // 45 deg hump
-			double a = len_q(0.2, 1.0);
+		if (kind == 7 || kind == 8) {   // 45 deg hump (compact span, good diagonal straight)
+			double a = len_q(0.25, 1.2);
 			return mirror({{true, 0, 45}, {false, a, 0}, {true, 0, -90}, {false, a, 0}, {true, 0, 45}}, s);
 		}
-		// random mirror-symmetric shape: half H, a middle piece, H backwards. Any such shape with zero
-		// total turn ends on the line it started from.
+		// random mirror-symmetric shape: half H, a middle piece, H backwards
 		Pieces h;
 		int sum = 0;
 		const int arcs = 1 + pick(3);
@@ -236,7 +577,7 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 		const int mid = -2 * sum;
 		if (std::abs(mid) > 270)
 			return {};
-		if (mid != 0 && (h.back().deg > 0) == (mid > 0))   // same turn on both sides: keep them apart
+		if (mid != 0 && (h.back().deg > 0) == (mid > 0))
 			h.push_back({false, len_q(0.1, 0.5), 0});
 		Pieces m = h;
 		m.push_back(mid == 0 ? Piece{false, len_q(0.2, 0.8), 0} : Piece{true, 0, mid});
@@ -266,43 +607,43 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 
 	// ---- base loops; piece 0 is the end-mark straight and is never touched
 	auto base = [&]() -> Pieces {
-		const double bw = opt.board_w - 0.2, bh = opt.board_h - 0.2;
-		// rectangle with R25 corners: long main straight across the board
-		double W = round_to(uni(0.85, 0.92) * bw, 0.05), H = round_to(uni(0.65, 0.75) * bh, 0.05);
+		double W = round_to(uni(0.85, 0.92) * bw, 0.05), H = round_to(uni(0.68, 0.80) * bh, 0.05);
+		const double top_total = W - 2 * R;
+		const double main_len = std::min(1.2, top_total * 0.3);
 		return {{false, start_len, 0}, {false, W - 2 * R - start_len, 0}, {true, 0, 90}, {false, H - 2 * R, 0},
-			{true, 0, 90}, {false, W - 2 * R, 0, true}, {true, 0, 90}, {false, H - 2 * R, 0}, {true, 0, 90}};
+			{true, 0, 90}, {false, main_len, 0, true}, {false, top_total - main_len, 0},
+			{true, 0, 90}, {false, H - 2 * R, 0}, {true, 0, 90}};
 	};
 
-	Track t;
 	int checks = 0;
 	for (int attempt = 1; attempt <= 60; attempt++) {
 		Pieces ps = base();
 		if (ps.empty())
 			continue;
+		double cur_len = 0;
+		int crossings = 0, fails = 0;
 		checks++;
-		if (!check(ps, &t))
+		if (!fast_check_course(ps, bw, bh, opt.max_length, &cur_len, &crossings))
 			continue;
-		int crossings = static_cast<int>(t.crossings().size()), fails = 0;
 		if (opt.crossings >= 0 && crossings > opt.crossings)
 			continue;
-		while ((t.length() < target || crossings < want_cross) && fails < 1200) {
-			// global heading (in 45 deg steps) at the start of every piece
+		while ((cur_len < target || crossings < want_cross) && fails < 800) {
 			std::vector<int> hd(ps.size() + 1, 0);
 			for (size_t i = 0; i < ps.size(); i++)
 				hd[i + 1] = hd[i] + (ps[i].arc ? ps[i].deg : 0);
 			Pieces next;
 			const double r = uni(0, 1);
-			if (r < 0.62 || (crossings < want_cross && r < 0.8)) {
-				// detour into a straight (the end-mark straight stays as it is)
-				const bool need_cross = crossings < want_cross && (opt.crossings >= 0 || uni(0, 1) < 0.35);
-				Pieces m = need_cross ? cross_loop() : detour();
+			// Place crossings early while base straights are still long and uncut
+			const bool force_cross = (crossings < want_cross) && (fails < 120 || uni(0, 1) < 0.75);
+			if (force_cross || r < 0.65) {
+				const bool need_cross = force_cross || (crossings < want_cross && (opt.crossings >= 0 || uni(0, 1) < 0.5));
+				Pieces m_base = need_cross ? cross_loop() : detour();
 				double span;
-				if (m.empty() || !module_span(m, &span) || span < 0.25 || (!need_cross && !module_clear(m, span))) {
+				if (m_base.empty() || !module_span(m_base, &span) || span < 0.25 || (!need_cross && !module_clear(m_base, span))) {
 					fails++;
 					continue;
 				}
-				// a straight with room for it (and, for the loop, the straight it crosses behind it)
-				const double before_min = need_cross ? m[3].len + R + 0.55 : 0.2;
+				const double before_min = need_cross ? m_base[3].len + R + 0.55 : 0.2;
 				std::vector<int> cand;
 				for (size_t i = 1; i < ps.size(); i++) {
 					if (!ps[i].arc && !ps[i].main_straight && ps[i].len >= before_min + span + 0.2)
@@ -316,7 +657,6 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 				double rem = ps[i].len - span - before_min - 0.2;
 				double b;
 				if (rem > 0.8 && uni(0, 1) < 0.65) {
-					// Bias detour towards an end to preserve long straight segments
 					if (uni(0, 1) < 0.5)
 						b = len_q(before_min, before_min + 0.3);
 					else
@@ -325,11 +665,34 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 					b = round_to(before_min + uni(0, rem), 0.05);
 				}
 				b = std::clamp(b, before_min, ps[i].len - span - 0.2);
-				next.assign(ps.begin(), ps.begin() + i);
-				next.push_back({false, b, 0});
-				next.insert(next.end(), m.begin(), m.end());
-				next.push_back({false, ps[i].len - b - span, 0});
-				next.insert(next.end(), ps.begin() + i + 1, ps.end());
+
+				// Try both mirror orientations (+1 and -1) so valid detours pointing inward aren't wasted
+				bool accepted = false;
+				for (int flip : {1, -1}) {
+					Pieces m = mirror(m_base, flip);
+					next.assign(ps.begin(), ps.begin() + i);
+					next.push_back({false, b, 0});
+					next.insert(next.end(), m.begin(), m.end());
+					next.push_back({false, ps[i].len - b - span, 0});
+					next.insert(next.end(), ps.begin() + i + 1, ps.end());
+
+					double nlen = 0;
+					int nc = 0;
+					checks++;
+					if (fast_check_course(next, bw, bh, opt.max_length, &nlen, &nc)) {
+						if ((opt.crossings >= 0 && nc > opt.crossings) || nc < crossings)
+							continue;
+						fails = nlen > cur_len + 0.05 || nc > crossings ? 0 : fails + 1;
+						ps = std::move(next);
+						cur_len = nlen;
+						crossings = nc;
+						accepted = true;
+						break;
+					}
+				}
+				if (!accepted)
+					fails++;
+				continue;
 			} else {
 				// reshape the arcs between two straights A = ps[i] and B = ps[j]
 				std::vector<int> straights;
@@ -364,7 +727,6 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 				double ox, oy, oth, nx, ny, nth;
 				walk(old, &ox, &oy, &oth);
 				walk(c, &nx, &ny, &nth);
-				// the change of position, in the frame of A, taken up by A and B: da*(1,0) + db*u_b = old - new
 				const double ex = ox - nx, ey = oy - ny, ub = thb - tha;
 				const double db = ey / std::sin(ub), da = ex - db * std::cos(ub);
 				const double la = ps[i].len + da, lb = ps[j].len + db;
@@ -378,19 +740,17 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 				next.push_back({false, round_to(lb, 1e-4), 0, ps[j].main_straight});
 				next.insert(next.end(), ps.begin() + j + 1, ps.end());
 			}
-			Track tn;
+			double nlen = 0;
+			int nc = 0;
 			checks++;
-			if (check(next, &tn) && tn.length() <= opt.max_length) {
-				const int nc = static_cast<int>(tn.crossings().size());
+			if (fast_check_course(next, bw, bh, opt.max_length, &nlen, &nc)) {
 				if ((opt.crossings >= 0 && nc > opt.crossings) || nc < crossings) {
 					fails++;
 					continue;
 				}
-				// progress (longer, or one more crossing) restarts the count; a reshape that only moves
-				// things around is kept (it may open room) but still counts towards giving up
-				fails = tn.length() > t.length() + 0.05 || nc > crossings ? 0 : fails + 1;
-				ps = next;
-				t = tn;
+				fails = nlen > cur_len + 0.05 || nc > crossings ? 0 : fails + 1;
+				ps = std::move(next);
+				cur_len = nlen;
 				crossings = nc;
 			} else {
 				fails++;
@@ -398,8 +758,11 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 		}
 		if (std::getenv("LINESIM_GEN_DEBUG"))
 			std::fprintf(stderr, "attempt %d: %.1f m (target %.1f), %d/%d crossings, %zu pieces, %d checks\n", attempt,
-				t.length(), target, crossings, want_cross, ps.size(), checks);
-		if (t.length() < opt.min_length || crossings < (opt.crossings >= 0 ? opt.crossings : opt.min_crossings))
+				cur_len, target, crossings, want_cross, ps.size(), checks);
+		if (cur_len < opt.min_length || crossings < (opt.crossings >= 0 ? opt.crossings : opt.min_crossings))
+			continue;
+		Track t;
+		if (!full_check(ps, &t))
 			continue;
 		if (attempts_out)
 			*attempts_out = attempt;
