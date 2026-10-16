@@ -4,16 +4,16 @@
     python tools/autotune.py 1.6 --max-speed     highest base speed that passes, from 1.6 up
     python tools/autotune.py 2.2 --max-speed --lat 10,12,14,16   with the grip limit (lat_acc_max) as a 3rd axis
 
-    options: [--track tracks/x.json ...] [--courses 4] [--robot robots/full.json] [--jobs 8]
+    options: [--drives 1,4] [--track tracks/x.json ...] [--courses 4] [--robot robots/full.json] [--jobs 8]
              [--kp 8,10,...] [--kd 0,0.05,...] [--lat 0] [--set max_mps=4 ...] [--reuse]
 
 Course: the real practice board (tracks/practice_board.json, made from the robot's logs) when it
 is there, else --courses random ZETIN courses with fixed seeds. --track picks courses by hand.
 
 Every kp x kd pair of the grid runs drive 1 (learning: markers and distances must come out clean)
-and then drive 2 (accelerates on the straights from drive 1's data; max_mps / accel / decel from
---set or the firmware defaults). A pair passes when on every course both drives finish, never more
-than MAX_LAT_MM off the line, with every marker read right. Score (lower is better): 5 x drive 2
+and then drive 4 (or drive 2 if specified via --drives 1,2: accelerates on the straights from drive 1's data;
+max_mps / accel / decel from --set or the firmware defaults). A pair passes when on every course both drives finish,
+never more than MAX_LAT_MM off the line, with every marker read right. Score (lower is better): 5 x fast drive
 lap time [s] + drive 1 cleanliness (line rms [mm] + weave [dps] / 20 + wheel slip [%] / 2).
 A pass must also hold with more steering lag than the model has: the lag (robot sensor_delay,
 fitted to one gyro log) is not known exactly, so drive 1 runs again with it x1.4 (must keep the
@@ -144,31 +144,32 @@ def lost_line(d):
     return not d["outcome"].startswith("finished") or d["max_lat_mm"] > MAX_LAT_MM
 
 
-def run(course, robot, speed, kp, kd, lat, extra, out, reuse, lag, mu, seed=1):
+def run(course, robot, speed, kp, kd, lat, extra, out, reuse, lag, mu, seed=1, drives="1,4"):
     extra = list(extra) + ([f"lat_acc_max={lat}"] if lat > 0 else [])
-    j = sim(course, robot, "1,2", speed, kp, kd, extra, out, reuse, seed=seed)
+    j = sim(course, robot, drives, speed, kp, kd, extra, out, reuse, seed=seed)
+    fast_num = drives.split(",")[-1].strip()
     try:
         d1 = j["drives"][0]
-        d2 = j["drives"][1] if len(j["drives"]) > 1 else None
+        d_fast = j["drives"][1] if len(j["drives"]) > 1 else None
         kd_fw = j["params"]["steer_kd"]
     except (TypeError, IndexError, KeyError):
         return {"lost": True, "pass": False, "score": 1000.0, "why": "no result", "kd_fw": 0}
     weave, slip = drive_metrics(os.path.join(out, "drive1.csv"))
     clean1 = d1["rms_lat_mm"] + weave / 20.0 + slip / 2.0
     r = {"kd_fw": kd_fw, "rms_lat": d1["rms_lat_mm"], "max_lat": d1["max_lat_mm"], "weave": weave, "slip": slip,
-         "clean1": clean1, "lap2": None, "lost": False, "pass": False}
+         "clean1": clean1, "lap_fast": None, "lost": False, "pass": False}
     if lost_line(d1):
         r.update(lost=True, score=1000.0, why=f"1: {d1['outcome'] if d1['outcome'] != 'finished' else 'line far off'}")
     elif d1.get("marker_check") != "OK":
         r.update(score=500.0 + clean1, why=f"1: markers {d1.get('marker_check')}")
-    elif d2 is None:
-        r.update(score=400.0 + clean1, why="2: did not run")
-    elif lost_line(d2):
-        r.update(lost=True, score=300.0 + clean1, why=f"2: {d2['outcome'] if d2['outcome'] != 'finished' else 'line far off'}")
-    elif d2.get("marker_check") != "OK" or d2["lap_time_fw"] <= 0:
-        r.update(score=200.0 + clean1, why=f"2: markers {d2.get('marker_check')}")
+    elif d_fast is None:
+        r.update(score=400.0 + clean1, why=f"{fast_num}: did not run")
+    elif lost_line(d_fast):
+        r.update(lost=True, score=300.0 + clean1, why=f"{fast_num}: {d_fast['outcome'] if d_fast['outcome'] != 'finished' else 'line far off'}")
+    elif d_fast.get("marker_check") != "OK" or d_fast["lap_time_fw"] <= 0:
+        r.update(score=200.0 + clean1, why=f"{fast_num}: markers {d_fast.get('marker_check')}")
     else:
-        r.update({"pass": True, "lap2": d2["lap_time_fw"], "score": 5.0 * d2["lap_time_fw"] + clean1, "why": ""})
+        r.update({"pass": True, "lap_fast": d_fast["lap_time_fw"], "score": 5.0 * d_fast["lap_time_fw"] + clean1, "why": ""})
         why = ""
         if lag > 0:   # model-error stress: more steering lag than fitted
             for k, f in enumerate(STRESS_LAG):
@@ -194,15 +195,17 @@ def run(course, robot, speed, kp, kd, lat, extra, out, reuse, lag, mu, seed=1):
     return r
 
 
-def tune_at(speed, courses, robot, axes, extra, jobs, reuse, quiet=False):
+def tune_at(speed, courses, robot, axes, extra, jobs, reuse, quiet=False, drives="1,4"):
     """axes = (kps, kds, lats). Returns the grid evaluated at one base speed."""
     kps, kds, lats = axes
     lag, mu = robot_delay(robot), robot_mu(robot)
     out_root = os.path.join(ROOT, "runs", "tune", f"{speed:g}")
     points = [(kp, kd, lat) for lat in lats for kp in kps for kd in kds]
     total = len(points) * len(courses)
-    print(f"base speed {speed:g} m/s: {len(kps)} kp x {len(kds)} kd x {len(lats)} lat on {len(courses)} course(s) = "
-          f"{total} runs (drive 1 + 2 each), {jobs} at a time", flush=True)
+    fast_num = drives.split(",")[-1].strip()
+    if not quiet:
+        print(f"base speed {speed:g} m/s: {len(kps)} kp x {len(kds)} kd x {len(lats)} lat on {len(courses)} course(s) = "
+              f"{total} runs (drive 1 + {fast_num} each), {jobs} at a time", flush=True)
     results = {}
     done = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=jobs) as ex:
@@ -211,7 +214,7 @@ def tune_at(speed, courses, robot, axes, extra, jobs, reuse, quiet=False):
             for ci, c in enumerate(courses):
                 name = f"kp{kp:g}_kd{kd:g}s" + (f"_lat{lat:g}" if lat > 0 else "") + f"_c{ci}"
                 out = os.path.join(out_root, "runs", name)
-                futs[ex.submit(run, c, robot, speed, kp, kd, lat, extra, out, reuse, lag, mu)] = (kp, kd, lat, ci)
+                futs[ex.submit(run, c, robot, speed, kp, kd, lat, extra, out, reuse, lag, mu, 1, drives)] = (kp, kd, lat, ci)
         for f in concurrent.futures.as_completed(futs):
             kp, kd, lat, ci = futs[f]
             results.setdefault((kp, kd, lat), {})[ci] = f.result()
@@ -255,13 +258,14 @@ def describe(p):
     return f"steer kp {p[0]:g}, steer kd {p[1]:g} s" + (f", lat_acc_max {p[2]:g}" if p[2] > 0 else "")
 
 
-def report(t, courses, robot, extra, with_pick=True):
+def report(t, courses, robot, extra, with_pick=True, drives="1,4"):
     cell, pick = t["cell"], t["pick"]
     kps, kds, lats = t["axes"]
-    lines = [f"base speed {t['speed']:g} m/s, drive 1 + 2 on {', '.join(os.path.basename(c) for c in courses)}, "
+    fast_num = drives.split(",")[-1].strip()
+    lines = [f"base speed {t['speed']:g} m/s, drive 1 + {fast_num} on {', '.join(os.path.basename(c) for c in courses)}, "
              f"robot {os.path.basename(robot)}" + (f", --set {' '.join(extra)}" if extra else ""),
              "",
-             "score = 5 x drive 2 lap [s] + drive 1 (line rms [mm] + weave/20 + slip%/2), lower is better",
+             f"score = 5 x drive {fast_num} lap [s] + drive 1 (line rms [mm] + weave/20 + slip%/2), lower is better",
              f"x = loses the line, or fails a stress drive (steering lag x{STRESS_LAG[0]:g} / x{STRESS_LAG[1]:g}, "
              f"grip x{STRESS_MU:g}), m = misreads markers, * = picked"]
     for lat in lats:
@@ -286,7 +290,7 @@ def report(t, courses, robot, extra, with_pick=True):
         n = len(rs)
         lines.append(f"picked: base {t['speed']:g} m/s, {describe(pick)} (robot menu: steer_gain_d {rs[0]['kd_fw']:.0f})"
                      + ("" if pick in t["safe"] else "   (a grid neighbour fails: at the edge)"))
-        lines.append(f"  drive 2 lap {sum(r['lap2'] for r in rs) / n:.2f} s;  drive 1: line rms "
+        lines.append(f"  drive {fast_num} lap {sum(r['lap_fast'] for r in rs) / n:.2f} s;  drive 1: line rms "
                      f"{sum(r['rms_lat'] for r in rs) / n:.1f} mm, weave {sum(r['weave'] for r in rs) / n:.0f} dps, "
                      f"slip {sum(r['slip'] for r in rs) / n:.1f} %")
         lines.append(f"  passing {len(t['passing'])} of {len(t['points'])}, away from the edge {len(t['safe'])}")
@@ -307,13 +311,14 @@ def report(t, courses, robot, extra, with_pick=True):
     return "\n".join(lines)
 
 
-def save(t, text):
+def save(t, text, drives="1,4"):
     os.makedirs(t["out_root"], exist_ok=True)
     with open(os.path.join(t["out_root"], "result.txt"), "w", encoding="utf-8") as fh:
         fh.write(text + "\n")
     cell, pick = t["cell"], t["pick"]
     with open(os.path.join(t["out_root"], "result.json"), "w", encoding="utf-8") as fh:
         json.dump({"speed": t["speed"],
+                   "drives": drives,
                    "picked": {"steer_kp": pick[0], "steer_kd_s": pick[1], "lat_acc_max": pick[2],
                               "steer_gain_d": cell[pick]["runs"][0]["kd_fw"], "safe": pick in t["safe"]} if pick else None,
                    "grid": [{"kp": p[0], "kd": p[1], "lat_acc_max": p[2], "pass": cell[p]["pass"], "lost": cell[p]["lost"],
@@ -333,10 +338,10 @@ def refine_axes(center, steps):
     return tuple(out)
 
 
-def search_at(speed, courses, robot, axes, extra, jobs, reuse, refine, quiet=False):
+def search_at(speed, courses, robot, axes, extra, jobs, reuse, refine, quiet=False, drives="1,4"):
     """Coarse grid, then `refine` times a 3x3x3 grid around the best point with half the step, then the
     pick is driven again with 2 more seeds (sensor noise / gain spread): it must pass every time."""
-    coarse = tune_at(speed, courses, robot, axes, extra, jobs, reuse, quiet)
+    coarse = tune_at(speed, courses, robot, axes, extra, jobs, reuse, quiet, drives)
     best = coarse
     log = []
 
@@ -351,7 +356,7 @@ def search_at(speed, courses, robot, axes, extra, jobs, reuse, refine, quiet=Fal
         if not best["pick"]:
             break
         ax = refine_axes(best["pick"], steps)
-        t = tune_at(speed, courses, robot, ax, extra, jobs, reuse, quiet=True)
+        t = tune_at(speed, courses, robot, ax, extra, jobs, reuse, quiet=True, drives=drives)
         step_txt = f"+-{steps[0]:g} kp, +-{steps[1]:g} s kd" + (f", +-{steps[2]:g} lat" if steps[2] > 0 else "")
         if t["pick"] and (t["pick"] in t["safe"] or best["pick"] not in best["safe"]):
             best = t
@@ -370,17 +375,18 @@ def search_at(speed, courses, robot, axes, extra, jobs, reuse, refine, quiet=Fal
             for ci, c in enumerate(courses):
                 name = f"kp{kp:g}_kd{kd:g}s" + (f"_lat{lat:g}" if lat > 0 else "") + f"_c{ci}_seed{seed}"
                 res.append(run(c, robot, speed, kp, kd, lat, extra, os.path.join(best["out_root"], "runs", name),
-                               reuse, lag, mu, seed))
+                               reuse, lag, mu, seed, drives))
         verified = all(r["pass"] for r in res)
         seed_txt = (f"  seeds {', '.join(map(str, SEED_CHECK))}: "
                     + ("pass" if verified else "FAIL (" + "; ".join(r["why"] for r in res if not r["pass"]) + ")"))
         log.append(seed_txt)
-    return {"speed": speed, "coarse": coarse, "final": best, "log": log, "verified": verified}
+    return {"speed": speed, "coarse": coarse, "final": best, "log": log, "verified": verified, "drives": drives}
 
 
-def report_search(s, courses, robot, extra):
+def report_search(s, courses, robot, extra, drives="1,4"):
     t = s["final"]
-    lines = [report(s["coarse"], courses, robot, extra, with_pick=False), "", "refinement around the best point:"]
+    fast_num = drives.split(",")[-1].strip()
+    lines = [report(s["coarse"], courses, robot, extra, with_pick=False, drives=drives), "", "refinement around the best point:"]
     lines += s["log"]
     lines.append("")
     if t["pick"]:
@@ -389,7 +395,7 @@ def report_search(s, courses, robot, extra):
         ok = t["pick"] in t["safe"] and s["verified"]
         lines.append(f"{'picked' if ok else 'best found (NOT reliable)'}: base {s['speed']:g} m/s, {describe(t['pick'])}"
                      f"  (robot menu: steer_gain_d {rs[0]['kd_fw']:.0f})")
-        lines.append(f"  drive 2 lap {sum(r['lap2'] for r in rs) / n:.2f} s;  drive 1: line rms "
+        lines.append(f"  drive {fast_num} lap {sum(r['lap_fast'] for r in rs) / n:.2f} s;  drive 1: line rms "
                      f"{sum(r['rms_lat'] for r in rs) / n:.1f} mm, weave {sum(r['weave'] for r in rs) / n:.0f} dps, "
                      f"slip {sum(r['slip'] for r in rs) / n:.1f} %")
         lines.append("")
@@ -431,6 +437,8 @@ def main():
     robot = os.path.abspath(opt("--robot", os.path.join(ROOT, "robots", "full.json")))
     if not os.path.exists(robot):
         robot = os.path.join(ROOT, "robots", "default.json")
+    drives = opt("--drives", "1,4")
+    fast_num = drives.split(",")[-1].strip()
     jobs = int(opt("--jobs", max(1, (os.cpu_count() or 2) - 1)))
     n_courses = int(opt("--courses", 4))
     refine = int(opt("--refine", "3"))
@@ -453,12 +461,12 @@ def main():
                 c = os.path.join(cdir, f"course_{s}.json")
                 subprocess.run([EXE, "gen", "--seed", str(s), "--out", c], stdout=subprocess.DEVNULL, check=True)
                 tracks.append(c)
-    print(f"courses: {', '.join(os.path.relpath(c, ROOT) for c in tracks)}  robot: {os.path.basename(robot)}")
+    print(f"courses: {', '.join(os.path.relpath(c, ROOT) for c in tracks)}  robot: {os.path.basename(robot)}  drives: {drives}")
 
     def evaluate(v, quiet):
-        s = search_at(round(v, 3), tracks, robot, axes, extra, jobs, reuse, refine, quiet)
-        text = report_search(s, tracks, robot, extra)
-        save(s["final"], text)
+        s = search_at(round(v, 3), tracks, robot, axes, extra, jobs, reuse, refine, quiet, drives=drives)
+        text = report_search(s, tracks, robot, extra, drives=drives)
+        save(s["final"], text, drives=drives)
         return s, text
 
     if not max_speed:
@@ -476,7 +484,7 @@ def main():
         if ok:
             r = t["cell"][t["pick"]]["runs"]
             line = (f"  {s['speed']:.3f} m/s  pass: {describe(t['pick'])}, "
-                    f"drive 2 {sum(x['lap2'] for x in r) / len(r):.2f} s")
+                    f"drive {fast_num} {sum(x['lap_fast'] for x in r) / len(r):.2f} s")
             best = s
             v = s["speed"] + dv
         else:
@@ -495,10 +503,10 @@ def main():
         print(line, flush=True)
         log.append(line)
 
-    lines = ["max-speed search (drive 1 + 2), " + ", ".join(os.path.basename(c) for c in tracks), ""] + log + [""]
+    lines = [f"max-speed search (drive 1 + {fast_num}), " + ", ".join(os.path.basename(c) for c in tracks), ""] + log + [""]
     if best:
         lines.append(f"highest base speed that passes: {best['speed']:.3f} m/s")
-        lines.append(report_search(best, tracks, robot, extra))
+        lines.append(report_search(best, tracks, robot, extra, drives=drives))
     else:
         lines.append("no speed passed")
     text = "\n".join(lines)
