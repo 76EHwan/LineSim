@@ -277,17 +277,12 @@ public:
 	}
 
 	static int stale_drives() {
-		static const int n = std::getenv("LINESIM_TUNE_STALE") ? std::max(1, std::atoi(std::getenv("LINESIM_TUNE_STALE"))) : 60;
+		static const int n = std::getenv("LINESIM_TUNE_STALE") ? std::max(1, std::atoi(std::getenv("LINESIM_TUNE_STALE"))) : 18;
 		return n;
 	}
 
 	bool stale() const {
-		if (since_best_ < stale_drives())
-			return false;
-		for (size_t k = 0; k < done_; k++)
-			if (cells_[k].state == 3)
-				return false;
-		return true;
+		return since_best_ >= stale_drives();
 	}
 
 	// AI Gaussian Process RBF kernel
@@ -564,7 +559,7 @@ public:
 			v.push_back(fmt("Target #%zu [%.4s] (cell %zu/%zu) v=%.2f:", db_.size() + 1, cur.role.c_str(), done_ + 1, cells_.size(), v_));
 			v.push_back(fmt("  kp%.1f kd%.0f lat%.1f brk%.2fm shf%.2f crv%.2f",
 				cur.set.kp, cur.set.kd / dt, cur.set.lat, cur.set.brake_margin, cur.set.target_shift, cur.set.target_curve_gain));
-			v.push_back(fmt("  AI: μ=%.1f  σ=%.2f  Safe=%.0f%%",
+			v.push_back(fmt("  AI: Score=%.1f  Uncert=%.2f  Safe=%.0f%%",
 				cur.pred_mu, cur.pred_sigma, cur.p_safe * 100.0));
 		}
 		v.push_back(last_);
@@ -1299,7 +1294,6 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 			for (;;) {
 				if (session.auto_tune) {   // endless: score speed and gains on several courses, adjust
 					session.request_drive = 0;
-					session.request_new_map = false;
 					if (!tuner.active) {
 						GainTuner::Set from;
 						from.kp = session.params.steer_kp;
@@ -1572,28 +1566,36 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 							std::fflush(stdout);
 						}
 					}
-					if (tuner.stale() && tune_courses.size() > 1) {   // no new BEST for a while: swap a random course
+					bool user_swap = session.request_new_map;
+					if (user_swap)
+						session.request_new_map = false;
+					if ((tuner.stale() || user_swap) && !tune_courses.empty()) {
 						const GainTuner::Set b = tuner.best();
 						const double v = tuner.has_best() ? tuner.best_v() : tuner.speed();
 						std::string label;
 						const std::string fresh = make_map(&label);
 						char line[300];
 						if (!fresh.empty()) {
-							const std::string old = tune_courses[next_replace].name;
+							const size_t replace_idx = next_replace % tune_courses.size();
+							const std::string old = tune_courses[replace_idx].name;
 							if (live)
 								live->drop_course(old);   // its laps do not compare with anything any more
-							tune_courses[next_replace] = course_entry(fresh, label);
-							if (cur_course == next_replace)
+							tune_courses[replace_idx] = course_entry(fresh, label);
+							if (cur_course == replace_idx)
 								cur_course = tune_courses.size();   // reload it before the next drive
-							std::snprintf(line, sizeof line, "auto-tune: no new BEST in %d drives -> new c%zu (%.1f m)",
-								GainTuner::stale_drives(), next_replace + 1, tune_courses[next_replace].length);
+							if (replace_idx == 0) {
+								load_course(tune_courses[0].text, tune_courses[0].label);
+							}
+							std::snprintf(line, sizeof line, "auto-tune: %s -> new c%zu %s (%.1f m)",
+								user_swap ? "user requested map" : ("stale (" + std::to_string(GainTuner::stale_drives()) + " drives)").c_str(),
+								replace_idx + 1, tune_courses[replace_idx].name.c_str(), tune_courses[replace_idx].length);
 							if (!opt.quiet) {   // the full story on the console
-								std::printf("[%8.3f s] auto-tune: no new BEST in %d drives -> c%zu %s replaced by %s (BEST %.3f m/s kp %.2f kd %.4f lat %.2f sl %.2f)\n",
-									sim->t(), GainTuner::stale_drives(), next_replace + 1, old.c_str(),
-									tune_courses[next_replace].name.c_str(), v, b.kp, b.kd, b.lat, b.sl);
+								std::printf("[%8.3f s] auto-tune: c%zu %s replaced by %s (%.1f m)\n",
+									sim->t(), replace_idx + 1, old.c_str(),
+									tune_courses[replace_idx].name.c_str(), tune_courses[replace_idx].length);
 								std::fflush(stdout);
 							}
-							next_replace = next_replace + 1 < tune_courses.size() ? next_replace + 1 : 1;
+							next_replace = (replace_idx + 1) % tune_courses.size();
 							session.history.push_back(line);
 						}
 						tuner.start(v, b);   // paces belong to the courses: start over from BEST's values

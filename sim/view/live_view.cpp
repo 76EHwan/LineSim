@@ -167,10 +167,13 @@ void LiveView::session_key(int k) {
 			s.request_drive = k - '0';
 		break;
 	case 'N':
-		if (s.busy)
+		if (s.busy && !s.auto_tune)
 			s.message = "wait for the drive to finish (X stops it)";
-		else
+		else {
 			s.request_new_map = true;
+			if (s.auto_tune)
+				s.message = "auto-tune: new map requested (swapping next)...";
+		}
 		break;
 	case 'X':
 		if (s.busy)
