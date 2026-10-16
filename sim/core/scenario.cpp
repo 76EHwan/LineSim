@@ -182,14 +182,14 @@ constexpr int kTuneCourses = 3;
 class GainTuner {
 public:
 	struct Set {
-		double kp = 26.0, kd = 0.20;       // steering PD, kd in seconds
-		double lat = 13.4, sl = 0.05;      // lat_acc_max [m/s2], slalom_ratio
+		double kp = 16.64, kd = 0.101;     // steering PD, kd in seconds (202 * 0.0005s)
+		double lat = 14.77, sl = 0.10;     // lat_acc_max [m/s2], slalom_ratio
 		double target_shift = 0.40;         // target_shift_val
 		double target_curve_gain = 1.50;    // target_curve_gain
-		double brake_margin = 0.14;         // brake_margin_m [m]
+		double brake_margin = 0.10;         // brake_margin_m [m]
 		double pos_atten = 0.0;             // pos_atten_gain (fixed 0.0)
-		double yaw_kp = 0.35, yaw_ki = 1.0; // yaw cascade
-		double accel = 10.0, decel = 10.0;  // accel/decel
+		double yaw_kp = 0.33, yaw_ki = 0.9; // yaw cascade
+		double accel = 6.0, decel = 6.0;    // accel/decel
 		double max_mps = 10.0;              // max speed
 	};
 
@@ -285,20 +285,30 @@ public:
 		return since_best_ >= stale_drives();
 	}
 
-	// AI Gaussian Process RBF kernel
+	// AI Gaussian Process RBF kernel (full parameter space)
 	double kernel(const Set& a, double va, const Set& b, double vb) const {
 		const double d_kp = (a.kp - b.kp) / 3.0;
 		const double d_kd = (a.kd - b.kd) / 0.030;
 		const double d_lat = (a.lat - b.lat) / 1.5;
-		const double d_sl = (a.sl - b.sl) / 0.03;
-		const double d_tshift = (a.target_shift - b.target_shift) / 0.05;
-		const double d_tcgain = (a.target_curve_gain - b.target_curve_gain) / 0.10;
-		const double d_brake = (a.brake_margin - b.brake_margin) / 0.03;
-		const double d_yaw_p = (a.yaw_kp - b.yaw_kp) / 0.10;
+		const double d_sl = (a.sl - b.sl) / 0.04;
+		const double d_tshift = (a.target_shift - b.target_shift) / 0.06;
+		const double d_tcgain = (a.target_curve_gain - b.target_curve_gain) / 0.12;
+		const double d_brake = (a.brake_margin - b.brake_margin) / 0.04;
+		const double d_yaw_p = (a.yaw_kp - b.yaw_kp) / 0.12;
 		const double d_v = (va - vb) / 0.15;
 		const double d2 = d_kp * d_kp + d_kd * d_kd + d_lat * d_lat + d_sl * d_sl +
 		                  d_tshift * d_tshift + d_tcgain * d_tcgain + d_brake * d_brake +
 		                  d_yaw_p * d_yaw_p + d_v * d_v;
+		return std::exp(-0.5 * d2);
+	}
+
+	// Marginal steering/cornering stability kernel (prevents high-dimensional dilution of crash/oversteer history)
+	double stability_kernel(const Set& a, double va, const Set& b, double vb) const {
+		const double d_kp = (a.kp - b.kp) / 2.5;
+		const double d_kd = (a.kd - b.kd) / 0.025;
+		const double d_lat = (a.lat - b.lat) / 1.2;
+		const double d_v = (va - vb) / 0.15;
+		const double d2 = d_kp * d_kp + d_kd * d_kd + d_lat * d_lat + d_v * d_v;
 		return std::exp(-0.5 * d2);
 	}
 
@@ -309,39 +319,43 @@ public:
 		double acq = 40.0;
 	};
 
-	AIPrediction predict(const Set& s, double v, double kappa = 1.8) const {
+	AIPrediction predict(const Set& s, double v, double kappa = 1.2) const {
 		AIPrediction p;
 		if (db_.empty()) {
 			p.mu = 35.0;
 			p.sigma = 1.0;
 			p.p_safe = 0.95;
-			p.acq = p.mu - kappa * p.sigma * 8.0;
+			p.acq = p.mu - kappa * p.sigma * 4.0;
 			return p;
 		}
 		double w_sum = 0.0, weighted_score = 0.0, density = 0.0;
 		double safe_w = 0.0, total_w = 0.0;
 		for (const auto& tr : db_) {
-			double k = kernel(s, v, tr.set, tr.v);
-			density += k;
-			total_w += k;
+			const double k_full = kernel(s, v, tr.set, tr.v);
+			const double k_stab = stability_kernel(s, v, tr.set, tr.v);
+			const double k_eff = 0.5 * k_full + 0.5 * k_stab;
+			density += k_eff;
+			total_w += k_stab;
 			if (tr.safe) {
-				safe_w += k;
+				safe_w += k_stab;
 				if (tr.score < 400.0) {
-					w_sum += k;
-					weighted_score += k * tr.score;
+					w_sum += k_eff;
+					weighted_score += k_eff * tr.score;
 				}
 			}
 		}
-		p.p_safe = (safe_w + 0.4) / (total_w + 0.8);
-		p.sigma = 1.0 / (1.0 + 0.45 * density);
+		p.p_safe = (safe_w + 0.6) / (total_w + 1.0);
+		p.sigma = 1.0 / (1.0 + 0.65 * density);
 		if (w_sum > 1e-4) {
 			p.mu = weighted_score / w_sum;
 		} else {
 			p.mu = (best_pace_ > 0 ? best_pace_ * 10.0 + 10.0 : 35.0);
 		}
-		// Constrained Lower Confidence Bound
+		// Trust-region prior: gently discourage drifting far away from proven best_.kp
+		const double kp_drift = ( s.kp - best_.kp ) / 4.0;
+		const double trust_penalty = 1.5 * kp_drift * kp_drift;
 		const double risk_penalty = (1.0 - p.p_safe) * 60.0;
-		p.acq = p.mu - kappa * p.sigma * 8.0 + risk_penalty;
+		p.acq = p.mu - kappa * p.sigma * 4.0 + risk_penalty + trust_penalty;
 		return p;
 	}
 
@@ -371,7 +385,7 @@ public:
 		db_.push_back(tr);
 
 		char log_buf[160];
-		std::snprintf(log_buf, sizeof log_buf, "#%02zu [%.4s] kp%.1f/d%.0f: %s%s",
+		std::snprintf(log_buf, sizeof log_buf, "#%02zu [%.7s] kp%.1f/d%.0f: %s%s",
 			db_.size(), c.role.c_str(), c.set.kp, c.set.kd / 0.0005, text.c_str(),
 			slower ? " (slow)" : "");
 		log_.push_back(log_buf);
@@ -433,108 +447,117 @@ public:
 		std::mt19937 rng(1337 + static_cast<unsigned>(round_) * 31);
 		std::normal_distribution<double> norm(0.0, 1.0);
 		std::uniform_real_distribution<double> unif(0.0, 1.0);
+		std::uniform_real_distribution<double> sym(-1.0, 1.0);
 
 		// Always keep current best as 1st anchor
 		Cell c0;
 		c0.set = best_;
-		c0.role = "Best-Anchor";
+		c0.role = "Anchor";
 		AIPrediction p0 = predict(c0.set, v_);
 		c0.pred_mu = p0.mu; c0.pred_sigma = p0.sigma; c0.p_safe = p0.p_safe;
 		cells_.push_back(c0);
 
-		// Generate 150 Monte Carlo candidate parameters in continuous space
 		struct Candidate {
 			Set set;
 			AIPrediction pred;
 			std::string role;
 		};
-		std::vector<Candidate> cand_pool;
+		std::vector<Candidate> exploit_pool, anti_pool, explore_pool;
 
-		// 1. Local perturbation around best (Exploitation)
+		// 1. Local perturbation around best_ (Exploitation)
 		for (int i = 0; i < 60; i++) {
 			Set s = best_;
-			s.kp = std::clamp(best_.kp + norm(rng) * 1.5, 16.0, 42.0);
-			s.kd = std::clamp(best_.kd + norm(rng) * 0.015, 0.08, 0.45);
-			s.lat = std::clamp(best_.lat + norm(rng) * 0.5, 10.0, 15.0); // 타이어 한계 내 안전한 상한 (15.0)
-			s.sl = std::clamp(best_.sl + norm(rng) * 0.02, 0.01, 0.25);
-			s.target_shift = std::clamp(best_.target_shift + norm(rng) * 0.04, 0.25, 0.65);
-			s.target_curve_gain = std::clamp(best_.target_curve_gain + norm(rng) * 0.08, 1.25, 2.10);
-			s.brake_margin = std::clamp(best_.brake_margin + norm(rng) * 0.02, 0.06, 0.30);
+			s.kp = std::clamp(best_.kp + norm(rng) * 1.2, 8.0, 32.0);
+			s.kd = std::clamp(best_.kd + norm(rng) * 0.012, 0.04, 0.35);
+			s.lat = std::clamp(best_.lat + norm(rng) * 0.4, 10.0, 15.5);
+			s.sl = std::clamp(best_.sl + norm(rng) * 0.015, 0.01, 0.25);
+			s.target_shift = std::clamp(best_.target_shift + norm(rng) * 0.03, 0.20, 0.65);
+			s.target_curve_gain = std::clamp(best_.target_curve_gain + norm(rng) * 0.06, 1.15, 2.10);
+			s.brake_margin = std::clamp(best_.brake_margin + norm(rng) * 0.015, 0.05, 0.28);
 			s.yaw_kp = std::clamp(best_.yaw_kp + norm(rng) * 0.03, 0.10, 0.70);
-			s.yaw_ki = std::clamp(best_.yaw_ki + norm(rng) * 0.15, 0.0, 3.0);
-			s.pos_atten = 0.0; // pos_atten_gain 고정 (0.0)
-			AIPrediction pr = predict(s, v_, 1.2);
-			cand_pool.push_back({s, pr, "AI-Exploit"});
+			s.yaw_ki = std::clamp(best_.yaw_ki + norm(rng) * 0.12, 0.1, 3.0);
+			s.pos_atten = 0.0;
+			AIPrediction pr = predict(s, v_, 0.8);
+			exploit_pool.push_back({s, pr, "Exploit"});
 		}
 
-		// 2. Anti-Oversteer & Braking Margin 특화 후보 (곡선 진입 전 여유 감속 + 인코스 선행 바이어스)
+		// 2. Anti-Oversteer & Cornering Stability around best_ (damped kp/kd + braking/in-course margin)
 		for (int i = 0; i < 45; i++) {
 			Set s = best_;
-			s.brake_margin = 0.10 + unif(rng) * 0.15;        // 0.10 ~ 0.25 m 여유 있는 직선 감속
-			s.target_shift = 0.35 + unif(rng) * 0.22;        // 0.35 ~ 0.57 인코스 선행 타겟
-			s.target_curve_gain = 1.35 + unif(rng) * 0.55;   // 1.35 ~ 1.90 곡선 구간 타겟 배율
-			s.lat = 11.5 + unif(rng) * 2.8;                  // 11.5 ~ 14.3 접지 한계 감속으로 안정성 유지
-			s.kp = 22.0 + unif(rng) * 12.0;
-			s.kd = 0.15 + unif(rng) * 0.20;
-			s.sl = 0.03 + unif(rng) * 0.08;
-			s.yaw_kp = 0.25 + unif(rng) * 0.25;
-			s.yaw_ki = 0.8 + unif(rng) * 1.0;
-			s.pos_atten = 0.0; // pos_atten_gain 고정 (0.0)
-			AIPrediction pr = predict(s, v_, 1.5);
-			cand_pool.push_back({s, pr, "AI-AntiOver"});
+			s.kp = std::clamp(best_.kp + (-2.0 + unif(rng) * 3.0), 8.0, 28.0);            // best_.kp -2.0 ~ +1.0 (과도한 조향 게인 억제)
+			s.kd = std::clamp(best_.kd + (-0.005 + unif(rng) * 0.030), 0.05, 0.35);       // 댐핑 보강으로 오버스티어/진동 억제
+			s.lat = std::clamp(best_.lat + (-1.2 + unif(rng) * 1.6), 10.5, 15.0);         // 코너 한계 가속도 안정화
+			s.brake_margin = std::clamp(best_.brake_margin + unif(rng) * 0.06, 0.08, 0.28);
+			s.target_shift = std::clamp(best_.target_shift + sym(rng) * 0.06, 0.25, 0.60);
+			s.target_curve_gain = std::clamp(best_.target_curve_gain + sym(rng) * 0.12, 1.20, 2.00);
+			s.sl = std::clamp(best_.sl + sym(rng) * 0.03, 0.02, 0.20);
+			s.yaw_kp = std::clamp(best_.yaw_kp + sym(rng) * 0.06, 0.15, 0.60);
+			s.yaw_ki = std::clamp(best_.yaw_ki + sym(rng) * 0.20, 0.3, 2.5);
+			s.pos_atten = 0.0;
+			AIPrediction pr = predict(s, v_, 1.1);
+			anti_pool.push_back({s, pr, "AntiOv"});
 		}
 
-		// 3. Global Exploration (전역 탐색)
+		// 3. Trust-Region Exploration centered on best_ (전역 탐색도 best_ 기준으로 대칭 탐색)
 		for (int i = 0; i < 45; i++) {
-			Set s;
-			s.kp = 18.0 + unif(rng) * 20.0;
-			s.kd = 0.10 + unif(rng) * 0.25;
-			s.lat = 11.0 + unif(rng) * 4.0;
-			s.sl = 0.02 + unif(rng) * 0.15;
-			s.target_shift = 0.30 + unif(rng) * 0.28;        // 0.30 ~ 0.58
-			s.target_curve_gain = 1.25 + unif(rng) * 0.70;   // 1.25 ~ 1.95
-			s.brake_margin = 0.08 + unif(rng) * 0.18;
-			s.yaw_kp = 0.15 + unif(rng) * 0.40;
-			s.yaw_ki = 0.5 + unif(rng) * 1.5;
-			s.pos_atten = 0.0; // pos_atten_gain 고정 (0.0)
-			s.accel = best_.accel;
-			s.decel = best_.decel;
-			s.max_mps = best_.max_mps;
-			AIPrediction pr = predict(s, v_, 2.2);
-			cand_pool.push_back({s, pr, "AI-Explore"});
+			Set s = best_;
+			s.kp = std::clamp(best_.kp + sym(rng) * 4.5, 8.0, 28.0);                      // best_.kp ± 4.5 (16.6 기준 12.1 ~ 21.1)
+			s.kd = std::clamp(best_.kd + sym(rng) * 0.035, 0.04, 0.32);
+			s.lat = std::clamp(best_.lat + sym(rng) * 1.5, 10.5, 15.5);
+			s.sl = std::clamp(best_.sl + sym(rng) * 0.05, 0.02, 0.22);
+			s.target_shift = std::clamp(best_.target_shift + sym(rng) * 0.10, 0.22, 0.62);
+			s.target_curve_gain = std::clamp(best_.target_curve_gain + sym(rng) * 0.20, 1.15, 2.05);
+			s.brake_margin = std::clamp(best_.brake_margin + sym(rng) * 0.05, 0.06, 0.26);
+			s.yaw_kp = std::clamp(best_.yaw_kp + sym(rng) * 0.10, 0.12, 0.65);
+			s.yaw_ki = std::clamp(best_.yaw_ki + sym(rng) * 0.35, 0.2, 2.5);
+			s.pos_atten = 0.0;
+			AIPrediction pr = predict(s, v_, 1.5);
+			explore_pool.push_back({s, pr, "Explore"});
 		}
 
-		// Sort candidate pool by Acquisition score (lowest is best)
-		std::sort(cand_pool.begin(), cand_pool.end(), [](const Candidate& a, const Candidate& b) {
+		auto by_acq = [](const Candidate& a, const Candidate& b) {
 			return a.pred.acq < b.pred.acq;
-		});
+		};
+		std::sort(exploit_pool.begin(), exploit_pool.end(), by_acq);
+		std::sort(anti_pool.begin(), anti_pool.end(), by_acq);
+		std::sort(explore_pool.begin(), explore_pool.end(), by_acq);
 
-		// Select top 5 diverse candidates
-		for (const auto& cd : cand_pool) {
-			if (cells_.size() >= 6)
-				break;
-			bool too_close = false;
-			for (const auto& exist : cells_) {
-				if (std::fabs(exist.set.kp - cd.set.kp) < 0.4 &&
-					std::fabs(exist.set.kd - cd.set.kd) < 0.008 &&
-					std::fabs(exist.set.lat - cd.set.lat) < 0.3 &&
-					std::fabs(exist.set.brake_margin - cd.set.brake_margin) < 0.015 &&
-					std::fabs(exist.set.target_shift - cd.set.target_shift) < 0.02) {
-					too_close = true;
+		auto pick_from = [&](const std::vector<Candidate>& pool, int count) {
+			int added = 0;
+			for (const auto& cd : pool) {
+				if (added >= count || cells_.size() >= 6)
 					break;
+				bool too_close = false;
+				for (const auto& exist : cells_) {
+					if (std::fabs(exist.set.kp - cd.set.kp) < 0.35 &&
+						std::fabs(exist.set.kd - cd.set.kd) < 0.006 &&
+						std::fabs(exist.set.lat - cd.set.lat) < 0.25 &&
+						std::fabs(exist.set.brake_margin - cd.set.brake_margin) < 0.012 &&
+						std::fabs(exist.set.target_shift - cd.set.target_shift) < 0.015) {
+						too_close = true;
+						break;
+					}
 				}
-			}
-			if (too_close)
-				continue;
+				if (too_close)
+					continue;
 
-			Cell c;
-			c.set = cd.set;
-			c.pred_mu = cd.pred.mu;
-			c.pred_sigma = cd.pred.sigma;
-			c.p_safe = cd.pred.p_safe;
-			c.role = cd.role;
-			cells_.push_back(c);
-		}
+				Cell c;
+				c.set = cd.set;
+				c.pred_mu = cd.pred.mu;
+				c.pred_sigma = cd.pred.sigma;
+				c.p_safe = cd.pred.p_safe;
+				c.role = cd.role;
+				cells_.push_back(c);
+				added++;
+			}
+		};
+
+		// Balanced quota per round: 2 Exploit + 2 AntiOv + 1 Explore
+		pick_from(exploit_pool, 2);
+		pick_from(anti_pool, 2);
+		pick_from(explore_pool, 1);
+		if (cells_.size() < 6)
+			pick_from(exploit_pool, 6 - static_cast<int>(cells_.size()));
 	}
 
 	std::vector<std::string> status(double dt, const std::string& courses) const {
@@ -556,7 +579,7 @@ public:
 		// Current candidate details
 		if (done_ < cells_.size()) {
 			const Cell& cur = cells_[done_];
-			v.push_back(fmt("Target #%zu [%.4s] (cell %zu/%zu) v=%.2f:", db_.size() + 1, cur.role.c_str(), done_ + 1, cells_.size(), v_));
+			v.push_back(fmt("Target #%zu [%.7s] (cell %zu/%zu) v=%.2f:", db_.size() + 1, cur.role.c_str(), done_ + 1, cells_.size(), v_));
 			v.push_back(fmt("  kp%.1f kd%.0f lat%.1f brk%.2fm shf%.2f crv%.2f",
 				cur.set.kp, cur.set.kd / dt, cur.set.lat, cur.set.brake_margin, cur.set.target_shift, cur.set.target_curve_gain));
 			v.push_back(fmt("  AI: Score=%.1f  Uncert=%.2f  Safe=%.0f%%",
