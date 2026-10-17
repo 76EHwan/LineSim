@@ -48,7 +48,9 @@ build.bat
 | 하고 싶은 것 | 방법 |
 |---|---|
 | 빌드 | `Ctrl+Shift+B` |
-| **계속 주행하며 튜닝** | `F5` (무작위 코스) 또는 작업 **LineSim: 3D session** → 코스 선택(`random` / figure8 / oval) → 기본 속도, 최고 속도, 가속도, 감속도 입력 |
+| **백그라운드 AI 게인 튜닝 (창 없이)** | `build\Release\linesim.exe run --tune A --track tracks/practice_board.json --robot robots/full.json --set base_mps=2.1 --trials 100` |
+| **백그라운드 엔드리스 속도 튜닝** | `build\Release\linesim.exe run --tune E --robot robots/full.json --set base_mps=2.05 --min-speed 1.50 --fail-rate 20` |
+| **계속 주행하며 튜닝 (3D 창)** | `F5` (무작위 코스) 또는 작업 **LineSim: 3D session** → 코스 선택(`random` / figure8 / oval) → 기본 속도, 최고 속도, 가속도, 감속도 입력 |
 | 시나리오 그대로 보기 | 작업 **LineSim: 3D scenario** |
 | 펌웨어 메뉴를 키보드로 | 작업 **LineSim: 3D interactive firmware menu** |
 | 무작위 코스 파일 만들기 | 작업 **LineSim: Generate random course** (`tracks/random_<seed>.json`) |
@@ -71,7 +73,7 @@ build\Release\linesim.exe view --session --track random --robot robots/full.json
 | `↑` `↓` / `←` `→` | 파라미터 선택 / 변경 (`Shift` = 10배, 속도는 0.01 m/s 단위): 기본·최고 속도, 가·감속, steer kp/kd, pos atten, target shift, pit-in. 다음 주행부터 적용. steer kd는 초 단위로 보이고 괄호 안이 로봇 메뉴에 넣을 값(`steer_gain_d` = kd ÷ 0.0005) |
 | `Enter` → 숫자 → `Enter` | 선택한 파라미터 값을 직접 입력 (예: steer kp `18.5`). `Esc` 취소, `Backspace` 지우기. 입력 중에는 숫자·`-` 키가 주행·배속으로 쓰이지 않음 |
 | `A` | **3-코스 AI 게인 오토튜닝 (`A` 키)**: 3개 코스(`c1, c2, c3`)에서 1회차 → 4회차를 돌리며 최고 랩타임 및 조향/곡선 게인을 베이지안(GP)으로 탐색합니다. 다시 `A`(또는 `X`)를 누르면 종료 |
-| `E` | **Endless 100-맵 무한 검증 + AI 게인 자가치유 (`E` 키)**: 매 시도마다 새로운 무작위 코스를 생성해 1회차 → 4회차를 주행합니다. 실패 시 해당 코스에서 AI 게인 자가치유 후보 3개를 먼저 시도하고, 100맵 실패율 1% 미만 기준으로 기본 속도를 자동 조절합니다 |
+| `E` | **Endless 한계 속도 검증 + 5단계 AI 게인 자가치유 (`E` 키)**: 매 시도마다 새로운 무작위 코스를 생성해 1회차 → 4회차를 주행합니다. 실패 시 해당 코스에서 5단계 AI 게인 자가치유 후보를 먼저 시도하고, 50개 맵 윈도우 실패율 기준(기본 10% 이하)과 최저 속도 하한선(`--min-speed`)을 적용해 기본 속도를 자동 조절합니다 |
 | `N` | 무작위 코스 새로 생성 (`runs/latest/random_<seed>.json`에 저장). 새 코스에서는 1회차부터 |
 | `X` | 주행 중인 로봇 들어 올리기 (펌웨어가 Line Lost로 종료) |
 | `R` | 로봇을 출발선으로 |
@@ -158,12 +160,53 @@ python tools/compare_logs.py "real_logs/주행 로그" "real_logs/주행 로그/
 - **스트레스 주행 검증**:
   - 3개 코스를 모두 갱신한 우수 후보는 조향 지연 스트레스(×1.4, ×1.85) 환경에서 추가 검증을 통과해야 최종 BEST로 확정 및 자동 저장(`firmware/Main/Src/drive.c`)됩니다.
 
-**3D 세션 (`E` 키, Endless 100-맵 무한 검증 + AI 게인 자가치유)**:
+**3D 세션 (`E` 키, Endless 한계 속도 검증 + 5단계 AI 게인 자가치유)**:
 - **무한 랜덤 맵 1차 → 4차 주행**: 매 시도마다 수식 기반 초고속 생성기로 새로운 ZETIN 코스를 만들고 1회차 → 4회차를 주행합니다.
-- **실패 맵 AI 게인 자가치유 (Auto-Heal)**: 특정 맵에서 1차 또는 4차 주행이 실패하면 기본 속도를 바로 낮추지 않고, **실패한 바로 그 맵에서 AI 게인 보정 후보 3개(`Heal-1..3`: 조향 PD·곡선 감쇠·선행 조향 미세 보정)를 먼저 시도**합니다. 게인 보정으로 통과하면 속도를 깎지 않고 새로운 게인을 채택합니다.
-- **속도 자동 복구 및 100맵 `<1%` 검증**: 자가치유 3회도 모두 실패할 때만 기본 속도를 `-0.02 m/s` 낮추며, 시작 속도보다 낮아진 상태에서는 **20맵 연속 통과마다 `+0.01 m/s`씩 빠르게 시작 속도로 복구**합니다. 시작 속도 이상에서는 **100맵 중 실패 0회(실패율 < 1%)** 달성 시 `+0.01 m/s`씩 한계 속도를 높여 나갑니다.
+- **실패 맵 5단계 AI 게인 자가치유 (Auto-Heal)**: 특정 맵에서 1차 또는 4차 주행이 실패하면 기본 속도를 바로 낮추지 않고, **실패한 바로 그 맵에서 5단계 AI 게인 보정 후보(`Heal-Damp`, `Heal-Track`, `Heal-AI`, `Heal-Brake`, `Heal-Apex`)를 먼저 시도**합니다. 게인 보정으로 통과하면 속도를 깎지 않고 새로운 게인을 채택합니다.
+- **최저 속도 하한선 보호 및 윈도우 실패율 검증**: 단 1회 우연한 실패로는 감속하지 않으며, 2회 연속 실패나 윈도우 실패율 허용치(기본 `<= 10%`, `--fail-rate`로 변경 가능) 초과 시에만 기본 속도를 `-0.01 m/s` 낮춥니다(하한선 `--min-speed` 이하로는 절대 하락하지 않음). 시작 속도보다 낮아진 상태에서는 **10맵 연속 통과마다 `+0.01 m/s`씩 빠르게 시작 속도로 복구**하며, 평가 윈도우(기본 50맵, `--window`) 통과 시 `+0.01 m/s`씩 한계 속도를 높여 나갑니다.
 
-**격자 탐색 (창 없이)**:
+### 🚀 백그라운드 고속 오토튜닝 (창 없이 터미널 실행, C++ 네이티브)
+
+3D 그래픽 렌더링 없이 순수 물리 시뮬레이션 연산만으로 초고속(실제 시간 대비 수십~수백 배속) 백그라운드 튜닝을 실행합니다.
+
+#### 1. AI 베이지안 게인 오토튜닝 (`run --tune A`)
+설정 속도(예: `base_mps=2.1`)를 임의로 낮추지 않고 고정한 채, 6가지 핵심 제어 파라미터(`steer_kp`, `steer_kd`, `lat_acc_max`, `brake_margin_m`, `target_shift_val`, `target_curve_gain`)를 가우시안 프로세스(GP) 기반 베이지안 최적화로 동시 탐색합니다. 신기록 달성 시 `firmware/Main/Src/drive.c`에 즉시 자동 저장됩니다.
+
+```bash
+# [추천] 100회 시도 후 최적 파라미터 요약 출력 및 자동 종료 (--trials 100)
+build\Release\linesim.exe run --tune A --track tracks\practice_board.json --robot robots\full.json --set base_mps=2.1 --trials 100
+
+# 무제한 탐색 (원하는 만큼 돌리다가 Ctrl+C 누르면 최적 게인 요약 출력 및 drive.c 저장 후 안전 종료)
+build\Release\linesim.exe run --tune A --track tracks\practice_board.json --robot robots\full.json --set base_mps=2.1
+```
+
+#### 2. Endless 속도 한계 검증 튜닝 (`run --tune E`)
+매 시도마다 새로운 무작위 ZETIN 코스를 실시간 생성하여 1차(탐색) → 4차(최고속) 주행을 검증합니다. 실패 시 해당 코스에서 5단계 AI 게인 자가치유(`Heal-Damp`, `Heal-Track`, `Heal-AI`, `Heal-Brake`, `Heal-Apex`)를 먼저 시도하고, 50개 맵 평가 윈도우에서 설정된 실패율(기본 10% 이하) 달성 시 `base_mps`를 자동으로 상향(+0.01 m/s) 조정하며 한계 속도를 확장합니다.
+- **최저 속도 하한선 보호 (`--min-speed`)**: 실패가 누적되더라도 속도가 바닥으로 추락하지 않도록 하한선(지정하지 않으면 `시작 속도 - 0.20 m/s`) 이하로는 절대 내려가지 않으며, 하한선 도달 시 속도를 고정하고 게인 자가치유에 집중합니다.
+- **안정적 감속**: 단 1번 맵에서 튕겼다고 바로 감속되지 않고, 연속 2회 실패나 윈도우 실패율 기준 초과 시에만 안전하게 감속 조절됩니다.
+
+```bash
+# 기본 실행: 50개 맵 윈도우 평가, 실패율 <=10% 검증 시 속도 상향 (Ctrl+C로 안전 종료)
+build\Release\linesim.exe run --tune E --robot robots\full.json --set base_mps=2.1
+
+# 최저 속도 하한선(예: 1.50 m/s) 및 실패율 허용치(예: 20%) 지정 실행
+build\Release\linesim.exe run --tune E --robot robots\full.json --set base_mps=2.05 --min-speed 1.50 --fail-rate 20
+```
+
+> [!TIP]
+> **종료 및 결과 확인 방법**: 터미널에서 언제든지 `Ctrl + C`를 누르면 현재 주행을 안전하게 중단하고, 그동안 찾은 최종 1위 파라미터 세트를 요약 출력한 뒤 `firmware/Main/Src/drive.c`에 저장하고 정상 종료합니다.
+
+### 🎮 3D 뷰어 세션 오토튜닝 (화면을 보며 실행)
+
+```bash
+# 3D 창에서 AI 게인 오토튜닝 바로 시작 (키보드 A 키와 동일)
+build\Release\linesim.exe view --tune A --track tracks\practice_board.json --robot robots\full.json --set base_mps=2.1
+
+# 3D 창에서 Endless 무한 맵 검증 바로 시작 (키보드 E 키와 동일)
+build\Release\linesim.exe view --tune E --robot robots\full.json --set base_mps=2.1
+```
+
+### 🐍 구형 Python 격자 탐색 (참고용)
 
 ```bash
 # 기본 속도 2.0 m/s에서 1회 탐색
@@ -205,7 +248,12 @@ build\Release\linesim.exe run --track tracks/oval.json --drives 1 --set base_mps
 |---|---|
 | `--drives 1,2,3,4` | 실행할 주행 순서. 한 번의 전원 세션처럼 이어서 실행되므로 2~4회차는 1회차 로그를 사용 |
 | `--set key=value` | `driveData` 덮어쓰기: `base_mps max_mps accel decel steer_kp steer_kd pos_atten_gain pit_in_m target_shift fan_en` |
-| `--robot file` | 로봇 물리 파라미터 (`robots/default.json`) |
+| `--robot file` | 로봇 물리 파라미터 (`robots/full.json` 또는 `robots/default.json`) |
+| `--tune A\|E` | 오토튜닝 즉시 시작: `A` = AI 베이지안 게인 튜닝, `E` = Endless 무작위 맵 속도 한계 튜닝 |
+| `--trials n` | (`--tune A`) 평가할 후보 파라미터 시도 횟수 지정 (예: `--trials 100` 완료 시 최적 요약 출력 후 자동 종료) |
+| `--min-speed v` | (`--tune E`) 최저 속도 하한선 [m/s] (기본값: `시작 속도 - 0.20 m/s`) |
+| `--fail-rate pct` | (`--tune E`) 속도 상향 검증 시 허용할 최대 실패율 [%] (기본값: `10`) |
+| `--window n` | (`--tune E`) 실패율 검증 윈도우 맵 개수 (기본값: `50`) |
 | `--seed n` | 센서 편차·노이즈 시드. 같은 시드면 결과가 완전히 같음 |
 | `--max-time s` | 회차당 제한 시간. 넘으면 로봇을 "들어 올려" 펌웨어가 Line Lost로 끝내게 함 |
 | `--out dir` | 결과 폴더 (기본 `runs/<날짜_시간>`) |

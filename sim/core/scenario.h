@@ -49,6 +49,12 @@ struct ScenarioOptions {
 	bool interactive = false;         // 3D viewer + firmware menu driven from the keyboard
 	bool session = false;             // 3D viewer, drives started from the keyboard, parameters edited live
 	double view_speed = 1.0;          // playback speed factor
+	bool auto_tune = false;           // start auto-tune immediately (headless or GUI)
+	int tune_mode = 0;                // 1 = A (Bayes AI), 2 = E (Endless)
+	int tune_trials = 0;              // stop auto-tune after N candidate trials (0 = unlimited)
+	double endless_max_fail_pct = 10.0; // max allowed fail rate in Endless mode (default 10.0%)
+	int endless_window = 50;          // window size for Endless verification (default 50 maps)
+	double endless_min_speed = 0.0;   // minimum speed floor for Endless mode (default start_v - 0.20 m/s)
 };
 
 struct ScenarioResult {

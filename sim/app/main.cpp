@@ -184,10 +184,31 @@ int main(int argc_in, char** argv_in) {
 			opt.quiet = true;
 		} else if (a == "--session") {
 			opt.session = true;
-			opt.view = true;
+			if (cmd == "view")
+				opt.view = true;
+		} else if (a == "--tune") {
+			std::string m = next();
+			opt.session = true;
+			opt.auto_tune = true;
+			if (cmd == "view")
+				opt.view = true;
+			if (m == "A" || m == "a" || m == "1" || m == "bayes")
+				opt.tune_mode = 1;
+			else if (m == "E" || m == "e" || m == "2" || m == "endless")
+				opt.tune_mode = 2;
+			else
+				opt.tune_mode = 1;
 		} else if (a == "--interactive") {
 			opt.interactive = true;
 			opt.view = true;
+		} else if (a == "--trials" || a == "--candidates" || a == "--tune-count") {
+			opt.tune_trials = std::atoi(next().c_str());
+		} else if (a == "--fail-rate" || a == "--max-fail-rate") {
+			opt.endless_max_fail_pct = std::atof(next().c_str());
+		} else if (a == "--window") {
+			opt.endless_window = std::atoi(next().c_str());
+		} else if (a == "--min-speed" || a == "--speed-floor") {
+			opt.endless_min_speed = std::atof(next().c_str());
 		} else if (a == "--speed") {
 			opt.view_speed = std::atof(next().c_str());
 			if (opt.view_speed <= 0)
@@ -227,9 +248,18 @@ int main(int argc_in, char** argv_in) {
 		opt.out_dir = (fs::path("runs") / stamp).string();
 	}
 	if (opt.track_path.empty()) {
-		std::fprintf(stderr, "no track given\n");
-		usage();
-		return 2;
+		if (opt.tune_mode == 2 || opt.session) {
+			opt.track_path = "random";
+		} else if (opt.tune_mode == 1 || opt.auto_tune) {
+			if (fs::exists("tracks/practice_board.json"))
+				opt.track_path = "tracks/practice_board.json";
+			else
+				opt.track_path = "random";
+		} else {
+			std::fprintf(stderr, "no track given\n");
+			usage();
+			return 2;
+		}
 	}
 
 	ScenarioResult res = run_scenario(opt);

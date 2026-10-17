@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdarg>
 #include <chrono>
+#include <csignal>
 #include <ctime>
 #include <cmath>
 #include <cstdio>
@@ -15,6 +16,8 @@
 #include <memory>
 #include <random>
 #include <regex>
+
+static volatile std::sig_atomic_t g_stop_requested = 0;
 
 #include "core/json.h"
 #include "core/simulation.h"
@@ -232,7 +235,7 @@ public:
 		best_lap_times_.clear();
 		best_ = from;
 		best_.pos_atten = 0.0;
-		if (best_.lat <= 0) best_.lat = 13.4;
+		if (best_.lat <= 0 || best_.lat > 13.0) best_.lat = 11.5;
 		if (best_.target_shift < 0.20) best_.target_shift = 0.40;
 		if (best_.target_curve_gain < 1.10) best_.target_curve_gain = 1.50;
 		if (best_.brake_margin <= 0) best_.brake_margin = 0.14;
@@ -277,6 +280,24 @@ public:
 		bool res = just_got_best_;
 		just_got_best_ = false;
 		return res;
+	}
+
+	size_t trial_count() const { return db_.size(); }
+	bool find_best_overall(Set* out_set, double* out_v, double* out_score, std::string* out_text) const {
+		if (db_.empty()) return false;
+		size_t best_idx = 0;
+		double min_score = 1e9;
+		for (size_t i = 0; i < db_.size(); i++) {
+			if (db_[i].score < min_score) {
+				min_score = db_[i].score;
+				best_idx = i;
+			}
+		}
+		if (out_set) *out_set = db_[best_idx].set;
+		if (out_v) *out_v = db_[best_idx].v;
+		if (out_score) *out_score = db_[best_idx].score;
+		if (out_text) *out_text = db_[best_idx].text;
+		return true;
 	}
 
 	static int stale_drives() {
@@ -459,7 +480,7 @@ public:
 			Set s = best_;
 			s.kp = std::clamp(best_.kp + norm(rng) * 1.2, 8.0, 32.0);
 			s.kd = std::clamp(best_.kd + norm(rng) * 0.012, 0.04, 0.35);
-			s.lat = std::clamp(best_.lat + norm(rng) * 0.4, 10.0, 15.5);
+			s.lat = std::clamp(best_.lat + norm(rng) * 0.4, 7.5, 12.8);
 			s.sl = std::clamp(best_.sl + norm(rng) * 0.015, 0.01, 0.25);
 			s.target_shift = std::clamp(best_.target_shift + norm(rng) * 0.03, 0.20, 0.65);
 			s.target_curve_gain = std::clamp(best_.target_curve_gain + norm(rng) * 0.06, 1.15, 2.10);
@@ -475,7 +496,7 @@ public:
 			Set s = best_;
 			s.kp = std::clamp(best_.kp + (-2.0 + unif(rng) * 3.0), 8.0, 28.0);
 			s.kd = std::clamp(best_.kd + (-0.005 + unif(rng) * 0.030), 0.05, 0.35);
-			s.lat = std::clamp(best_.lat + (-1.2 + unif(rng) * 1.6), 10.5, 15.0);
+			s.lat = std::clamp(best_.lat + (-1.0 + unif(rng) * 1.5), 7.5, 12.8);
 			s.brake_margin = std::clamp(best_.brake_margin + unif(rng) * 0.06, 0.08, 0.28);
 			s.target_shift = std::clamp(best_.target_shift + sym(rng) * 0.06, 0.25, 0.60);
 			s.target_curve_gain = std::clamp(best_.target_curve_gain + sym(rng) * 0.12, 1.20, 2.00);
@@ -491,7 +512,7 @@ public:
 			Set s = best_;
 			s.kp = std::clamp(best_.kp + sym(rng) * 4.5, 8.0, 28.0);
 			s.kd = std::clamp(best_.kd + sym(rng) * 0.035, 0.04, 0.32);
-			s.lat = std::clamp(best_.lat + sym(rng) * 1.5, 10.5, 15.5);
+			s.lat = std::clamp(best_.lat + sym(rng) * 1.5, 7.5, 12.8);
 			s.sl = std::clamp(best_.sl + sym(rng) * 0.05, 0.02, 0.22);
 			s.target_shift = std::clamp(best_.target_shift + sym(rng) * 0.10, 0.22, 0.62);
 			s.target_curve_gain = std::clamp(best_.target_curve_gain + sym(rng) * 0.20, 1.15, 2.05);
@@ -618,17 +639,10 @@ public:
 
 	bool active = false;
 
-	static int target_window() {
-		static const int w = std::getenv("LINESIM_ENDLESS_WINDOW")
-			? std::max(10, std::atoi(std::getenv("LINESIM_ENDLESS_WINDOW"))) : 100;
-		return w;
-	}
-
-	static int recover_window() {
-		static const int rw = std::getenv("LINESIM_ENDLESS_RECOVER")
-			? std::max(5, std::atoi(std::getenv("LINESIM_ENDLESS_RECOVER"))) : 20;
-		return rw;
-	}
+	int target_window() const { return target_win_; }
+	int recover_window() const { return recover_win_; }
+	double max_fail_rate_pct() const { return max_fail_pct_; }
+	double min_speed() const { return min_v_; }
 
 	static double dv_down() {
 		static const double d = std::getenv("LINESIM_ENDLESS_DV_DOWN")
@@ -642,14 +656,19 @@ public:
 		return u;
 	}
 
-	void start(double v, const Set& from) {
+	void start(double v, const Set& from, double max_fail_pct = 10.0, int window_size = 50, double min_speed = 0.0) {
 		active = true;
 		v_ = std::max(0.50, v);
 		start_v_ = v_;
+		min_v_ = (min_speed > 0.0) ? min_speed : std::max(1.40, start_v_ - 0.20);
 		verified_v_ = 0.0;
 		best_ = from;
 		best_.pos_atten = 0.0;
+		max_fail_pct_ = max_fail_pct > 0.0 ? max_fail_pct : 10.0;
+		target_win_ = window_size > 0 ? window_size : 50;
+		recover_win_ = std::max(5, target_win_ / 5);
 		streak_ = 0;
+		consecutive_fails_ = 0;
 		total_maps_ = 0;
 		total_passes_ = 0;
 		total_fails_ = 0;
@@ -725,6 +744,27 @@ public:
 			s.pos_atten = 0.0;
 			cands.push_back({s, "Heal-AI"});
 		}
+
+		// Candidate 4: Early Braking & High Grip Safety (Crucial for high speed 2.0+ m/s)
+		{
+			Set s = best_;
+			s.brake_margin = std::clamp(best_.brake_margin + (0.025 + unif(rng) * 0.045), 0.08, 0.30);
+			s.lat = std::clamp(best_.lat - (0.5 + unif(rng) * 1.0), 10.0, 14.8);
+			s.kd = std::clamp(best_.kd + (0.008 + unif(rng) * 0.020), 0.06, 0.32);
+			s.pos_atten = 0.0;
+			cands.push_back({s, "Heal-Brake"});
+		}
+
+		// Candidate 5: Dynamic Turn-in & Apex Shift (for tight chicanes / S-curves)
+		{
+			Set s = best_;
+			s.target_shift = std::clamp(best_.target_shift + (0.03 + unif(rng) * 0.06), 0.28, 0.60);
+			s.target_curve_gain = std::clamp(best_.target_curve_gain + (0.05 + unif(rng) * 0.12), 1.30, 2.10);
+			s.kp = std::clamp(best_.kp + (0.3 + sym(rng) * 0.8), 11.0, 25.0);
+			s.kd = std::clamp(best_.kd + (0.005 + sym(rng) * 0.010), 0.06, 0.30);
+			s.pos_atten = 0.0;
+			cands.push_back({s, "Heal-Apex"});
+		}
 		return cands;
 	}
 
@@ -776,26 +816,45 @@ public:
 		char log_buf[190];
 		if (!pass) {
 			total_fails_++;
-			const double old_v = v_;
-			v_ = std::max(0.50, v_ - dv_down());
+			consecutive_fails_++;
 			streak_ = 0;
-			speed_changed_ = true;
-			just_verified_ = false;
-			just_recovered_ = false;
-			last_ = fmt("Map #%d FAIL (after 3 AI heal tries) at %.2f m/s -> speed down to %.2f m/s",
-				total_maps_, old_v, v_);
-			std::snprintf(log_buf, sizeof log_buf, "#%03d [FAIL] %.2f->%.2fm/s | %s",
-				total_maps_, old_v, v_, detail.c_str());
+			const double fr_pct = fail_rate_pct();
+			// Only lower speed if failure rate exceeds allowed threshold (e.g. 10%) or 2 consecutive fails
+			const bool should_lower = (static_cast<int>(window_.size()) >= 10 && fr_pct > max_fail_pct_) || consecutive_fails_ >= 2;
+			if (should_lower) {
+				const double old_v = v_;
+				if (old_v > min_v_ + 1e-4) {
+					v_ = std::max(min_v_, old_v - dv_down());
+					speed_changed_ = true;
+					consecutive_fails_ = 0;
+					last_ = fmt("Map #%d FAIL (Fail %.1f%% > %.0f%%) at %.2f m/s -> speed down to %.2f m/s (Floor: %.2f)",
+						total_maps_, fr_pct, max_fail_pct_, old_v, v_, min_v_);
+					std::snprintf(log_buf, sizeof log_buf, "#%03d [FAIL:SLOW] %.2f->%.2fm/s (Fail %.1f%%) | %s",
+						total_maps_, old_v, v_, fr_pct, detail.c_str());
+				} else {
+					consecutive_fails_ = 0;
+					last_ = fmt("Map #%d FAIL at min speed floor %.2f m/s (Speed locked at floor, boosting AI heal)",
+						total_maps_, min_v_);
+					std::snprintf(log_buf, sizeof log_buf, "#%03d [FLOOR:%.2f] Fail %.1f%% (Speed locked) | %s",
+						total_maps_, min_v_, fr_pct, detail.c_str());
+				}
+			} else {
+				last_ = fmt("Map #%d FAIL (Fail %.1f%% <= %.0f%%, speed maintained) at %.2f m/s",
+					total_maps_, fr_pct, max_fail_pct_, v_);
+				std::snprintf(log_buf, sizeof log_buf, "#%03d [FAIL:KEEP] %.2fm/s (Fail %.1f%%) | %s",
+					total_maps_, v_, fr_pct, detail.c_str());
+			}
 		} else {
 			total_passes_++;
 			streak_++;
+			consecutive_fails_ = 0;
 			const double ref_v = std::max(start_v_, verified_v_);
 			const bool recovering = (v_ + 1e-4 < ref_v);
-			const int step_need = recovering ? recover_window() : win_max;
+			const int step_need = recovering ? recover_win_ : win_max;
 			const double fr_pct = fail_rate_pct();
 
 			if (recovering && streak_ >= step_need) {
-				// Fast recovery back toward start_v_ / verified_v_ after 20 consecutive passes!
+				// Fast recovery back toward start_v_ / verified_v_ after recover_win_ consecutive passes!
 				const double old_v = v_;
 				v_ = std::min(ref_v, old_v + dv_up());
 				streak_ = 0;
@@ -805,28 +864,29 @@ public:
 					total_maps_, step_need, step_need, old_v, v_);
 				std::snprintf(log_buf, sizeof log_buf, "#%03d [RECOVER %d/%d] %.2f->%.2fm/s | 4:%.2fs",
 					total_maps_, step_need, step_need, old_v, v_, lap4_s);
-			} else if (!recovering && streak_ >= win_max && static_cast<int>(window_.size()) >= win_max && fr_pct < 1.0) {
-				// 100 maps passed with < 1% fail rate at or above frontier -> Verified & step UP!
+			} else if (!recovering && static_cast<int>(window_.size()) >= win_max && fr_pct <= max_fail_pct_) {
+				// Evaluated window with <= 10% fail rate -> Verified & step UP!
 				const double old_v = v_;
 				verified_v_ = std::max(verified_v_, old_v);
 				v_ = old_v + dv_up();
 				streak_ = 0;
+				window_.clear(); // reset window for next speed tier
 				speed_changed_ = true;
 				just_verified_ = true;
-				last_ = fmt("Map #%d: %d/%d PASS (Fail %.1f%% < 1%%) at %.2f m/s! -> speed up to %.2f m/s",
-					total_maps_, win_max, win_max, fr_pct, old_v, v_);
-				std::snprintf(log_buf, sizeof log_buf, "#%03d [100 PASS <1%%] %.2f->%.2fm/s | 4:%.2fs (%+.2fm)",
-					total_maps_, old_v, v_, lap4_s, dist_diff);
+				last_ = fmt("Map #%d: %d/%d PASS (Fail %.1f%% <= %.0f%%) at %.2f m/s! -> speed up to %.2f m/s",
+					total_maps_, win_max, win_max, fr_pct, max_fail_pct_, old_v, v_);
+				std::snprintf(log_buf, sizeof log_buf, "#%03d [%d PASS <=%.0f%%] %.2f->%.2fm/s | 4:%.2fs (%+.2fm)",
+					total_maps_, win_max, max_fail_pct_, old_v, v_, lap4_s, dist_diff);
 			} else if (was_healed) {
 				last_ = fmt("Map #%d HEALED [%s] (%d/%d) at %.2f m/s | kp=%.1f kd=%.0f lat=%.1f | 4th: %.2fs",
 					total_maps_, heal_role.c_str(), streak_, step_need, v_, best_.kp, best_.kd / 0.0005, best_.lat, lap4_s);
 				std::snprintf(log_buf, sizeof log_buf, "#%03d [HEALED:%s %d/%d] %.2fm/s kp%.1f/d%.0f | 4:%.2fs",
 					total_maps_, heal_role.c_str(), streak_, step_need, v_, best_.kp, best_.kd / 0.0005, lap4_s);
 			} else {
-				last_ = fmt("Map #%d PASS (%d/%d) at %.2f m/s | 4th: %.2fs (%.2fs/10m, dist %+.2fm)",
-					total_maps_, streak_, step_need, v_, lap4_s, pace, dist_diff);
-				std::snprintf(log_buf, sizeof log_buf, "#%03d [PASS %d/%d] %.2fm/s | 4:%.2fs (%+.2fm)",
-					total_maps_, streak_, step_need, v_, lap4_s, dist_diff);
+				last_ = fmt("Map #%d PASS (%d/%d, Fail %.1f%%) at %.2f m/s | 4th: %.2fs (dist %+.2fm)",
+					total_maps_, streak_, step_need, fr_pct, v_, lap4_s, dist_diff);
+				std::snprintf(log_buf, sizeof log_buf, "#%03d [PASS %d/%d (%.0f%%)] %.2fm/s | 4:%.2fs",
+					total_maps_, streak_, step_need, fr_pct, v_, lap4_s);
 			}
 		}
 		log_.push_back(log_buf);
@@ -839,17 +899,17 @@ public:
 		const double ref_v = std::max(start_v_, verified_v_);
 		const bool recovering = (v_ + 1e-4 < ref_v);
 		std::vector<std::string> v;
-		v.push_back(fmt("ENDLESS 100-MAP + AI HEAL [E]  Map #%d  (E: stop | A: 3-course)", total_maps_ + 1));
+		v.push_back(fmt("ENDLESS 50-MAP + AI HEAL [E]  Map #%d  (E: stop | A: 3-course)", total_maps_ + 1));
 		v.push_back("Mode: Drive 1 + Drive 4/Map + AI Gain Auto-Heal on Fail");
 		v.push_back("Map:  " + cur_map_info);
 		if (verified_v_ > 0.0)
-			v.push_back(fmt("Base Speed: %.2f m/s  (Start: %.2f | Verified <1%%: %.2f m/s)", v_, start_v_, verified_v_));
+			v.push_back(fmt("Base Speed: %.2f m/s  (Start: %.2f | Floor: %.2f | Verified <=%.0f%%: %.2f m/s)", v_, start_v_, min_v_, max_fail_pct_, verified_v_));
 		else
-			v.push_back(fmt("Base Speed: %.2f m/s  (Start: %.2f | Target: <1%% fail / %d maps)", v_, start_v_, target_window()));
+			v.push_back(fmt("Base Speed: %.2f m/s  (Start: %.2f | Floor: %.2f | Target: <=%.0f%% fail in %d maps)", v_, start_v_, min_v_, max_fail_pct_, target_win_));
 		v.push_back(fmt("Streak at %.2f m/s: %d / %d (%s)",
-			v_, streak_, step_need, recovering ? "Fast-Recovery to frontier" : "Verifying <1% fail"));
-		v.push_back(fmt("Window Fail Rate: %.1f%% (%dF / %zu) | Total: %dP (Healed %d) / %dF",
-			fail_rate_pct(), fails_in_window(), window_.size(), total_passes_, total_healed_, total_fails_));
+			v_, streak_, step_need, recovering ? "Fast-Recovery to frontier" : fmt("Verifying <=%.0f%% fail", max_fail_pct_).c_str()));
+		v.push_back(fmt("Window Fail Rate: %.1f%% (%dF / %zu, Limit: %.0f%%) | Total: %dP (Healed %d) / %dF",
+			fail_rate_pct(), fails_in_window(), window_.size(), max_fail_pct_, total_passes_, total_healed_, total_fails_));
 		v.push_back(fmt("Active Gains: kp=%.2f kd=%.0f lat=%.2f brk=%.2fm shf=%.2f crv=%.2f",
 			best_.kp, best_.kd / dt, best_.lat, best_.brake_margin, best_.target_shift, best_.target_curve_gain));
 		if (!heal_note.empty())
@@ -873,9 +933,14 @@ private:
 
 	double v_ = 2.04;
 	double start_v_ = 2.04;
+	double min_v_ = 1.84;
 	double verified_v_ = 0.0;
 	Set best_;
+	double max_fail_pct_ = 10.0;
+	int target_win_ = 50;
+	int recover_win_ = 10;
 	int streak_ = 0;
+	int consecutive_fails_ = 0;
 	int total_maps_ = 0;
 	int total_passes_ = 0;
 	int total_fails_ = 0;
@@ -1054,6 +1119,12 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 		std::fprintf(stderr, "track warning: %s\n", w.c_str());
 	RobotParams rp;
 	std::string robot_path = opt.robot_path;
+	if (robot_path.empty()) {
+		if (fs::exists("robots/full.json"))
+			robot_path = "robots/full.json";
+		else
+			robot_path = "robots/default.json";
+	}
 	if (!robot_path.empty() && !fs::exists(robot_path)) {
 		// robots/full.json is made locally from the CAD model and is not in the repository
 		fs::path fallback = fs::path(robot_path).parent_path() / "default.json";
@@ -1145,7 +1216,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 	session.map_name = track.name();
 	session.expected = track.expected_markers();
 	bool booted = false;
-	if (opt.view || opt.interactive || opt.session) {
+	if (opt.view || opt.interactive) {
 		viewer = std::make_unique<Viewer>();
 		std::string title = "LineSim - " + track.name() +
 			(opt.interactive ? " (interactive)" : opt.session ? " (session)" : "");
@@ -1212,7 +1283,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 		if (!opt.interactive)
 			fwb_set_button(FWB_BTN_K, press);
 
-		if (session.request_abort) {   // X in the session: the operator picks the robot up
+		if (session.request_abort || g_stop_requested) {   // X or Ctrl+C: stop current drive
 			session.request_abort = false;
 			if (current && !lifted) {
 				lifted = true;
@@ -1409,6 +1480,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 				std::printf("[%8.3f s] drive %d (%s) %s, lap %.2f s, dist %.2fm (%+4.2fm), markers %s\n", sim->t(), n, attempt_tag.c_str(),
 					cur->outcome.c_str(), cur->lap_time_fw, cur->dist_m, d_diff, cur->marker_check.c_str());
 			}
+			std::fflush(stdout);
 		}
 		if (n == 1)
 			drive1_ok = cur->is_finished() && cur->marker_check == "OK";
@@ -1533,6 +1605,11 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 			std::printf("[%8.3f s] new course %s (%.2f m)\n", sim->t(), res.track_path_used.c_str(), track.length());
 	};
 
+	g_stop_requested = 0;
+	auto prev_sig = std::signal(SIGINT, [](int) {
+		g_stop_requested = 1;
+	});
+
 	sim->start([&]() {
 		robot->place(start);
 		fwb_boot();
@@ -1570,6 +1647,10 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 			EndlessTuner endless_tuner;
 			const double dt = fw_steer_dt();
 			bool need_next_map = false;
+			if (opt.auto_tune) {
+				session.auto_tune = true;
+				session.tune_mode = opt.tune_mode ? opt.tune_mode : 1;
+			}
 
 			struct TuneCourse {
 				std::string text, label, name;
@@ -1666,39 +1747,68 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 			};
 
 			for (;;) {
+				if (g_stop_requested) {
+					session.auto_tune = false;
+					session.tune_mode = 0;
+				}
 				if (session.auto_tune && session.tune_mode == 0)
 					session.tune_mode = 2;
 
 				// Clean up BayesGainTuner [A] if stopped or switched to [E]
 				if (bayes_tuner.active && (!session.auto_tune || session.tune_mode != 1)) {
 					bayes_tuner.active = false;
-					const TuneSet& b = bayes_tuner.best();
-					const double final_v = bayes_tuner.has_best() ? bayes_tuner.best_v() : session.params.base_mps;
-					apply_tuneset(final_v, b);
+					TuneSet final_set = bayes_tuner.best();
+					double final_v = bayes_tuner.has_best() ? bayes_tuner.best_v() : session.params.base_mps;
+					double best_score = 0;
+					std::string best_desc;
+					bool has_best_cand = bayes_tuner.has_best();
+					if (!has_best_cand) {
+						has_best_cand = bayes_tuner.find_best_overall(&final_set, &final_v, &best_score, &best_desc);
+					}
+					apply_tuneset(final_v, final_set);
 					if (!tune_courses.empty() && cur_course != 0 && load_course(tune_courses[0].text, tune_courses[0].label))
 						cur_course = 0;
-					char line[260];
-					if (bayes_tuner.has_best()) {
-						std::snprintf(line, sizeof line,
-							"auto-tune [A]: best %.3f m/s, kp %.2f, kd %.0f, lat %.1f, sl %.2f, brk %.2fm, shf %.2f, 4th %.3f s/10m (%s s)",
-							bayes_tuner.best_v(), b.kp, b.kd / dt, b.lat, b.sl, b.brake_margin, b.target_shift,
-							bayes_tuner.best_pace(), bayes_tuner.best_laps().c_str());
-						std::string saved_path;
-						if (save_drive_params_to_firmware_file(session.params, &saved_path)) {
-							session.message = "auto-tune [A] ended: BEST saved to drive.c!";
-							std::printf("[AUTO-SAVED] Final best saved to %s\n", saved_path.c_str());
+					std::string saved_path;
+					save_drive_params_to_firmware_file(session.params, &saved_path);
+
+					if (!opt.quiet) {
+						std::printf("\n================================================================================\n");
+						std::printf("=== [AUTO-TUNING RESULT] BEST PARAMETERS FOUND (%zu TRIALS EVALUATED) ===\n", bayes_tuner.trial_count());
+						std::printf("================================================================================\n");
+						std::printf("  Base Speed      : %.2f m/s\n", session.params.base_mps);
+						if (bayes_tuner.has_best()) {
+							std::printf("  Lap Time (4th)  : %s s\n", bayes_tuner.best_laps().c_str());
+							std::printf("  Pace / Dist Diff: %.3f s/10m (%+.2fm)\n", bayes_tuner.best_pace(), bayes_tuner.best_dist_diff());
 						} else {
-							session.message = "kept the best found (drive 1-4 to try it)";
+							std::printf("  Best Run Status : %s (score: %.1f)\n", best_desc.c_str(), best_score);
 						}
-					} else {
-						std::snprintf(line, sizeof line, "auto-tune [A]: nothing passed yet (kept kp %.2f, kd %.4f s, lat max %.2f)",
-							b.kp, b.kd, b.lat);
-						session.message = "auto-tune [A] ended: nothing passed yet";
+						std::printf("\n  [Best Steering & Control Parameters]\n");
+						std::printf("    .base_mps         = %.2ff,\n", session.params.base_mps);
+						std::printf("    .steer_gain_p     = %.2ff,\n", session.params.steer_kp);
+						std::printf("    .steer_gain_d     = %.1ff,   (derivative kd_s = %.4fs)\n", session.params.steer_kd, final_set.kd);
+						std::printf("    .lat_acc_max      = %.2ff,   (lateral grip limit)\n", session.params.lat_acc_max);
+						std::printf("    .brake_margin_m   = %.2ff,\n", session.params.brake_margin_m);
+						std::printf("    .target_shift_val = %.2ff,\n", session.params.target_shift);
+						std::printf("    .target_curve_gain= %.2ff,\n", session.params.target_curve_gain);
+						std::printf("    .slalom_ratio     = %.2ff,\n", session.params.slalom_ratio);
+						std::printf("    .yaw_gain_p       = %.2ff,\n", session.params.yaw_kp);
+						std::printf("    .yaw_gain_i       = %.2ff,\n", session.params.yaw_ki);
+						if (!saved_path.empty()) {
+							std::printf("\n  [Permanently Saved to Drive File]\n");
+							std::printf("    -> %s\n", saved_path.c_str());
+						}
+						std::printf("================================================================================\n\n");
+						std::fflush(stdout);
 					}
+					char line[260];
+					std::snprintf(line, sizeof line, "auto-tune [A]: best %.3f m/s, kp %.2f, kd %.0f, lat %.1f, sl %.2f, brk %.2fm, shf %.2f",
+						final_v, final_set.kp, final_set.kd / dt, final_set.lat, final_set.sl, final_set.brake_margin, final_set.target_shift);
 					session.history.push_back(line);
 					if (!session.auto_tune) {
 						session.busy = false;
 						session.tune_lines.clear();
+						if (!opt.view || g_stop_requested || opt.tune_trials > 0)
+							break;
 					}
 				}
 
@@ -1709,8 +1819,8 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 					apply_tuneset(endless_tuner.speed(), b);
 					char line[260];
 					std::snprintf(line, sizeof line,
-						"endless [E] stopped: base_mps %.2f m/s (verified <1%%: %.2f m/s), kp %.2f, kd %.0f, fail rate %.1f%%",
-						endless_tuner.speed(),
+						"endless [E] stopped: base_mps %.2f m/s (verified <=%.0f%%: %.2f m/s), kp %.2f, kd %.0f, fail rate %.1f%%",
+						endless_tuner.speed(), endless_tuner.max_fail_rate_pct(),
 						endless_tuner.has_verified() ? endless_tuner.verified_v() : endless_tuner.speed(),
 						b.kp, b.kd / dt, endless_tuner.fail_rate_pct());
 					std::string saved_path;
@@ -1724,8 +1834,13 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 					if (!session.auto_tune) {
 						session.busy = false;
 						session.tune_lines.clear();
+						if (!opt.view || g_stop_requested)
+							break;
 					}
 				}
+
+				if (g_stop_requested)
+					break;
 
 				// ====================================================================
 				// MODE 1 [A]: 3-Course AI Bayesian Gain Auto-Tuner (c1, c2, c3)
@@ -1764,6 +1879,22 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 
 					int trial_drives = 0;
 					const size_t cand_no = bayes_tuner.current_candidate_no();
+					if (opt.tune_trials > 0 && cand_no > static_cast<size_t>(opt.tune_trials)) {
+						if (!opt.quiet) {
+							std::printf("\n[COMPLETED] Reached %d trials limit! Finalizing best parameters...\n", opt.tune_trials);
+							std::fflush(stdout);
+						}
+						session.auto_tune = false;
+						session.tune_mode = 0;
+						continue;
+					}
+					if (!opt.quiet) {
+						std::printf("\n[%8.3f s] --- [A] Candidate #%zu%s: v=%.2f kp=%.1f kd=%.0f (%.4fs) lat=%.1f brk=%.2fm shf=%.2f ---\n",
+							sim->t(), cand_no,
+							opt.tune_trials > 0 ? ("/" + std::to_string(opt.tune_trials)).c_str() : "",
+							bayes_tuner.speed(), ts.kp, ts.kd / dt, ts.kd, ts.lat, ts.brake_margin, ts.target_shift);
+						std::fflush(stdout);
+					}
 					auto drive = [&](int n) {
 						trial_drives++;
 						lap_tag = "#" + std::to_string(cand_no) + "-" + std::to_string(trial_drives);
@@ -1792,7 +1923,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 						lap_key = tune_courses[m].name;
 						lap_label = tag;
 						const DriveResult d1 = drive(1);
-						if (!session.auto_tune || session.tune_mode != 1) {
+						if (!session.auto_tune || session.tune_mode != 1 || g_stop_requested) {
 							stopped = true;
 							break;
 						}
@@ -1813,7 +1944,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 							break;
 						}
 						const DriveResult d4 = drive(4);
-						if (!session.auto_tune || session.tune_mode != 1) {
+						if (!session.auto_tune || session.tune_mode != 1 || g_stop_requested) {
 							stopped = true;
 							break;
 						}
@@ -1907,6 +2038,10 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 						}
 					}
 					bayes_tuner.record(lost, pass, score, pace, mean_dist_diff, laps, cur_lap_times, trial_drives, text);
+					if (!opt.quiet) {
+						std::printf("[%8.3f s] Candidate #%zu evaluated: %s (score=%.1f)\n", sim->t(), cand_no, text, score);
+						std::fflush(stdout);
+					}
 					if (bayes_tuner.round_complete()) {
 						bayes_tuner.finish_round();
 						if (bayes_tuner.just_found_best()) {
@@ -1943,7 +2078,9 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 						const std::string fresh = make_map(&label);
 						char line[300];
 						if (!fresh.empty()) {
-							const size_t replace_idx = next_replace % tune_courses.size();
+							const bool keep_first = (!opt.track_path.empty() && opt.track_path != "random") && tune_courses.size() > 1;
+							const size_t replace_idx = keep_first ? (1 + (next_replace % (tune_courses.size() - 1)))
+							                                      : (next_replace % tune_courses.size());
 							const std::string old = tune_courses[replace_idx].name;
 							if (live)
 								live->drop_course(old);
@@ -1977,7 +2114,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 					session.request_drive = 0;
 					if (!endless_tuner.active) {
 						TuneSet from = params_to_tuneset();
-						endless_tuner.start(session.params.base_mps, from);
+						endless_tuner.start(session.params.base_mps, from, opt.endless_max_fail_pct, opt.endless_window, opt.endless_min_speed);
 						need_next_map = false;
 						session.busy = true;
 						session.message.clear();
@@ -2131,12 +2268,12 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 							char save_msg[220];
 							if (verified) {
 								std::snprintf(save_msg, sizeof save_msg,
-									"[SAVED <1%% VERIFIED] 100 maps passed at %.2f m/s -> base_mps up to %.2f m/s",
-									prev_v, session.params.base_mps);
+									"[SAVED <=%.0f%% VERIFIED] %d maps evaluated at %.2f m/s (Fail %.1f%%) -> base_mps up to %.2f m/s",
+									endless_tuner.max_fail_rate_pct(), endless_tuner.target_window(), prev_v, endless_tuner.fail_rate_pct(), session.params.base_mps);
 							} else if (recovered) {
 								std::snprintf(save_msg, sizeof save_msg,
 									"[SAVED RECOVERED] %d maps passed at %.2f m/s -> base_mps recovered to %.2f m/s",
-									EndlessTuner::recover_window(), prev_v, session.params.base_mps);
+									endless_tuner.recover_window(), prev_v, session.params.base_mps);
 							} else if (healed) {
 								std::snprintf(save_msg, sizeof save_msg,
 									"[SAVED AI-HEALED] Map #%zu healed [%s] at %.2f m/s! New gains: kp=%.2f kd=%.0f lat=%.2f brk=%.2f",
@@ -2211,8 +2348,9 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 	});
 
 	const double t_limit = (opt.interactive || opt.session) ? 1e7 : 30.0 + opt.drives.size() * (opt.max_drive_time + 20.0);
-	Simulation::Stop st = sim->run(t_limit, [&]() { return live && live->stop_requested(); });
-	if (live && st != Simulation::Stop::Predicate)
+	Simulation::Stop st = sim->run(t_limit, [&]() { return (live && live->stop_requested()) || g_stop_requested; });
+	std::signal(SIGINT, prev_sig);
+	if (live && st != Simulation::Stop::Predicate && !g_stop_requested)
 		live->hold_until_closed();
 	res.sim_seconds = sim->t();
 	res.wall_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - wall0).count();
