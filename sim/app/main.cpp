@@ -205,6 +205,8 @@ int main(int argc_in, char** argv_in) {
 			opt.tune_trials = std::atoi(next().c_str());
 		} else if (a == "--fail-rate" || a == "--max-fail-rate") {
 			opt.endless_max_fail_pct = std::atof(next().c_str());
+		} else if (a == "--pass-rate" || a == "--success-rate") {
+			opt.endless_max_fail_pct = std::max(1.0, 100.0 - std::atof(next().c_str()));
 		} else if (a == "--window") {
 			opt.endless_window = std::atoi(next().c_str());
 		} else if (a == "--min-speed" || a == "--speed-floor") {

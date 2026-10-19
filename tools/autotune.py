@@ -66,7 +66,7 @@ def update_drive_c(base_mps, kp, kd_fw, lat_acc=None):
         with open(path, "r", encoding="utf-8") as fh:
             text = fh.read()
         text = re.sub(r"(\.base_mps\s*=\s*)[0-9.]+f?", rf"\g<1>{base_mps:.2f}f", text)
-        text = re.sub(r"(\.steer_gain_p\s*=\s*)[0-9.]+f?", rf"\g<1>{kp:.2f}f", text)
+        text = re.sub(r"(\.steer_gain_p\s*=\s*)[0-9.]+f?", rf"\g<1>{kp:.3f}f", text)
         text = re.sub(r"(\.steer_gain_d\s*=\s*)[0-9.]+f?", rf"\g<1>{kd_fw:.0f}.f", text)
         if lat_acc is not None and lat_acc > 0:
             text = re.sub(r"(\.lat_acc_max\s*=\s*)[0-9.]+f?", rf"\g<1>{lat_acc:.2f}f", text)
@@ -354,7 +354,7 @@ def save(t, text, drives="1,4"):
 def refine_axes(center, steps):
     """3 x 3 x 3 grid around center (kp, kd, lat): center +- step on each axis (step 0: that axis fixed)."""
     out = []
-    for c, s, lo, q in zip(center, steps, (1.0, 0.0, 0.0), (0.05, 0.0025, 0.05)):
+    for c, s, lo, q in zip(center, steps, (1.0, 0.0, 0.0), (0.001, 0.0025, 0.05)):
         if s <= 0:
             out.append([c])
             continue
@@ -536,7 +536,7 @@ def run_endless(initial_speed, user_tracks, robot, axes, extra, jobs, reuse, ref
                     with open(os.path.join(out_dir, "best.json"), "w", encoding="utf-8") as fh:
                         json.dump({
                             "speed": current_speed,
-                            "steer_kp": pick[0],
+                            "steer_kp": round(pick[0], 3),
                             "steer_kd_s": pick[1],
                             "steer_gain_d": rs[0]["kd_fw"],
                             "lat_acc_max": pick[2],

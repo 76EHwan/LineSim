@@ -34,7 +34,7 @@ const ParamRow kRows[] = {
 	{"max speed", &FwDriveParams::max_mps, 0.01f, 0.5f, 12.0f, "%.3f m/s"},
 	{"accel", &FwDriveParams::accel, 0.5f, 0.5f, 30.0f, "%.1f m/s2"},
 	{"decel", &FwDriveParams::decel, 0.5f, 0.5f, 30.0f, "%.1f m/s2"},
-	{"steer kp", &FwDriveParams::steer_kp, 0.2f, 0.0f, 200.0f, "%.2f"},
+	{"steer kp", &FwDriveParams::steer_kp, 0.001f, 0.0f, 200.0f, "%.3f"},
 	{"steer kd", &FwDriveParams::steer_kd, 0.01f, 0.0f, 2.0f, "%.3f s", true},
 	{"pos atten gain", &FwDriveParams::pos_atten_gain, 0.05f, 0.0f, 2.0f, "%.2f"},
 	{"target shift", &FwDriveParams::target_shift, 0.05f, 0.0f, 1.0f, "%.2f"},
@@ -215,7 +215,7 @@ void LiveView::session_key(int k) {
 		fwb_set_drive_params(&s.params);
 		if (save_drive_params_to_firmware_file(s.params, &out_path)) {
 			char msg[160];
-			std::snprintf(msg, sizeof msg, "[SAVED to drive.c] v=%.2f kp=%.1f kd=%.0f shf=%.2f",
+			std::snprintf(msg, sizeof msg, "[SAVED to drive.c] v=%.2f kp=%.3f kd=%.0f shf=%.2f",
 				s.params.base_mps, s.params.steer_kp, s.params.steer_kd, s.params.target_shift);
 			s.message = msg;
 			std::printf("[SAVE] Current parameters saved to %s\n", out_path.c_str());

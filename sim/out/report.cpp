@@ -438,17 +438,21 @@ void write_reports(const ScenarioOptions& opt, const ScenarioResult& res, const 
 }
 
 void print_summary(const ScenarioResult& res) {
-	std::printf("\n drive | outcome              | lap [s] | dist [m] | max v | max lat [mm] | rms lat [mm] | max beta [deg] | marker check | markers\n");
-	std::printf(" ------+----------------------+---------+----------+-------+--------------+--------------+----------------+--------------+--------\n");
+	std::printf("\n \033[1;96mdrive\033[0m | \033[1;96moutcome             \033[0m | \033[1;96mlap [s]\033[0m | \033[1;96mdist [m]\033[0m | \033[1;96mmax v\033[0m | \033[1;96mmax lat [mm]\033[0m | \033[1;96mrms lat [mm]\033[0m | \033[1;96mmax beta [deg]\033[0m | \033[1;96mmarker check\033[0m | \033[1;96mmarkers\033[0m\n");
+	std::printf(" \033[90m------+----------------------+---------+----------+-------+--------------+--------------+----------------+--------------+--------\033[0m\n");
 	for (const DriveResult& d : res.drives) {
 		std::string mk;
 		for (const FwMarker& m : d.markers) {
 			mk += marker_name(m.type);
 			mk += ' ';
 		}
-		std::printf("   %d   | %-20s | %7.2f | %8.2f | %5.2f | %12.1f | %12.1f | %14.1f | %-12s | %s\n", d.n, d.outcome.c_str(), d.lap_time_fw,
-			d.dist_m, d.max_v, d.max_lat_mm, d.rms_lat_mm, d.max_beta_deg, d.marker_check.c_str(), mk.c_str());
+		const char* out_c = !d.is_finished() ? "\033[1;91m" : (d.outcome.find("oversteer") != std::string::npos ? "\033[1;93m" : "\033[1;92m");
+		const char* beta_c = d.max_beta_deg >= 90.0 ? "\033[1;91m" : (d.max_beta_deg >= 25.0 ? "\033[93m" : "\033[92m");
+		const char* mk_c = d.marker_check == "OK" ? "\033[92m" : "\033[91m";
+		std::printf("   \033[94m%d\033[0m   | %s%-20s\033[0m | \033[1;96m%7.2f\033[0m | %8.2f | \033[93m%5.2f\033[0m | %12.1f | %12.1f | %s%14.1f\033[0m | %s%-12s\033[0m | \033[90m%s\033[0m\n",
+			d.n, out_c, d.outcome.c_str(), d.lap_time_fw,
+			d.dist_m, d.max_v, d.max_lat_mm, d.rms_lat_mm, beta_c, d.max_beta_deg, mk_c, d.marker_check.c_str(), mk.c_str());
 	}
-	std::printf("\n simulated %.1f s in %.1f s wall clock (%.1fx real time)\n", res.sim_seconds, res.wall_seconds,
+	std::printf("\n \033[90msimulated %.1f s in %.1f s wall clock (\033[96m%.1fx\033[90m real time)\033[0m\n", res.sim_seconds, res.wall_seconds,
 		res.wall_seconds > 0 ? res.sim_seconds / res.wall_seconds : 0.0);
 }

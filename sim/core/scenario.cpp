@@ -637,6 +637,15 @@ public:
 		std::string role;
 	};
 
+	struct FailMetrics {
+		bool d1_failed = false;
+		bool was_oversteer = false;
+		double max_beta_deg = 0.0;   // Peak slip angle (deg)
+		double max_lat_mm = 0.0;     // Peak lateral track deviation (mm)
+		double weave_dps = 0.0;      // Yaw rate oscillation energy (deg/s)
+		double fail_v = 0.0;         // Robot speed right before failure / peak error (m/s)
+	};
+
 	bool active = false;
 
 	int target_window() const { return target_win_; }
@@ -664,6 +673,12 @@ public:
 		verified_v_ = 0.0;
 		best_ = from;
 		best_.pos_atten = 0.0;
+		// Clamp initial gains to healthy non-saturated bounds before storing anchor_
+		best_.kp = std::clamp(std::round(best_.kp * 1000.0) / 1000.0, 11.5, 24.0);
+		best_.kd = std::clamp(best_.kd, 0.07, 0.24);   // 140 .. 480 in steer_kd
+		best_.lat = std::clamp(best_.lat, 11.0, 15.0);
+		best_.brake_margin = std::clamp(best_.brake_margin, 0.06, 0.24);
+		anchor_ = best_;
 		max_fail_pct_ = max_fail_pct > 0.0 ? max_fail_pct : 10.0;
 		target_win_ = window_size > 0 ? window_size : 50;
 		recover_win_ = std::max(5, target_win_ / 5);
@@ -689,87 +704,156 @@ public:
 	double verified_v() const { return verified_v_; }
 	const Set& best() const { return best_; }
 
-	// Generate 3 targeted AI Gain Auto-Heal candidates around best_ for a failed map
-	std::vector<HealCandidate> make_heal_candidates(bool d1_failed, bool was_oversteer) const {
+	// Generate 5 targeted AI Gain Auto-Heal candidates using proportional failure telemetry & anti-ratchet centering
+	std::vector<HealCandidate> make_heal_candidates(const FailMetrics& fm) const {
 		std::mt19937 rng(9001 + static_cast<unsigned>(total_maps_) * 97 + static_cast<unsigned>(total_healed_) * 31);
 		std::normal_distribution<double> norm(0.0, 1.0);
-		std::uniform_real_distribution<double> unif(0.0, 1.0);
 		std::uniform_real_distribution<double> sym(-1.0, 1.0);
+
+		// 1. Anti-Ratchet Centering: pull 15% toward anchor_ and desaturate if kd/kp/lat drifted near limits
+		Set base = best_;
+		base.kp = std::round((0.85 * best_.kp + 0.15 * anchor_.kp) * 1000.0) / 1000.0;
+		base.kd = 0.85 * best_.kd + 0.15 * anchor_.kd;
+		base.lat = 0.85 * best_.lat + 0.15 * anchor_.lat;
+		base.brake_margin = 0.85 * best_.brake_margin + 0.15 * anchor_.brake_margin;
+		base.target_shift = 0.85 * best_.target_shift + 0.15 * anchor_.target_shift;
+		base.target_curve_gain = 0.85 * best_.target_curve_gain + 0.15 * anchor_.target_curve_gain;
+
+		// Detect if D-gain is already saturated high (> 390, i.e., kd_s > 0.195s), which causes D-kick chatter
+		const bool kd_oversaturated = (best_.kd > 0.195);
+		if (kd_oversaturated)
+			base.kd = std::clamp(0.65 * best_.kd + 0.35 * std::min(anchor_.kd, 0.165), 0.12, 0.21);
+		if (best_.kp < 12.2)
+			base.kp = std::round(std::max(12.8, 0.65 * best_.kp + 0.35 * std::max(anchor_.kp, 14.2)) * 1000.0) / 1000.0;
+
+		// 2. Normalized Failure Severity Factors (0.0 .. 1.5) from actual telemetry
+		// - slip_sev: how much beta exceeded the 22 deg drift onset (e.g., 35 deg -> 0.34, 60 deg -> 1.0, 90 deg -> 1.5)
+		const double slip_sev = std::clamp((fm.max_beta_deg - 22.0) / 38.0, 0.0, 1.5);
+		// - under_sev: line loss with low beta (< 26 deg) or large lateral excursion -> insufficient turn-in!
+		const double under_sev = fm.was_oversteer ? 0.0
+			: std::clamp((26.0 - fm.max_beta_deg) / 16.0 + (fm.max_lat_mm - 75.0) / 75.0, 0.25, 1.5);
+		// - osc_sev: high yaw-rate oscillation energy (weave_dps > 165 deg/s)
+		const double osc_sev = std::clamp((fm.weave_dps - 165.0) / 135.0, 0.0, 1.5);
+		// - speed_sev: how much faster than base_mps the robot was moving right before failing (4th drive braking entry)
+		const double speed_sev = fm.d1_failed ? 0.0 : std::clamp((fm.fail_v - v_) / 0.75, 0.0, 1.5);
+
+		// Ideal damping ratio target: steer_kd ~= 22 * steer_kp  =>  kd_s ~= 0.011 * kp
+		const auto ideal_kd = [](double kp) { return std::clamp(kp * 0.0112, 0.11, 0.22); };
 
 		std::vector<HealCandidate> cands;
 
-		// Candidate 1: Anti-Oversteer / Damping boost + safer corner entry (brake_margin UP, lat slightly DOWN)
+		// Candidate 1 [Heal-PropPD]: Error-proportional P/D correction based on slip, understeer, and weave
 		{
-			Set s = best_;
-			s.kp = std::clamp(best_.kp - (0.6 + unif(rng) * 1.4), 10.0, 26.0);
-			s.kd = std::clamp(best_.kd + (0.006 + unif(rng) * 0.018), 0.05, 0.30);
-			if (!d1_failed) {
-				s.lat = std::clamp(best_.lat - (0.4 + unif(rng) * 0.9), 10.5, 15.2);
-				s.brake_margin = std::clamp(best_.brake_margin + (0.015 + unif(rng) * 0.035), 0.06, 0.26);
-				s.sl = std::clamp(best_.sl - unif(rng) * 0.02, 0.02, 0.22);
-			}
-			s.pos_atten = 0.0;
-			cands.push_back({s, "Heal-Damp"});
-		}
-
-		// Candidate 2: Tighter corner tracking / In-course apex shift (kp slightly UP + kd UP + target_shift/curve)
-		{
-			Set s = best_;
-			if (was_oversteer) {
-				s.kp = std::clamp(best_.kp - (0.3 + unif(rng) * 0.8), 10.0, 26.0);
-				s.kd = std::clamp(best_.kd + (0.010 + unif(rng) * 0.022), 0.05, 0.32);
-				s.yaw_kp = std::clamp(best_.yaw_kp + 0.02 + unif(rng) * 0.04, 0.15, 0.65);
+			Set s = base;
+			if (fm.was_oversteer) {
+				// Proportional kp reduction based on slip & oscillation severity
+				const double dkp = -(0.35 * slip_sev + 0.45 * osc_sev);
+				s.kp = std::clamp(std::round((base.kp + dkp) * 1000.0) / 1000.0, 11.5, 24.0);
+				// If kd was already oversaturated, high weave is caused by D-noise kick -> lower kd!
+				// Otherwise, increase kd proportionally to slip/oscillation toward healthy ceiling (<= 0.23s = 460)
+				if (kd_oversaturated) {
+					s.kd = std::clamp(best_.kd - (0.012 + 0.018 * osc_sev), 0.12, 0.21);
+				} else {
+					const double dkd = 0.007 * slip_sev + 0.010 * osc_sev;
+					s.kd = std::clamp(base.kd + dkd, 0.08, 0.23);
+				}
+				s.yaw_kp = std::clamp(base.yaw_kp + 0.03 * slip_sev, 0.15, 0.60);
 			} else {
-				s.kp = std::clamp(best_.kp + (0.5 + unif(rng) * 1.3), 10.0, 26.0);
-				s.kd = std::clamp(best_.kd + (0.005 + unif(rng) * 0.015), 0.05, 0.30);
+				// Understeer / line loss: increase kp proportionally to understeer severity!
+				const double dkp = 0.65 * under_sev - 0.25 * osc_sev;
+				s.kp = std::clamp(std::round((base.kp + dkp) * 1000.0) / 1000.0, 12.0, 24.0);
+				// Pull kd toward the ideal damping ratio for the new kp instead of blindly adding +kd
+				s.kd = std::clamp(0.65 * base.kd + 0.35 * ideal_kd(s.kp) + 0.005 * osc_sev, 0.08, 0.22);
 			}
-			if (!d1_failed) {
-				s.target_shift = std::clamp(best_.target_shift + sym(rng) * 0.04, 0.24, 0.58);
-				s.target_curve_gain = std::clamp(best_.target_curve_gain + sym(rng) * 0.08, 1.20, 2.00);
-				s.brake_margin = std::clamp(best_.brake_margin + unif(rng) * 0.025, 0.06, 0.26);
+			if (!fm.d1_failed) {
+				s.lat = std::clamp(base.lat - (0.25 * slip_sev + 0.35 * speed_sev), 11.2, 15.0);
+				s.brake_margin = std::clamp(base.brake_margin + (0.012 * slip_sev + 0.022 * speed_sev), 0.06, 0.24);
 			}
 			s.pos_atten = 0.0;
-			cands.push_back({s, "Heal-Track"});
+			cands.push_back({s, "Heal-PropPD"});
 		}
 
-		// Candidate 3: Balanced Trust-Region Exploit around best_
+		// Candidate 2 [Heal-Entry]: Speed-excess (fail_v) proportional braking & cornering grip adjustment
 		{
-			Set s = best_;
-			s.kp = std::clamp(best_.kp + norm(rng) * 1.1, 10.0, 26.0);
-			s.kd = std::clamp(best_.kd + norm(rng) * 0.012, 0.05, 0.30);
-			s.lat = std::clamp(best_.lat + norm(rng) * 0.45, 10.5, 15.2);
-			s.brake_margin = std::clamp(best_.brake_margin + std::fabs(norm(rng)) * 0.02, 0.06, 0.26);
-			s.target_shift = std::clamp(best_.target_shift + norm(rng) * 0.03, 0.24, 0.58);
-			s.target_curve_gain = std::clamp(best_.target_curve_gain + norm(rng) * 0.06, 1.20, 2.00);
+			Set s = base;
+			const double entry_sev = std::max({speed_sev, slip_sev, 0.35 * under_sev});
+			// Keep kp/kd well-balanced near ideal damping ratio while fixing corner entry speed
+			s.kp = std::clamp(std::round((base.kp + (fm.was_oversteer ? -0.25 * slip_sev : +0.40 * under_sev)) * 1000.0) / 1000.0, 11.8, 23.5);
+			s.kd = std::clamp(0.60 * base.kd + 0.40 * ideal_kd(s.kp), 0.10, 0.22);
+			if (!fm.d1_failed) {
+				s.brake_margin = std::clamp(base.brake_margin + (0.015 + 0.030 * entry_sev), 0.07, 0.24);
+				s.lat = std::clamp(base.lat - (0.30 + 0.55 * entry_sev), 11.0, 14.8);
+				s.sl = std::clamp(base.sl - 0.015 * slip_sev, 0.03, 0.20);
+			} else {
+				s.kd = std::clamp(s.kd + 0.008 * (osc_sev - 0.5), 0.09, 0.22);
+			}
 			s.pos_atten = 0.0;
-			cands.push_back({s, "Heal-AI"});
+			cands.push_back({s, "Heal-Entry"});
 		}
 
-		// Candidate 4: Early Braking & High Grip Safety (Crucial for high speed 2.0+ m/s)
+		// Candidate 3 [Heal-DeSat]: Anti-saturation / D-kick relief & Anchor restoration
+		// Specifically tests lowering excessive kd and restoring brisk kp/lat response
 		{
 			Set s = best_;
-			s.brake_margin = std::clamp(best_.brake_margin + (0.025 + unif(rng) * 0.045), 0.08, 0.30);
-			s.lat = std::clamp(best_.lat - (0.5 + unif(rng) * 1.0), 10.0, 14.8);
-			s.kd = std::clamp(best_.kd + (0.008 + unif(rng) * 0.020), 0.06, 0.32);
+			s.kp = std::clamp(std::round((0.55 * best_.kp + 0.45 * std::max(anchor_.kp, 14.5) + 0.35 * under_sev) * 1000.0) / 1000.0, 12.2, 23.5);
+			// Explicitly reduce kd toward nominal (280..350) to eliminate high-D derivative kick!
+			const double nominal_kd = std::clamp(anchor_.kd, 0.135, 0.175);
+			s.kd = std::clamp(0.50 * best_.kd + 0.50 * nominal_kd - 0.008 * (kd_oversaturated ? 1.0 : 0.0), 0.10, 0.20);
+			if (!fm.d1_failed) {
+				s.lat = std::clamp(0.60 * best_.lat + 0.40 * anchor_.lat - 0.20 * slip_sev, 11.4, 14.8);
+				s.brake_margin = std::clamp(0.60 * best_.brake_margin + 0.40 * anchor_.brake_margin + 0.015 * speed_sev, 0.07, 0.22);
+			}
 			s.pos_atten = 0.0;
-			cands.push_back({s, "Heal-Brake"});
+			cands.push_back({s, "Heal-DeSat"});
 		}
 
-		// Candidate 5: Dynamic Turn-in & Apex Shift (for tight chicanes / S-curves)
+		// Candidate 4 [Heal-Apex]: Proportional Turn-in & In-course Apex Shift for tight S-curves / hairpins
 		{
-			Set s = best_;
-			s.target_shift = std::clamp(best_.target_shift + (0.03 + unif(rng) * 0.06), 0.28, 0.60);
-			s.target_curve_gain = std::clamp(best_.target_curve_gain + (0.05 + unif(rng) * 0.12), 1.30, 2.10);
-			s.kp = std::clamp(best_.kp + (0.3 + sym(rng) * 0.8), 11.0, 25.0);
-			s.kd = std::clamp(best_.kd + (0.005 + sym(rng) * 0.010), 0.06, 0.30);
+			Set s = base;
+			const double turn_need = fm.was_oversteer ? -0.30 * slip_sev : +0.55 * under_sev;
+			s.kp = std::clamp(std::round((base.kp + turn_need + sym(rng) * 0.35) * 1000.0) / 1000.0, 11.8, 24.0);
+			s.kd = std::clamp(0.70 * base.kd + 0.30 * ideal_kd(s.kp) + sym(rng) * 0.006, 0.09, 0.22);
+			if (!fm.d1_failed) {
+				const double shift_dir = fm.was_oversteer ? (-0.02 * slip_sev) : (+0.035 * under_sev);
+				s.target_shift = std::clamp(base.target_shift + shift_dir + sym(rng) * 0.025, 0.26, 0.56);
+				s.target_curve_gain = std::clamp(base.target_curve_gain + 0.05 * (under_sev - 0.5 * slip_sev) + sym(rng) * 0.05, 1.25, 2.00);
+				s.brake_margin = std::clamp(base.brake_margin + 0.015 * speed_sev, 0.06, 0.23);
+			}
 			s.pos_atten = 0.0;
 			cands.push_back({s, "Heal-Apex"});
+		}
+
+		// Candidate 5 [Heal-Trust]: Zero-mean Gaussian exploration around anchor-regularized base
+		{
+			Set s = base;
+			const double scale = std::clamp(0.5 + 0.35 * std::max({slip_sev, under_sev, osc_sev}), 0.5, 1.2);
+			s.kp = std::clamp(std::round((base.kp + norm(rng) * (0.85 * scale)) * 1000.0) / 1000.0, 11.5, 24.0);
+			s.kd = std::clamp(base.kd + norm(rng) * (0.009 * scale), 0.09, 0.23);
+			if (!fm.d1_failed) {
+				s.lat = std::clamp(base.lat + norm(rng) * (0.35 * scale), 11.2, 15.0);
+				s.brake_margin = std::clamp(base.brake_margin + norm(rng) * (0.015 * scale), 0.06, 0.24);
+				s.target_shift = std::clamp(base.target_shift + norm(rng) * 0.025, 0.26, 0.56);
+				s.target_curve_gain = std::clamp(base.target_curve_gain + norm(rng) * 0.05, 1.25, 2.00);
+			}
+			s.pos_atten = 0.0;
+			cands.push_back({s, "Heal-Trust"});
 		}
 		return cands;
 	}
 
 	void adopt_healed_gains(const Set& healed) {
-		best_ = healed;
+		// Soft-blend healed gains (15% healed + 85% previous best_) to prevent a single outlier map
+		// from ratcheting gains to extreme boundaries, ensuring generalized robust convergence.
+		constexpr double a = 0.15;
+		best_.kp = std::clamp(std::round((a * healed.kp + (1.0 - a) * best_.kp) * 1000.0) / 1000.0, 11.5, 24.0);
+		best_.kd = std::clamp(a * healed.kd + (1.0 - a) * best_.kd, 0.08, 0.23);   // max 460 in steer_kd (never 600!)
+		best_.lat = std::clamp(a * healed.lat + (1.0 - a) * best_.lat, 11.0, 15.0);
+		best_.brake_margin = std::clamp(a * healed.brake_margin + (1.0 - a) * best_.brake_margin, 0.06, 0.24);
+		best_.target_shift = std::clamp(a * healed.target_shift + (1.0 - a) * best_.target_shift, 0.24, 0.58);
+		best_.target_curve_gain = std::clamp(a * healed.target_curve_gain + (1.0 - a) * best_.target_curve_gain, 1.20, 2.05);
+		best_.sl = std::clamp(a * healed.sl + (1.0 - a) * best_.sl, 0.02, 0.22);
+		best_.yaw_kp = std::clamp(a * healed.yaw_kp + (1.0 - a) * best_.yaw_kp, 0.15, 0.65);
+		best_.yaw_ki = std::clamp(a * healed.yaw_ki + (1.0 - a) * best_.yaw_ki, 0.0, 0.20);
 		best_.pos_atten = 0.0;
 		total_healed_++;
 		just_healed_ = true;
@@ -787,17 +871,47 @@ public:
 		return res;
 	}
 
+	int passes_in_window() const {
+		int p = 0;
+		for (int st : window_)
+			if (st == 2) p++;
+		return p;
+	}
+
+	int heals_in_window() const {
+		int h = 0;
+		for (int st : window_)
+			if (st == 1) h++;
+		return h;
+	}
+
 	int fails_in_window() const {
 		int f = 0;
-		for (bool ok : window_)
-			if (!ok) f++;
+		for (int st : window_)
+			if (st == 0) f++;
 		return f;
+	}
+
+	double pass_rate_pct() const {
+		if (window_.empty())
+			return 0.0;
+		return 100.0 * static_cast<double>(passes_in_window()) / static_cast<double>(window_.size());
+	}
+
+	double heal_rate_pct() const {
+		if (window_.empty())
+			return 0.0;
+		return 100.0 * static_cast<double>(heals_in_window()) / static_cast<double>(window_.size());
 	}
 
 	double fail_rate_pct() const {
 		if (window_.empty())
 			return 0.0;
 		return 100.0 * static_cast<double>(fails_in_window()) / static_cast<double>(window_.size());
+	}
+
+	double min_pass_rate_pct() const {
+		return std::clamp(100.0 - max_fail_pct_, 50.0, 99.0);
 	}
 
 	int current_step_up_target() const {
@@ -809,85 +923,124 @@ public:
 		double pace, double lap4_s, double dist_diff, const std::string& detail) {
 		const int win_max = target_window();
 		total_maps_++;
-		window_.push_back(pass);
-		if (static_cast<int>(window_.size()) > win_max)
-			window_.erase(window_.begin());
+		// 3-state window: 0 = FAIL, 1 = HEALED (neither pure pass nor fail), 2 = PURE PASS (1st try success)
+		const int outcome_state = !pass ? 0 : (was_healed ? 1 : 2);
+		window_.push_back(outcome_state);
 
-		char log_buf[190];
+		const size_t cur_win_cnt = window_.size();
+		const double sr_pct = pass_rate_pct();
+		const double fr_pct = fail_rate_pct();
+		const double need_sr_pct = min_pass_rate_pct();
+		const double ref_v = std::max(start_v_, verified_v_);
+		const bool recovering = (v_ + 1e-4 < ref_v);
+		const int step_need = recovering ? recover_win_ : win_max;
+
 		if (!pass) {
 			total_fails_++;
 			consecutive_fails_++;
 			streak_ = 0;
-			const double fr_pct = fail_rate_pct();
-			// Only lower speed if failure rate exceeds allowed threshold (e.g. 10%) or 2 consecutive fails
-			const bool should_lower = (static_cast<int>(window_.size()) >= 10 && fr_pct > max_fail_pct_) || consecutive_fails_ >= 2;
-			if (should_lower) {
+		} else {
+			if (!was_healed) {
+				total_passes_++;
+				streak_++;
+			}
+			consecutive_fails_ = 0;
+		}
+
+		char log_buf[200];
+
+		// 1. Check if full 50-map window (win_max) has been reached -> evaluate & ALWAYS reset window!
+		if (!recovering && static_cast<int>(cur_win_cnt) >= win_max) {
+			const int p_cnt = passes_in_window();
+			const int h_cnt = heals_in_window();
+			const int f_cnt = fails_in_window();
+			window_.clear();   // Always reset 50-map window back to 0/50!
+			streak_ = 0;
+			consecutive_fails_ = 0;
+
+			if (sr_pct >= need_sr_pct) {
+				// Success Rate >= target (e.g. >= 80% pure Pass) -> Verified & step UP speed!
+				const double old_v = v_;
+				verified_v_ = std::max(verified_v_, old_v);
+				v_ = old_v + dv_up();
+				speed_changed_ = true;
+				just_verified_ = true;
+				last_ = fmt("Map #%d: %d/%d Window Done (Pass %.1f%% >= %.0f%% [%dP/%dH/%dF]) -> speed UP %.2f -> %.2f m/s!",
+					total_maps_, win_max, win_max, sr_pct, need_sr_pct, p_cnt, h_cnt, f_cnt, old_v, v_);
+				std::snprintf(log_buf, sizeof log_buf, "#%03d [WIN %d: P%.0f%%>=%.0f%%] %.2f->%.2fm/s",
+					total_maps_, win_max, sr_pct, need_sr_pct, old_v, v_);
+			} else if (fr_pct > max_fail_pct_) {
+				// Fail Rate > allowed -> step DOWN speed!
 				const double old_v = v_;
 				if (old_v > min_v_ + 1e-4) {
 					v_ = std::max(min_v_, old_v - dv_down());
 					speed_changed_ = true;
-					consecutive_fails_ = 0;
-					last_ = fmt("Map #%d FAIL (Fail %.1f%% > %.0f%%) at %.2f m/s -> speed down to %.2f m/s (Floor: %.2f)",
-						total_maps_, fr_pct, max_fail_pct_, old_v, v_, min_v_);
-					std::snprintf(log_buf, sizeof log_buf, "#%03d [FAIL:SLOW] %.2f->%.2fm/s (Fail %.1f%%) | %s",
-						total_maps_, old_v, v_, fr_pct, detail.c_str());
+					last_ = fmt("Map #%d: %d/%d Window Done (Pass %.1f%% < %.0f%%, Fail %.1f%%) -> speed DOWN %.2f -> %.2f m/s",
+						total_maps_, win_max, win_max, sr_pct, need_sr_pct, fr_pct, old_v, v_);
+					std::snprintf(log_buf, sizeof log_buf, "#%03d [WIN %d: F%.0f%%>%.0f%%] %.2f->%.2fm/s",
+						total_maps_, win_max, fr_pct, max_fail_pct_, old_v, v_);
 				} else {
-					consecutive_fails_ = 0;
-					last_ = fmt("Map #%d FAIL at min speed floor %.2f m/s (Speed locked at floor, boosting AI heal)",
-						total_maps_, min_v_);
-					std::snprintf(log_buf, sizeof log_buf, "#%03d [FLOOR:%.2f] Fail %.1f%% (Speed locked) | %s",
-						total_maps_, min_v_, fr_pct, detail.c_str());
+					last_ = fmt("Map #%d: %d/%d Window Done at floor %.2f m/s (Pass %.1f%%) -> window reset",
+						total_maps_, win_max, win_max, min_v_, sr_pct);
+					std::snprintf(log_buf, sizeof log_buf, "#%03d [WIN %d RESET] %.2fm/s (P:%.0f%%)",
+						total_maps_, win_max, min_v_, sr_pct);
 				}
 			} else {
-				last_ = fmt("Map #%d FAIL (Fail %.1f%% <= %.0f%%, speed maintained) at %.2f m/s",
-					total_maps_, fr_pct, max_fail_pct_, v_);
-				std::snprintf(log_buf, sizeof log_buf, "#%03d [FAIL:KEEP] %.2fm/s (Fail %.1f%%) | %s",
-					total_maps_, v_, fr_pct, detail.c_str());
+				// Pass Rate < target due to Healed maps, but Fail Rate <= max_fail_pct_ -> keep speed & reset window!
+				last_ = fmt("Map #%d: %d/%d Window Done (Pass %.1f%% < %.0f%% [%dP/%dH/%dF]) -> speed kept at %.2f m/s, window reset!",
+					total_maps_, win_max, win_max, sr_pct, need_sr_pct, p_cnt, h_cnt, f_cnt, v_);
+				std::snprintf(log_buf, sizeof log_buf, "#%03d [WIN %d KEEP] %.2fm/s (P:%.0f%% H:%d F:%d) Reset",
+					total_maps_, win_max, v_, sr_pct, h_cnt, f_cnt);
 			}
-		} else {
-			total_passes_++;
-			streak_++;
-			consecutive_fails_ = 0;
-			const double ref_v = std::max(start_v_, verified_v_);
-			const bool recovering = (v_ + 1e-4 < ref_v);
-			const int step_need = recovering ? recover_win_ : win_max;
-			const double fr_pct = fail_rate_pct();
-
-			if (recovering && streak_ >= step_need) {
-				// Fast recovery back toward start_v_ / verified_v_ after recover_win_ consecutive passes!
+		} else if (!pass) {
+			// 2. Mid-window Failure check: lower speed early only if >= 10 maps & Fail Rate > max_fail_pct_, or 2 consecutive fails
+			const bool should_lower = (static_cast<int>(cur_win_cnt) >= 10 && fr_pct > max_fail_pct_) || consecutive_fails_ >= 2;
+			if (should_lower) {
 				const double old_v = v_;
-				v_ = std::min(ref_v, old_v + dv_up());
+				window_.clear();   // Reset window for the new lower speed tier!
 				streak_ = 0;
-				speed_changed_ = true;
-				just_recovered_ = true;
-				last_ = fmt("Map #%d: %d/%d RECOVER PASS at %.2f m/s -> speed recovered to %.2f m/s!",
-					total_maps_, step_need, step_need, old_v, v_);
-				std::snprintf(log_buf, sizeof log_buf, "#%03d [RECOVER %d/%d] %.2f->%.2fm/s | 4:%.2fs",
-					total_maps_, step_need, step_need, old_v, v_, lap4_s);
-			} else if (!recovering && static_cast<int>(window_.size()) >= win_max && fr_pct <= max_fail_pct_) {
-				// Evaluated window with <= 10% fail rate -> Verified & step UP!
-				const double old_v = v_;
-				verified_v_ = std::max(verified_v_, old_v);
-				v_ = old_v + dv_up();
-				streak_ = 0;
-				window_.clear(); // reset window for next speed tier
-				speed_changed_ = true;
-				just_verified_ = true;
-				last_ = fmt("Map #%d: %d/%d PASS (Fail %.1f%% <= %.0f%%) at %.2f m/s! -> speed up to %.2f m/s",
-					total_maps_, win_max, win_max, fr_pct, max_fail_pct_, old_v, v_);
-				std::snprintf(log_buf, sizeof log_buf, "#%03d [%d PASS <=%.0f%%] %.2f->%.2fm/s | 4:%.2fs (%+.2fm)",
-					total_maps_, win_max, max_fail_pct_, old_v, v_, lap4_s, dist_diff);
-			} else if (was_healed) {
-				last_ = fmt("Map #%d HEALED [%s] (%d/%d) at %.2f m/s | kp=%.1f kd=%.0f lat=%.1f | 4th: %.2fs",
-					total_maps_, heal_role.c_str(), streak_, step_need, v_, best_.kp, best_.kd / 0.0005, best_.lat, lap4_s);
-				std::snprintf(log_buf, sizeof log_buf, "#%03d [HEALED:%s %d/%d] %.2fm/s kp%.1f/d%.0f | 4:%.2fs",
-					total_maps_, heal_role.c_str(), streak_, step_need, v_, best_.kp, best_.kd / 0.0005, lap4_s);
+				consecutive_fails_ = 0;
+				if (old_v > min_v_ + 1e-4) {
+					v_ = std::max(min_v_, old_v - dv_down());
+					speed_changed_ = true;
+					last_ = fmt("Map #%d FAIL (Pass %.0f%% | Fail %.1f%%) at %.2f m/s -> speed down to %.2f m/s (window reset)",
+						total_maps_, sr_pct, fr_pct, old_v, v_);
+					std::snprintf(log_buf, sizeof log_buf, "#%03d [FAIL:SLOW] %.2f->%.2fm/s (P:%.0f%% F:%.0f%%) | %s",
+						total_maps_, old_v, v_, sr_pct, fr_pct, detail.c_str());
+				} else {
+					last_ = fmt("Map #%d FAIL at min speed floor %.2f m/s (Speed locked at floor, window reset)",
+						total_maps_, min_v_);
+					std::snprintf(log_buf, sizeof log_buf, "#%03d [FLOOR:%.2f] P:%.0f%% F:%.0f%% (Locked) | %s",
+						total_maps_, min_v_, sr_pct, fr_pct, detail.c_str());
+				}
 			} else {
-				last_ = fmt("Map #%d PASS (%d/%d, Fail %.1f%%) at %.2f m/s | 4th: %.2fs (dist %+.2fm)",
-					total_maps_, streak_, step_need, fr_pct, v_, lap4_s, dist_diff);
-				std::snprintf(log_buf, sizeof log_buf, "#%03d [PASS %d/%d (%.0f%%)] %.2fm/s | 4:%.2fs",
-					total_maps_, streak_, step_need, fr_pct, v_, lap4_s);
+				last_ = fmt("Map #%d FAIL (Window %zu/%d: Pass %.0f%% | Fail %.1f%% <= %.0f%%, speed kept) at %.2f m/s",
+					total_maps_, cur_win_cnt, step_need, sr_pct, fr_pct, max_fail_pct_, v_);
+				std::snprintf(log_buf, sizeof log_buf, "#%03d [FAIL:KEEP %zu/%d] %.2fm/s (P:%.0f%% F:%.0f%%) | %s",
+					total_maps_, cur_win_cnt, step_need, v_, sr_pct, fr_pct, detail.c_str());
 			}
+		} else if (recovering && !was_healed && streak_ >= step_need) {
+			// 3. Fast recovery back toward start_v_ / verified_v_ after recover_win_ pure passes!
+			const double old_v = v_;
+			v_ = std::min(ref_v, old_v + dv_up());
+			streak_ = 0;
+			window_.clear();   // Reset window for the recovered speed tier!
+			speed_changed_ = true;
+			just_recovered_ = true;
+			last_ = fmt("Map #%d: %d/%d RECOVER PASS at %.2f m/s -> speed recovered to %.2f m/s! (window reset)",
+				total_maps_, step_need, step_need, old_v, v_);
+			std::snprintf(log_buf, sizeof log_buf, "#%03d [RECOVER %d/%d] %.2f->%.2fm/s | 4:%.2fs",
+				total_maps_, step_need, step_need, old_v, v_, lap4_s);
+		} else if (was_healed) {
+			last_ = fmt("Map #%d HEALED [%s] (Window %zu/%d: Pass %.0f%%, Heal %d, Fail %.0f%%) at %.2f m/s | kp=%.3f kd=%.0f lat=%.1f | 4th: %.2fs",
+				total_maps_, heal_role.c_str(), cur_win_cnt, step_need, sr_pct, heals_in_window(), fr_pct, v_, best_.kp, best_.kd / 0.0005, best_.lat, lap4_s);
+			std::snprintf(log_buf, sizeof log_buf, "#%03d [HEALED:%s %zu/%d] %.2fm/s (P:%.0f%% F:%.0f%%) | 4:%.2fs",
+				total_maps_, heal_role.c_str(), cur_win_cnt, step_need, v_, sr_pct, fr_pct, lap4_s);
+		} else {
+			last_ = fmt("Map #%d PASS (Window %zu/%d: Pass %.0f%% [>=%.0f%%], Fail %.0f%%) at %.2f m/s | 4th: %.2fs (%+.2fm)",
+				total_maps_, cur_win_cnt, step_need, sr_pct, need_sr_pct, fr_pct, v_, lap4_s, dist_diff);
+			std::snprintf(log_buf, sizeof log_buf, "#%03d [PASS %zu/%d (P:%.0f%%)] %.2fm/s | 4:%.2fs",
+				total_maps_, cur_win_cnt, step_need, sr_pct, v_, lap4_s);
 		}
 		log_.push_back(log_buf);
 		if (log_.size() > 6)
@@ -898,19 +1051,22 @@ public:
 		const int step_need = current_step_up_target();
 		const double ref_v = std::max(start_v_, verified_v_);
 		const bool recovering = (v_ + 1e-4 < ref_v);
+		const double need_sr_pct = min_pass_rate_pct();
 		std::vector<std::string> v;
-		v.push_back(fmt("ENDLESS 50-MAP + AI HEAL [E]  Map #%d  (E: stop | A: 3-course)", total_maps_ + 1));
+		v.push_back(fmt("ENDLESS %d-MAP + AI HEAL [E]  Map #%d  (E: stop | A: 3-course)", target_win_, total_maps_ + 1));
 		v.push_back("Mode: Drive 1 + Drive 4/Map + AI Gain Auto-Heal on Fail");
 		v.push_back("Map:  " + cur_map_info);
 		if (verified_v_ > 0.0)
-			v.push_back(fmt("Base Speed: %.2f m/s  (Start: %.2f | Floor: %.2f | Verified <=%.0f%%: %.2f m/s)", v_, start_v_, min_v_, max_fail_pct_, verified_v_));
+			v.push_back(fmt("Base Speed: %.2f m/s  (Start: %.2f | Floor: %.2f | Verified >=%.0f%% Pass: %.2f m/s)", v_, start_v_, min_v_, need_sr_pct, verified_v_));
 		else
-			v.push_back(fmt("Base Speed: %.2f m/s  (Start: %.2f | Floor: %.2f | Target: <=%.0f%% fail in %d maps)", v_, start_v_, min_v_, max_fail_pct_, target_win_));
-		v.push_back(fmt("Streak at %.2f m/s: %d / %d (%s)",
-			v_, streak_, step_need, recovering ? "Fast-Recovery to frontier" : fmt("Verifying <=%.0f%% fail", max_fail_pct_).c_str()));
-		v.push_back(fmt("Window Fail Rate: %.1f%% (%dF / %zu, Limit: %.0f%%) | Total: %dP (Healed %d) / %dF",
-			fail_rate_pct(), fails_in_window(), window_.size(), max_fail_pct_, total_passes_, total_healed_, total_fails_));
-		v.push_back(fmt("Active Gains: kp=%.2f kd=%.0f lat=%.2f brk=%.2fm shf=%.2f crv=%.2f",
+			v.push_back(fmt("Base Speed: %.2f m/s  (Start: %.2f | Floor: %.2f | Up: >=%.0f%% Pass in %d maps)", v_, start_v_, min_v_, need_sr_pct, target_win_));
+		v.push_back(fmt("Progress at %.2f m/s: %zu / %d maps (%s)",
+			v_, window_.size(), step_need, recovering ? fmt("Fast-Recovery streak %d/%d", streak_, step_need).c_str() : fmt("Need >=%.0f%% pure Pass", need_sr_pct).c_str()));
+		v.push_back(fmt("Window (%zu/%d): Pass %.1f%% (%dP, >=%.0f%%) | Heal %.1f%% (%dH) | Fail %.1f%% (%dF, <=%.0f%%) | Total: %dP/%dH/%dF",
+			window_.size(), target_win_, pass_rate_pct(), passes_in_window(), need_sr_pct,
+			heal_rate_pct(), heals_in_window(), fail_rate_pct(), fails_in_window(), max_fail_pct_,
+			total_passes_, total_healed_, total_fails_));
+		v.push_back(fmt("Active Gains: kp=%.3f kd=%.0f lat=%.2f brk=%.2fm shf=%.2f crv=%.2f",
 			best_.kp, best_.kd / dt, best_.lat, best_.brake_margin, best_.target_shift, best_.target_curve_gain));
 		if (!heal_note.empty())
 			v.push_back(heal_note);
@@ -936,6 +1092,7 @@ private:
 	double min_v_ = 1.84;
 	double verified_v_ = 0.0;
 	Set best_;
+	Set anchor_;
 	double max_fail_pct_ = 10.0;
 	int target_win_ = 50;
 	int recover_win_ = 10;
@@ -949,7 +1106,7 @@ private:
 	bool just_verified_ = false;
 	bool just_recovered_ = false;
 	bool just_healed_ = false;
-	std::vector<bool> window_;
+	std::vector<int> window_;
 	std::string last_;
 	std::vector<std::string> log_;
 };
@@ -1011,7 +1168,7 @@ bool save_drive_params_to_firmware_file(const FwDriveParams& p, std::string* out
 		"\n    .max_mps = %.2ff,"
 		"\n    .accel = %.1ff,"
 		"\n    .decel = %.1ff,"
-		"\n    .steer_gain_p = %.2ff,"
+		"\n    .steer_gain_p = %.3ff,"
 		"\n    .steer_gain_d = %.1ff,"
 		"\n    .pos_atten_gain = %.2ff,"
 		"\n    .pit_in_distance_m = %.2ff,"
@@ -1094,7 +1251,33 @@ bool load_scenario_file(const std::string& path, ScenarioOptions* opt, std::stri
 	return true;
 }
 
+namespace col {
+constexpr const char* Rst  = "\033[0m";
+constexpr const char* Bold = "\033[1m";
+constexpr const char* Dim  = "\033[90m";
+constexpr const char* Red  = "\033[91m";
+constexpr const char* Grn  = "\033[92m";
+constexpr const char* Yel  = "\033[93m";
+constexpr const char* Blu  = "\033[94m";
+constexpr const char* Mag  = "\033[95m";
+constexpr const char* Cyn  = "\033[96m";
+constexpr const char* Wht  = "\033[97m";
+}  // namespace col
+
+static void enable_ansi_console() {
+	static bool done = false;
+	if (done) return;
+	done = true;
+	HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+	if (hOut != INVALID_HANDLE_VALUE) {
+		DWORD mode = 0;
+		if (GetConsoleMode(hOut, &mode))
+			SetConsoleMode(hOut, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+	}
+}
+
 ScenarioResult run_scenario(const ScenarioOptions& opt) {
+	enable_ansi_console();
 	ScenarioResult res;
 	auto wall0 = std::chrono::steady_clock::now();
 
@@ -1412,7 +1595,11 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 			live->drive_started();
 		const std::string attempt_tag = lap_tag.empty() ? ("#" + std::to_string(++lap_no)) : lap_tag;
 		if (!opt.quiet)
-			std::printf("[%8.3f s] drive %d (%s) start\n", sim->t(), n, attempt_tag.c_str());
+			std::printf("%s[%8.3f s]%s %sdrive %d%s %s(%s)%s %sstart%s\n",
+				col::Dim, sim->t(), col::Rst,
+				col::Blu, n, col::Rst,
+				col::Wht, attempt_tag.c_str(), col::Rst,
+				col::Dim, col::Rst);
 		auto w0 = std::chrono::steady_clock::now();
 		uint64_t r0 = sim->resumes, s0 = sim->sleeps, f0[16];
 		std::memcpy(f0, sim->fired, sizeof f0);
@@ -1445,7 +1632,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 			cur->outcome = lift_reason;
 		else if (cur->lcd.find("Line Lost") != std::string::npos)
 			cur->outcome = "line_lost";
-		else if (cur->max_beta_deg >= 25.0 && cur->max_lat_mm <= 70.0)
+		else if (cur->max_beta_deg >= 25.0 && cur->max_lat_mm <= opt.off_track_mm)
 			cur->outcome = "finished (oversteer)";
 		else
 			cur->outcome = "finished";
@@ -1467,18 +1654,49 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 
 		if (!opt.quiet) {
 			const double d_diff = cur->dist_m - track.length();
+			const char* out_col = (cur->outcome == "finished") ? col::Grn
+				: (cur->outcome == "finished (oversteer)") ? col::Yel : col::Red;
+			const char* lap_col = (cur->lap_time_fw > 0) ? col::Cyn : col::Dim;
+			const char* diff_col = (d_diff <= 0.0) ? col::Grn : col::Yel;
+			const char* mk_col = (cur->marker_check == "OK") ? col::Grn : col::Red;
+			const char* beta_col = (cur->max_beta_deg >= 90.0) ? col::Red
+				: (cur->max_beta_deg >= 25.0) ? col::Yel : col::Grn;
+
 			if (cur->outcome == "finished (oversteer)") {
-				std::printf("[%8.3f s] drive %d (%s) finished (oversteer occurred, completed within track limits), lap %.2f s, dist %.2fm (%+4.2fm), markers %s, max beta %.1f deg\n",
-					sim->t(), n, attempt_tag.c_str(), cur->lap_time_fw, cur->dist_m, d_diff, cur->marker_check.c_str(), cur->max_beta_deg);
+				std::printf("%s[%8.3f s]%s %sdrive %d%s %s(%s)%s %s%sfinished (oversteer occurred, completed within track limits)%s, "
+					"lap %s%s%.2f s%s, dist %s%.2fm%s (%s%+4.2fm%s), markers %s%s%s, max beta %s%.1f deg%s\n",
+					col::Dim, sim->t(), col::Rst,
+					col::Blu, n, col::Rst,
+					col::Wht, attempt_tag.c_str(), col::Rst,
+					col::Bold, out_col, col::Rst,
+					col::Bold, lap_col, cur->lap_time_fw, col::Rst,
+					col::Wht, cur->dist_m, col::Rst, diff_col, d_diff, col::Rst,
+					mk_col, cur->marker_check.c_str(), col::Rst,
+					beta_col, cur->max_beta_deg, col::Rst);
 			} else if (cur->max_beta_deg >= 20.0) {
-				const bool limit_exceeded = !cur->is_finished() || cur->max_lat_mm > 70.0;
-				std::printf("[%8.3f s] drive %d (%s) %s, lap %.2f s, dist %.2fm (%+4.2fm), markers %s, max beta %.1f deg%s\n",
-					sim->t(), n, attempt_tag.c_str(), cur->outcome.c_str(), cur->lap_time_fw, cur->dist_m, d_diff, cur->marker_check.c_str(),
-					cur->max_beta_deg,
-					cur->max_beta_deg >= 25.0 ? (limit_exceeded ? " (OVERSTEER: OFF LIMIT)" : " (DRIFT: LIMIT OK)") : "");
+				const bool limit_exceeded = !cur->is_finished() || cur->max_lat_mm > opt.off_track_mm;
+				std::printf("%s[%8.3f s]%s %sdrive %d%s %s(%s)%s %s%s%s%s, "
+					"lap %s%s%.2f s%s, dist %s%.2fm%s (%s%+4.2fm%s), markers %s%s%s, max beta %s%.1f deg%s%s%s\n",
+					col::Dim, sim->t(), col::Rst,
+					col::Blu, n, col::Rst,
+					col::Wht, attempt_tag.c_str(), col::Rst,
+					col::Bold, out_col, cur->outcome.c_str(), col::Rst,
+					col::Bold, lap_col, cur->lap_time_fw, col::Rst,
+					col::Wht, cur->dist_m, col::Rst, diff_col, d_diff, col::Rst,
+					mk_col, cur->marker_check.c_str(), col::Rst,
+					beta_col, cur->max_beta_deg, col::Rst,
+					cur->max_beta_deg >= 25.0 ? (limit_exceeded ? "\033[91m (OVERSTEER: OFF LIMIT)" : "\033[93m (DRIFT: LIMIT OK)") : "",
+					col::Rst);
 			} else {
-				std::printf("[%8.3f s] drive %d (%s) %s, lap %.2f s, dist %.2fm (%+4.2fm), markers %s\n", sim->t(), n, attempt_tag.c_str(),
-					cur->outcome.c_str(), cur->lap_time_fw, cur->dist_m, d_diff, cur->marker_check.c_str());
+				std::printf("%s[%8.3f s]%s %sdrive %d%s %s(%s)%s %s%s%s%s, "
+					"lap %s%s%.2f s%s, dist %s%.2fm%s (%s%+4.2fm%s), markers %s%s%s\n",
+					col::Dim, sim->t(), col::Rst,
+					col::Blu, n, col::Rst,
+					col::Wht, attempt_tag.c_str(), col::Rst,
+					col::Bold, out_col, cur->outcome.c_str(), col::Rst,
+					col::Bold, lap_col, cur->lap_time_fw, col::Rst,
+					col::Wht, cur->dist_m, col::Rst, diff_col, d_diff, col::Rst,
+					mk_col, cur->marker_check.c_str(), col::Rst);
 			}
 			std::fflush(stdout);
 		}
@@ -1521,7 +1739,8 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 		d.t_start = d.t_end = sim->t();
 		const std::string attempt_tag = lap_tag.empty() ? ("#" + std::to_string(++lap_no)) : lap_tag;
 		if (!opt.quiet)
-			std::printf("[%8.3f s] drive %d (%s) skipped: drive 1 did not read the markers right\n", sim->t(), n, attempt_tag.c_str());
+			std::printf("%s[%8.3f s]%s %sdrive %d%s %s(%s)%s %sskipped: drive 1 did not read the markers right%s\n",
+				col::Dim, sim->t(), col::Rst, col::Blu, n, col::Rst, col::Wht, attempt_tag.c_str(), col::Rst, col::Yel, col::Rst);
 		if (live)
 			live->record_lap(track.name(), track.name(), n, attempt_tag, false, 0.0, "skipped (drive 1 markers wrong)");
 	};
@@ -1717,7 +1936,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 			};
 			auto apply_tuneset = [&](double v_mps, const TuneSet& ts) {
 				session.params.base_mps = static_cast<float>(v_mps);
-				session.params.steer_kp = static_cast<float>(ts.kp);
+				session.params.steer_kp = static_cast<float>(std::round(ts.kp * 1000.0) / 1000.0);
 				session.params.steer_kd = static_cast<float>(ts.kd / dt);
 				session.params.lat_acc_max = static_cast<float>(ts.lat);
 				session.params.slalom_ratio = static_cast<float>(ts.sl);
@@ -1733,8 +1952,8 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 				fwb_set_drive_params(&session.params);
 				res.params = session.params;
 			};
-			auto track_limit_mm = []() {
-				static const double lim = std::getenv("LINESIM_TRACK_LIMIT_MM") ? std::atof(std::getenv("LINESIM_TRACK_LIMIT_MM")) : 70.0;
+			auto track_limit_mm = [&]() {
+				static const double lim = std::getenv("LINESIM_TRACK_LIMIT_MM") ? std::atof(std::getenv("LINESIM_TRACK_LIMIT_MM")) : opt.off_track_mm;
 				return lim;
 			};
 			auto lost_line = [&](const DriveResult& d) {
@@ -1772,36 +1991,38 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 					save_drive_params_to_firmware_file(session.params, &saved_path);
 
 					if (!opt.quiet) {
-						std::printf("\n================================================================================\n");
-						std::printf("=== [AUTO-TUNING RESULT] BEST PARAMETERS FOUND (%zu TRIALS EVALUATED) ===\n", bayes_tuner.trial_count());
-						std::printf("================================================================================\n");
-						std::printf("  Base Speed      : %.2f m/s\n", session.params.base_mps);
+						std::printf("\n%s%s================================================================================%s\n", col::Bold, col::Cyn, col::Rst);
+						std::printf("%s%s=== [AUTO-TUNING RESULT] BEST PARAMETERS FOUND (%zu TRIALS EVALUATED) ===%s\n", col::Bold, col::Grn, bayes_tuner.trial_count(), col::Rst);
+						std::printf("%s%s================================================================================%s\n", col::Bold, col::Cyn, col::Rst);
+						std::printf("  Base Speed      : %s%s%.2f m/s%s\n", col::Bold, col::Yel, session.params.base_mps, col::Rst);
 						if (bayes_tuner.has_best()) {
-							std::printf("  Lap Time (4th)  : %s s\n", bayes_tuner.best_laps().c_str());
-							std::printf("  Pace / Dist Diff: %.3f s/10m (%+.2fm)\n", bayes_tuner.best_pace(), bayes_tuner.best_dist_diff());
+							std::printf("  Lap Time (4th)  : %s%s%s s%s\n", col::Bold, col::Cyn, bayes_tuner.best_laps().c_str(), col::Rst);
+							std::printf("  Pace / Dist Diff: %s%.3f s/10m%s (%s%+.2fm%s)\n",
+								col::Grn, bayes_tuner.best_pace(), col::Rst,
+								bayes_tuner.best_dist_diff() <= 0.0 ? col::Grn : col::Yel, bayes_tuner.best_dist_diff(), col::Rst);
 						} else {
-							std::printf("  Best Run Status : %s (score: %.1f)\n", best_desc.c_str(), best_score);
+							std::printf("  Best Run Status : %s%s%s (score: %.1f)\n", col::Yel, best_desc.c_str(), col::Rst, best_score);
 						}
-						std::printf("\n  [Best Steering & Control Parameters]\n");
-						std::printf("    .base_mps         = %.2ff,\n", session.params.base_mps);
-						std::printf("    .steer_gain_p     = %.2ff,\n", session.params.steer_kp);
-						std::printf("    .steer_gain_d     = %.1ff,   (derivative kd_s = %.4fs)\n", session.params.steer_kd, final_set.kd);
-						std::printf("    .lat_acc_max      = %.2ff,   (lateral grip limit)\n", session.params.lat_acc_max);
-						std::printf("    .brake_margin_m   = %.2ff,\n", session.params.brake_margin_m);
-						std::printf("    .target_shift_val = %.2ff,\n", session.params.target_shift);
-						std::printf("    .target_curve_gain= %.2ff,\n", session.params.target_curve_gain);
-						std::printf("    .slalom_ratio     = %.2ff,\n", session.params.slalom_ratio);
-						std::printf("    .yaw_gain_p       = %.2ff,\n", session.params.yaw_kp);
-						std::printf("    .yaw_gain_i       = %.2ff,\n", session.params.yaw_ki);
+						std::printf("\n  %s[Best Steering & Control Parameters]%s\n", col::Bold, col::Rst);
+						std::printf("    %s.base_mps%s         = %s%.2ff%s,\n", col::Cyn, col::Rst, col::Yel, session.params.base_mps, col::Rst);
+						std::printf("    %s.steer_gain_p%s     = %s%.3ff%s,\n", col::Cyn, col::Rst, col::Grn, session.params.steer_kp, col::Rst);
+						std::printf("    %s.steer_gain_d%s     = %s%.1ff%s,   %s(derivative kd_s = %.4fs)%s\n", col::Cyn, col::Rst, col::Grn, session.params.steer_kd, col::Rst, col::Dim, final_set.kd, col::Rst);
+						std::printf("    %s.lat_acc_max%s      = %s%.2ff%s,   %s(lateral grip limit)%s\n", col::Cyn, col::Rst, col::Mag, session.params.lat_acc_max, col::Rst, col::Dim, col::Rst);
+						std::printf("    %s.brake_margin_m%s   = %s%.2ff%s,\n", col::Cyn, col::Rst, col::Yel, session.params.brake_margin_m, col::Rst);
+						std::printf("    %s.target_shift_val%s = %s%.2ff%s,\n", col::Cyn, col::Rst, col::Wht, session.params.target_shift, col::Rst);
+						std::printf("    %s.target_curve_gain%s= %s%.2ff%s,\n", col::Cyn, col::Rst, col::Wht, session.params.target_curve_gain, col::Rst);
+						std::printf("    %s.slalom_ratio%s     = %s%.2ff%s,\n", col::Cyn, col::Rst, col::Wht, session.params.slalom_ratio, col::Rst);
+						std::printf("    %s.yaw_gain_p%s       = %s%.2ff%s,\n", col::Cyn, col::Rst, col::Wht, session.params.yaw_kp, col::Rst);
+						std::printf("    %s.yaw_gain_i%s       = %s%.2ff%s,\n", col::Cyn, col::Rst, col::Wht, session.params.yaw_ki, col::Rst);
 						if (!saved_path.empty()) {
-							std::printf("\n  [Permanently Saved to Drive File]\n");
-							std::printf("    -> %s\n", saved_path.c_str());
+							std::printf("\n  %s%s[Permanently Saved to Drive File]%s\n", col::Bold, col::Grn, col::Rst);
+							std::printf("    -> %s%s%s\n", col::Wht, saved_path.c_str(), col::Rst);
 						}
-						std::printf("================================================================================\n\n");
+						std::printf("%s%s================================================================================%s\n\n", col::Bold, col::Cyn, col::Rst);
 						std::fflush(stdout);
 					}
 					char line[260];
-					std::snprintf(line, sizeof line, "auto-tune [A]: best %.3f m/s, kp %.2f, kd %.0f, lat %.1f, sl %.2f, brk %.2fm, shf %.2f",
+					std::snprintf(line, sizeof line, "auto-tune [A]: best %.3f m/s, kp %.3f, kd %.0f, lat %.1f, sl %.2f, brk %.2fm, shf %.2f",
 						final_v, final_set.kp, final_set.kd / dt, final_set.lat, final_set.sl, final_set.brake_margin, final_set.target_shift);
 					session.history.push_back(line);
 					if (!session.auto_tune) {
@@ -1819,14 +2040,15 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 					apply_tuneset(endless_tuner.speed(), b);
 					char line[260];
 					std::snprintf(line, sizeof line,
-						"endless [E] stopped: base_mps %.2f m/s (verified <=%.0f%%: %.2f m/s), kp %.2f, kd %.0f, fail rate %.1f%%",
+						"endless [E] stopped: base_mps %.2f m/s (verified <=%.0f%%: %.2f m/s), kp %.3f, kd %.0f, fail rate %.1f%%",
 						endless_tuner.speed(), endless_tuner.max_fail_rate_pct(),
 						endless_tuner.has_verified() ? endless_tuner.verified_v() : endless_tuner.speed(),
 						b.kp, b.kd / dt, endless_tuner.fail_rate_pct());
 					std::string saved_path;
 					if (save_drive_params_to_firmware_file(session.params, &saved_path)) {
 						session.message = "endless [E] ended: speed & healed gains saved to drive.c!";
-						std::printf("[AUTO-SAVED] Endless speed & gains saved to %s\n", saved_path.c_str());
+						std::printf("%s%s[AUTO-SAVED]%s Endless speed & gains saved to %s%s%s\n",
+							col::Bold, col::Grn, col::Rst, col::Cyn, saved_path.c_str(), col::Rst);
 					} else {
 						session.message = "endless [E] ended (drive 1-4 to try it)";
 					}
@@ -1881,7 +2103,8 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 					const size_t cand_no = bayes_tuner.current_candidate_no();
 					if (opt.tune_trials > 0 && cand_no > static_cast<size_t>(opt.tune_trials)) {
 						if (!opt.quiet) {
-							std::printf("\n[COMPLETED] Reached %d trials limit! Finalizing best parameters...\n", opt.tune_trials);
+							std::printf("\n%s%s[COMPLETED]%s Reached %d trials limit! Finalizing best parameters...\n",
+								col::Bold, col::Grn, col::Rst, opt.tune_trials);
 							std::fflush(stdout);
 						}
 						session.auto_tune = false;
@@ -1889,10 +2112,18 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 						continue;
 					}
 					if (!opt.quiet) {
-						std::printf("\n[%8.3f s] --- [A] Candidate #%zu%s: v=%.2f kp=%.1f kd=%.0f (%.4fs) lat=%.1f brk=%.2fm shf=%.2f ---\n",
-							sim->t(), cand_no,
-							opt.tune_trials > 0 ? ("/" + std::to_string(opt.tune_trials)).c_str() : "",
-							bayes_tuner.speed(), ts.kp, ts.kd / dt, ts.kd, ts.lat, ts.brake_margin, ts.target_shift);
+						std::printf("\n%s[%8.3f s]%s %s--- [A] Candidate #%zu%s:%s "
+							"v=%s%.2f%s kp=%s%.1f%s kd=%s%.0f%s %s(%.4fs)%s lat=%s%.1f%s brk=%s%.2fm%s shf=%s%.2f%s %s---%s\n",
+							col::Dim, sim->t(), col::Rst,
+							col::Bold, cand_no,
+							opt.tune_trials > 0 ? ("/" + std::to_string(opt.tune_trials)).c_str() : "", col::Rst,
+							col::Yel, bayes_tuner.speed(), col::Rst,
+							col::Cyn, ts.kp, col::Rst,
+							col::Cyn, ts.kd / dt, col::Rst, col::Dim, ts.kd, col::Rst,
+							col::Mag, ts.lat, col::Rst,
+							col::Grn, ts.brake_margin, col::Rst,
+							col::Wht, ts.target_shift, col::Rst,
+							col::Bold, col::Rst);
 						std::fflush(stdout);
 					}
 					auto drive = [&](int n) {
@@ -2039,7 +2270,12 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 					}
 					bayes_tuner.record(lost, pass, score, pace, mean_dist_diff, laps, cur_lap_times, trial_drives, text);
 					if (!opt.quiet) {
-						std::printf("[%8.3f s] Candidate #%zu evaluated: %s (score=%.1f)\n", sim->t(), cand_no, text, score);
+						const char* eval_col = pass ? (std::string(text).find("ALL RENEWED") != std::string::npos ? col::Grn : col::Cyn) : col::Red;
+						std::printf("%s[%8.3f s]%s %sCandidate #%zu evaluated:%s %s%s%s %s(score=%.1f)%s\n",
+							col::Dim, sim->t(), col::Rst,
+							col::Wht, cand_no, col::Rst,
+							eval_col, text, col::Rst,
+							col::Dim, score, col::Rst);
 						std::fflush(stdout);
 					}
 					if (bayes_tuner.round_complete()) {
@@ -2056,15 +2292,28 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 									session.params.lat_acc_max, session.params.brake_margin_m, session.params.target_shift);
 								session.history.push_back(save_msg);
 								if (!opt.quiet) {
-									std::printf("[%8.3f s] %s\n", sim->t(), save_msg);
+									std::printf("%s[%8.3f s]%s %s%s[SAVED] BEST%s (all renewed: %s%s%s, dist %s%+.2fm%s) "
+										"v=%s%.2f%s kp=%s%.1f%s kd=%s%.0f%s lat=%s%.1f%s brk=%s%.2f%s shf=%s%.2f%s\n",
+										col::Dim, sim->t(), col::Rst,
+										col::Bold, col::Grn, col::Rst,
+										col::Cyn, bayes_tuner.best_laps().c_str(), col::Rst,
+										bayes_tuner.best_dist_diff() <= 0.0 ? col::Grn : col::Yel, bayes_tuner.best_dist_diff(), col::Rst,
+										col::Yel, session.params.base_mps, col::Rst,
+										col::Cyn, session.params.steer_kp, col::Rst,
+										col::Cyn, session.params.steer_kd, col::Rst,
+										col::Mag, session.params.lat_acc_max, col::Rst,
+										col::Grn, session.params.brake_margin_m, col::Rst,
+										col::Wht, session.params.target_shift, col::Rst);
 									std::fflush(stdout);
 								}
 							}
 						}
 						if (!opt.quiet) {
 							const std::vector<std::string> st = bayes_tuner.status(dt, course_list());
-							std::printf("[%8.3f s] %s | %s\n", sim->t(), st[0].c_str(),
-								st.size() > 4 ? st[4].c_str() : "");
+							std::printf("%s[%8.3f s]%s %s%s%s | %s%s%s\n",
+								col::Dim, sim->t(), col::Rst,
+								col::Blu, st[0].c_str(), col::Rst,
+								col::Grn, st.size() > 4 ? st[4].c_str() : "", col::Rst);
 							std::fflush(stdout);
 						}
 					}
@@ -2093,9 +2342,11 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 								user_swap ? "user requested map" : ("stale (" + std::to_string(BayesGainTuner::stale_drives()) + " drives)").c_str(),
 								replace_idx + 1, tune_courses[replace_idx].name.c_str(), tune_courses[replace_idx].length);
 							if (!opt.quiet) {
-								std::printf("[%8.3f s] auto-tune [A]: c%zu %s replaced by %s (%.1f m)\n",
-									sim->t(), replace_idx + 1, old.c_str(),
-									tune_courses[replace_idx].name.c_str(), tune_courses[replace_idx].length);
+								std::printf("%s[%8.3f s]%s %sauto-tune [A]:%s c%zu %s%s%s replaced by %s%s%s (%.1f m)\n",
+									col::Dim, sim->t(), col::Rst,
+									col::Mag, col::Rst,
+									replace_idx + 1, col::Dim, old.c_str(), col::Rst,
+									col::Cyn, tune_courses[replace_idx].name.c_str(), col::Rst, tune_courses[replace_idx].length);
 								std::fflush(stdout);
 							}
 							next_replace = (replace_idx + 1) % tune_courses.size();
@@ -2132,8 +2383,21 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 					}
 
 					const size_t map_no = endless_tuner.current_map_no();
+					auto extract_fail_v = [](const DriveResult& d) -> double {
+						double fv = 0.0;
+						for (size_t i = d.samples.size(); i > 0; i--) {
+							const Sample& s = d.samples[i - 1];
+							if (!s.lost && s.tgt_base > 0.1f) {
+								for (size_t j = i; j > 0 && (s.t - d.samples[j - 1].t) <= 0.30; j--)
+									fv = std::max(fv, static_cast<double>(d.samples[j - 1].v));
+								break;
+							}
+						}
+						return fv > 0.0 ? fv : d.max_v;
+					};
+
 					auto run_map_trial = [&](const TuneSet& cand_set, const std::string& tag_prefix,
-						bool* out_pass, bool* out_d1_failed, bool* out_was_ov,
+						bool* out_pass, EndlessTuner::FailMetrics* out_fm,
 						double* out_pace, double* out_lap4_s, double* out_dist_diff, std::string* out_detail) -> bool {
 						apply_tuneset(endless_tuner.speed(), cand_set);
 						auto drive = [&](int n) {
@@ -2146,8 +2410,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 						};
 
 						*out_pass = true;
-						*out_d1_failed = false;
-						*out_was_ov = false;
+						if (out_fm) *out_fm = EndlessTuner::FailMetrics{};
 						*out_pace = 0.0;
 						*out_lap4_s = 0.0;
 						*out_dist_diff = 0.0;
@@ -2165,8 +2428,14 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 						if (lost_line(d1) || d1.marker_check != "OK" || oversteered(d1)) {
 							const bool ov = oversteered(d1);
 							*out_pass = false;
-							*out_d1_failed = true;
-							*out_was_ov = ov;
+							if (out_fm) {
+								out_fm->d1_failed = true;
+								out_fm->was_oversteer = ov;
+								out_fm->max_beta_deg = d1.max_beta_deg;
+								out_fm->max_lat_mm = d1.max_lat_mm;
+								out_fm->weave_dps = weave_dps(d1.samples);
+								out_fm->fail_v = extract_fail_v(d1);
+							}
 							const char* reason = ov ? "oversteer"
 								: (!d1.is_finished() ? d1.outcome.c_str()
 								: (d1.max_lat_mm > track_limit_mm() ? "track limit" : ("markers " + d1.marker_check).c_str()));
@@ -2181,8 +2450,14 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 							if (lost_line(d4) || d4.marker_check != "OK" || d4.lap_time_fw <= 0 || oversteered(d4)) {
 								const bool ov = oversteered(d4);
 								*out_pass = false;
-								*out_d1_failed = false;
-								*out_was_ov = ov;
+								if (out_fm) {
+									out_fm->d1_failed = false;
+									out_fm->was_oversteer = ov;
+									out_fm->max_beta_deg = d4.max_beta_deg;
+									out_fm->max_lat_mm = d4.max_lat_mm;
+									out_fm->weave_dps = weave_dps(d4.samples);
+									out_fm->fail_v = extract_fail_v(d4);
+								}
 								const char* reason = ov ? "oversteer"
 									: (!d4.is_finished() ? d4.outcome.c_str()
 									: (d4.max_lat_mm > track_limit_mm() ? "track limit" : ("markers " + d4.marker_check).c_str()));
@@ -2203,37 +2478,60 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 
 					session.tune_lines = endless_tuner.status(dt, cur_map_info());
 
-					bool pass = false, d1_failed = false, was_ov = false;
+					bool pass = false;
+					EndlessTuner::FailMetrics fm;
 					double pace = 0.0, lap4_s = 0.0, dist_diff = 0.0;
 					std::string detail;
 					if (!run_map_trial(endless_tuner.best(), "#" + std::to_string(map_no),
-						&pass, &d1_failed, &was_ov, &pace, &lap4_s, &dist_diff, &detail)) {
+						&pass, &fm, &pace, &lap4_s, &dist_diff, &detail)) {
 						continue;
 					}
 
-					// If initial trial on this map failed, run AI Gain Auto-Heal (up to 3 candidates) BEFORE lowering speed!
+					// If initial trial on this map failed, run AI Gain Auto-Heal (up to 5 candidates) BEFORE lowering speed!
 					bool was_healed = false;
 					std::string healed_role;
 					if (!pass) {
-						const auto heal_cands = endless_tuner.make_heal_candidates(d1_failed, was_ov);
+						const auto heal_cands = endless_tuner.make_heal_candidates(fm);
 						bool aborted = false;
 						for (size_t h = 0; h < heal_cands.size(); h++) {
-							char heal_msg[200];
+							char heal_msg[220];
 							std::snprintf(heal_msg, sizeof heal_msg,
-								"AI AUTO-HEAL (%zu/%zu) [%s]: retrying Map #%zu at %.2f m/s (kp=%.1f kd=%.0f lat=%.1f brk=%.2f)",
+								"AI AUTO-HEAL (%zu/%zu) [%s]: retrying Map #%zu at %.2f m/s (kp=%.3f kd=%.0f lat=%.1f brk=%.2f)",
 								h + 1, heal_cands.size(), heal_cands[h].role.c_str(), map_no, endless_tuner.speed(),
 								heal_cands[h].set.kp, heal_cands[h].set.kd / dt, heal_cands[h].set.lat, heal_cands[h].set.brake_margin);
 							session.tune_lines = endless_tuner.status(dt, cur_map_info(), heal_msg);
 							if (!opt.quiet) {
-								std::printf("[%8.3f s] %s\n", sim->t(), heal_msg);
+								if (h == 0) {
+									std::printf("%s[%8.3f s]%s %s[DIAGNOSIS]%s %s fail (%s): beta=%s%.1f deg%s, lat=%s%.0f mm%s, weave=%s%.0f dps%s, v_fail=%s%.2f m/s%s\n",
+										col::Dim, sim->t(), col::Rst,
+										col::Yel, col::Rst,
+										fm.d1_failed ? "1st drive" : "4th drive",
+										fm.was_oversteer ? "OVERSTEER" : "UNDERSTEER/LINE-LOSS",
+										fm.max_beta_deg >= 25.0 ? col::Red : col::Grn, fm.max_beta_deg, col::Rst,
+										fm.max_lat_mm > 90.0 ? col::Yel : col::Wht, fm.max_lat_mm, col::Rst,
+										fm.weave_dps > 180.0 ? col::Yel : col::Wht, fm.weave_dps, col::Rst,
+										col::Cyn, fm.fail_v, col::Rst);
+								}
+								std::printf("%s[%8.3f s]%s %s%sAI AUTO-HEAL (%zu/%zu)%s %s[%s]%s: retrying %sMap #%zu%s at %s%s%.2f m/s%s "
+									"(kp=%s%.3f%s kd=%s%.0f%s lat=%s%.1f%s brk=%s%.2f%s)\n",
+									col::Dim, sim->t(), col::Rst,
+									col::Bold, col::Mag, h + 1, heal_cands.size(), col::Rst,
+									col::Yel, heal_cands[h].role.c_str(), col::Rst,
+									col::Wht, map_no, col::Rst,
+									col::Bold, col::Yel, endless_tuner.speed(), col::Rst,
+									col::Cyn, heal_cands[h].set.kp, col::Rst,
+									col::Cyn, heal_cands[h].set.kd / dt, col::Rst,
+									col::Mag, heal_cands[h].set.lat, col::Rst,
+									col::Grn, heal_cands[h].set.brake_margin, col::Rst);
 								std::fflush(stdout);
 							}
 
-							bool h_pass = false, h_d1 = false, h_ov = false;
+							bool h_pass = false;
+							EndlessTuner::FailMetrics h_fm;
 							double h_pace = 0.0, h_lap4 = 0.0, h_dd = 0.0;
 							std::string h_det;
 							const std::string h_tag = "#" + std::to_string(map_no) + "h" + std::to_string(h + 1);
-							if (!run_map_trial(heal_cands[h].set, h_tag, &h_pass, &h_d1, &h_ov, &h_pace, &h_lap4, &h_dd, &h_det)) {
+							if (!run_map_trial(heal_cands[h].set, h_tag, &h_pass, &h_fm, &h_pace, &h_lap4, &h_dd, &h_det)) {
 								aborted = true;
 								break;
 							}
@@ -2246,6 +2544,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 								dist_diff = h_dd;
 								detail = h_det;
 								endless_tuner.adopt_healed_gains(heal_cands[h].set);
+								apply_tuneset(endless_tuner.speed(), endless_tuner.best());
 								break;
 							}
 						}
@@ -2268,15 +2567,15 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 							char save_msg[220];
 							if (verified) {
 								std::snprintf(save_msg, sizeof save_msg,
-									"[SAVED <=%.0f%% VERIFIED] %d maps evaluated at %.2f m/s (Fail %.1f%%) -> base_mps up to %.2f m/s",
-									endless_tuner.max_fail_rate_pct(), endless_tuner.target_window(), prev_v, endless_tuner.fail_rate_pct(), session.params.base_mps);
+									"[SAVED >=%.0f%% PASS VERIFIED] %d maps evaluated at %.2f m/s -> base_mps up to %.2f m/s",
+									endless_tuner.min_pass_rate_pct(), endless_tuner.target_window(), prev_v, session.params.base_mps);
 							} else if (recovered) {
 								std::snprintf(save_msg, sizeof save_msg,
 									"[SAVED RECOVERED] %d maps passed at %.2f m/s -> base_mps recovered to %.2f m/s",
 									endless_tuner.recover_window(), prev_v, session.params.base_mps);
 							} else if (healed) {
 								std::snprintf(save_msg, sizeof save_msg,
-									"[SAVED AI-HEALED] Map #%zu healed [%s] at %.2f m/s! New gains: kp=%.2f kd=%.0f lat=%.2f brk=%.2f",
+									"[SAVED AI-HEALED] Map #%zu healed [%s] at %.2f m/s! New gains: kp=%.3f kd=%.0f lat=%.2f brk=%.2f",
 									map_no, healed_role.c_str(), session.params.base_mps,
 									session.params.steer_kp, session.params.steer_kd, session.params.lat_acc_max, session.params.brake_margin_m);
 							} else {
@@ -2286,24 +2585,50 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 							}
 							session.history.push_back(save_msg);
 							if (!opt.quiet) {
-								std::printf("[%8.3f s] %s\n", sim->t(), save_msg);
+								if (healed) {
+									std::printf("%s[%8.3f s]%s %s%s[SAVED AI-HEALED]%s Map #%zu healed %s[%s]%s at %s%s%.2f m/s%s! "
+										"New gains: kp=%s%.3f%s kd=%s%.0f%s lat=%s%.2f%s brk=%s%.2f%s\n",
+										col::Dim, sim->t(), col::Rst,
+										col::Bold, col::Mag, col::Rst, map_no,
+										col::Yel, healed_role.c_str(), col::Rst,
+										col::Bold, col::Yel, session.params.base_mps, col::Rst,
+										col::Cyn, session.params.steer_kp, col::Rst,
+										col::Cyn, session.params.steer_kd, col::Rst,
+										col::Mag, session.params.lat_acc_max, col::Rst,
+										col::Grn, session.params.brake_margin_m, col::Rst);
+								} else {
+									std::printf("%s[%8.3f s]%s %s%s%s\n",
+										col::Dim, sim->t(), col::Rst,
+										col::Bold, verified ? col::Grn : col::Cyn, save_msg);
+									std::printf("%s", col::Rst);
+								}
 								std::fflush(stdout);
 							}
 						} else if (!should_save_to_disk) {
 							char fail_msg[220];
 							std::snprintf(fail_msg, sizeof fail_msg,
-								"[ADJUST] Map #%zu failed (after 3 AI heal tries) at %.2f m/s -> base_mps down to %.2f m/s (drive.c preserved)",
+								"[ADJUST] Map #%zu failed (after 5 AI heal tries) at %.2f m/s -> base_mps down to %.2f m/s (drive.c preserved)",
 								map_no, prev_v, session.params.base_mps);
 							session.history.push_back(fail_msg);
 							if (!opt.quiet) {
-								std::printf("[%8.3f s] %s\n", sim->t(), fail_msg);
+								std::printf("%s[%8.3f s]%s %s%s[ADJUST]%s Map #%zu %sfailed%s (after 5 AI heal tries) at %s%.2f m/s%s -> "
+									"base_mps down to %s%s%.2f m/s%s %s(drive.c preserved)%s\n",
+									col::Dim, sim->t(), col::Rst,
+									col::Bold, col::Yel, col::Rst, map_no,
+									col::Red, col::Rst,
+									col::Yel, prev_v, col::Rst,
+									col::Bold, col::Yel, session.params.base_mps, col::Rst,
+									col::Dim, col::Rst);
 								std::fflush(stdout);
 							}
 						}
 					} else if (!opt.quiet) {
 						const std::vector<std::string> st = endless_tuner.status(dt, cur_map_info());
-						std::printf("[%8.3f s] %s | %s\n", sim->t(), st[0].c_str(),
-							st.size() > 7 ? st[7].c_str() : "");
+						const char* res_col = was_healed ? col::Mag : (pass ? col::Grn : col::Red);
+						std::printf("%s[%8.3f s]%s %s%s%s | %s%s%s\n",
+							col::Dim, sim->t(), col::Rst,
+							col::Blu, st[0].c_str(), col::Rst,
+							res_col, st.size() > 7 ? st[7].c_str() : "", col::Rst);
 						std::fflush(stdout);
 					}
 

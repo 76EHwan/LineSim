@@ -39,10 +39,12 @@ set(FW_SOURCES
 # the firmware repo itself is never touched. Re-runs automatically when a source changes.
 set(FW_PATCHED_DIR ${CMAKE_BINARY_DIR}/fw_patched)
 set(FW_PATCHED_SOURCES "")
+string(ASCII 239 187 191 UTF8_BOM)
 foreach(src ${FW_SOURCES})
   set(in  ${FW_DIR}/${src})
   set(out ${FW_PATCHED_DIR}/${src})
   file(READ ${in} text)
+  string(REGEX REPLACE "^${UTF8_BOM}" "" text "${text}")
   string(REGEX REPLACE "default:([ \t\r\n]*)}" "default: ;\\1}" text "${text}")
   # #line keeps compiler messages and debugger breakpoints on the original firmware file
   # (the fix above never changes the line count).
