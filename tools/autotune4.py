@@ -71,9 +71,11 @@ def drive_pair(course, robot, vals, extra, tag, robot_params=(), seed=1):
                [x for x in s if not x.startswith(("base_mps=", "steer_kp=", "steer_kd_s="))], out, False,
                robot_params, seed)
     if not j or not j.get("drives"):
+        at.clean_run_dir(out)
         return False, "no result", None, None
     ds = {d["drive"]: d for d in j["drives"]}
     d1, d4 = ds.get(1), ds.get(4)
+    at.clean_run_dir(out)
     if d1 is None or at.lost_line(d1):
         return False, "1: " + (d1["outcome"] if d1 else "missing"), None, None
     if d1.get("marker_check") != "OK":

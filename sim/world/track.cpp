@@ -601,8 +601,7 @@ void Track::straight_run(double s, double* before, double* after) const {
 	}
 }
 
-std::string Track::expected_markers() const {
-	// events between the start mark and the goal mark, in driving order
+std::vector<ExpectedMarkerEvent> Track::expected_marker_events() const {
 	std::vector<std::pair<double, char>> ev;
 	const double span = closed_ ? wrap_s(goal_s_ - start_s_) : goal_s_ - start_s_;
 	auto rel = [&](double s) { return closed_ ? wrap_s(s - start_s_) : s - start_s_; };
@@ -617,11 +616,68 @@ std::string Track::expected_markers() const {
 		ev.push_back({rel(x.s2), 'C'});
 	}
 	std::sort(ev.begin(), ev.end());
-	std::string out = "U";
-	for (const auto& e : ev)
-		if (e.first > 1e-6 && e.first < span - 1e-6)
-			out += e.second;
-	out += 'U';
+
+	std::vector<ExpectedMarkerEvent> res;
+	size_t idx = 0;
+	// Start mark 'U'
+	{
+		Pose2 p = pose_at(start_s_);
+		ExpectedMarkerEvent em;
+		em.index = idx++;
+		em.type = 'U';
+		em.s = start_s_;
+		em.side = 0;
+		em.p_centerline = Vec2{p.x, p.y};
+		em.center = Vec2{p.x, p.y};
+		em.th = p.th;
+		res.push_back(em);
+	}
+
+	const double mark_dist = line_width_ / 2.0 + mark_gap_ + mark_across_ / 2.0;
+	for (const auto& e : ev) {
+		if (e.first > 1e-6 && e.first < span - 1e-6) {
+			double s_abs = closed_ ? wrap_s(start_s_ + e.first) : start_s_ + e.first;
+			Pose2 p = pose_at(s_abs);
+			Vec2 n = left_normal(p.th);
+			ExpectedMarkerEvent em;
+			em.index = idx++;
+			em.type = e.second;
+			em.s = s_abs;
+			em.p_centerline = Vec2{p.x, p.y};
+			em.th = p.th;
+			if (em.type == 'L') {
+				em.side = +1;
+				em.center = {p.x + mark_dist * n.x, p.y + mark_dist * n.y};
+			} else if (em.type == 'R') {
+				em.side = -1;
+				em.center = {p.x - mark_dist * n.x, p.y - mark_dist * n.y};
+			} else {
+				em.side = 0;
+				em.center = Vec2{p.x, p.y};
+			}
+			res.push_back(em);
+		}
+	}
+	// Goal mark 'U'
+	{
+		Pose2 p = pose_at(goal_s_);
+		ExpectedMarkerEvent em;
+		em.index = idx++;
+		em.type = 'U';
+		em.s = goal_s_;
+		em.side = 0;
+		em.p_centerline = Vec2{p.x, p.y};
+		em.center = Vec2{p.x, p.y};
+		em.th = p.th;
+		res.push_back(em);
+	}
+	return res;
+}
+
+std::string Track::expected_markers() const {
+	std::string out;
+	for (const auto& ev : expected_marker_events())
+		out += ev.type;
 	return out;
 }
 

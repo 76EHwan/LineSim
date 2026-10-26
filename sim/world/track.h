@@ -54,6 +54,51 @@ struct TrackMarker {
 	std::string kind;      // "left", "right", "end", "both"
 };
 
+struct ExpectedMarkerEvent {
+	size_t index = 0;
+	char type = 'U';
+	double s = 0.0;
+	int side = 0;          // +1: left, -1: right, 0: crossing/end
+	Vec2 p_centerline;
+	Vec2 center;
+	double th = 0.0;
+};
+
+// 3D 뷰어 및 마커 진단/사고현장 복원 정보
+struct MarkerVisualInfo {
+	int marker_idx = 0;
+	char want = '?';
+	char got = '?';
+	double s = 0.0;
+	Vec2 tape_center;
+	double tape_th = 0.0;
+	double tape_hl = 0.010; // half length along line (20mm / 2)
+	double tape_hw = 0.025; // half width across line (50mm / 2)
+	int side = 0;           // +1: left, -1: right, 0: crossing/end
+	int status = 0;         // 0: unvisited, 1: ok (green), 2: missed (red), 3: wrong_type (amber), 4: ghost (magenta)
+	std::string label;
+	std::string reason;
+
+	// 잘못 봤을 때 로봇 순간 복원 (Crime scene reconstruction)
+	bool has_reconstruction = false;
+	double robot_x = 0.0;
+	double robot_y = 0.0;
+	double robot_th = 0.0;
+	double robot_v = 0.0;
+	double robot_beta = 0.0;
+	double robot_lat_mm = 0.0;
+	Vec2 sensor_pos;
+	Vec2 tape_edge_pos;
+	double miss_gap_mm = 0.0;
+	std::string sensor_name;
+
+	// 잘못 읽었을 때 센서 값들 (18개: 0..15 라인 센서, 16 M_L, 17 M_R)
+	float sensors[18] = {};          // 0.0 ~ 1.0 (정규화 센서값)
+	bool sensor_on[18] = {};         // 임계값 초과 여부 (디지털 1/0)
+	uint8_t raw_normalized[18] = {}; // 0 ~ 255 정규화 ADC
+	uint32_t sensor_state = 0;       // 펌웨어 디지털 센서 비트마스크
+};
+
 class Track {
 public:
 	bool load(const std::string& path, std::string* err);
@@ -64,6 +109,8 @@ public:
 	const std::vector<TrackCrossing>& crossings() const { return crossings_; }
 	// Marker sequence the firmware should log for one run: 'U' (end mark), 'L', 'R', 'C'.
 	std::string expected_markers() const;
+	// Detailed sequence of marker events in driving order
+	std::vector<ExpectedMarkerEvent> expected_marker_events() const;
 	// ZETIN rule check of the geometry; empty when the course is fine.
 	std::vector<std::string> rule_problems(double board_w, double board_h, double min_clearance = 0.2) const;
 	// Straight line available before / after arc-length s (0 when s is on an arc).
@@ -87,6 +134,9 @@ public:
 	bool has_robot_start() const { return has_robot_start_; }
 	double robot_start_s() const { return robot_start_s_; }
 	double line_width() const { return line_width_; }
+	double mark_gap() const { return mark_gap_; }
+	double mark_along() const { return mark_along_; }
+	double mark_across() const { return mark_across_; }
 	const std::string& name() const { return name_; }
 	const std::vector<Shape>& shapes() const { return shapes_; }
 	const std::vector<PathPiece>& pieces() const { return pieces_; }

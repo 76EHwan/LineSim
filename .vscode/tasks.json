@@ -158,32 +158,49 @@
       "id": "track",
       "type": "pickString",
       "description": "Course (random = a new ZETIN-rule course every time)",
-      "options": ["random", "tracks/figure8.json", "tracks/oval.json"],
-      "default": "random"
+      "options": [
+        "tracks/hyper_straight_speedway.json",
+        "tracks/zetin_finals_championship.json",
+        "tracks/complex_grand_prix.json",
+        "tracks/extreme_challenge.json",
+        "random",
+        "tracks/practice_board.json",
+        "tracks/figure8.json",
+        "tracks/oval.json"
+      ],
+      "default": "tracks/hyper_straight_speedway.json"
     },
     {
       "id": "scenario",
       "type": "pickString",
       "description": "Scenario",
-      "options": ["scenarios/figure8_all.json", "scenarios/oval_first.json"],
-      "default": "scenarios/figure8_all.json"
+      "options": [
+        "scenarios/hyper_straight_speedway.json",
+        "scenarios/zetin_finals_championship.json",
+        "scenarios/complex_grand_prix.json",
+        "scenarios/extreme_challenge.json",
+        "scenarios/practice_board.json",
+        "scenarios/figure8_all.json",
+        "scenarios/oval_first.json"
+      ],
+      "default": "scenarios/hyper_straight_speedway.json"
     },
-    { "id": "baseSpeed", "type": "promptString", "description": "base speed [m/s] (driveData.base_mps)", "default": "2.04" },
-    { "id": "maxSpeed", "type": "promptString", "description": "max speed on straights [m/s] (driveData.max_mps, drives 2 and 4)", "default": "4.0" },
-    { "id": "accel", "type": "promptString", "description": "acceleration [m/s^2] (driveData.accel)", "default": "5.5" },
-    { "id": "decel", "type": "promptString", "description": "deceleration [m/s^2] (driveData.decel)", "default": "5.5" },
-    { "id": "tuneSpeed", "type": "promptString", "description": "target speed [m/s] to tune steer kp / kd for (takes a few minutes)", "default": "2.04" },
+    { "id": "baseSpeed", "type": "promptString", "description": "base speed [m/s] (driveData.base_mps)", "default": "2.20" },
+    { "id": "maxSpeed", "type": "promptString", "description": "max speed on straights [m/s] (driveData.max_mps, drives 2 and 4)", "default": "10.0" },
+    { "id": "accel", "type": "promptString", "description": "acceleration [m/s^2] (driveData.accel)", "default": "7.5" },
+    { "id": "decel", "type": "promptString", "description": "deceleration [m/s^2] (driveData.decel)", "default": "7.0" },
+    { "id": "tuneSpeed", "type": "promptString", "description": "target speed [m/s] to tune steer kp / kd for (takes a few minutes)", "default": "2.20" },
     {
       "id": "extraArgs",
       "type": "promptString",
-      "description": "Extra arguments, e.g. --set steer_kp=20 --set steer_kd=600 --speed 0.5 --drives 1,2  (empty = none)",
+      "description": "Extra arguments, e.g. --complex --set steer_kp=20 --set steer_kd=500 --speed 0.5 --drives 1,4 (empty = none)",
       "default": ""
     },
     {
       "id": "genArgs",
       "type": "promptString",
-      "description": "Generator options: --seed n --board 4.88x4.88 --crossings n (exact) --min-crossings n --out tracks/my.json  (empty = new seed, at least 1 crossing)",
-      "default": ""
+      "description": "Generator options: --complex (고난도 다중교차/시케인 모드) --seed n --board 6.1x4.88 --crossings n --out tracks/my.json (empty = new seed)",
+      "default": "--complex"
     }
   ]
 }

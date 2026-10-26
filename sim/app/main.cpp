@@ -5,6 +5,8 @@
 #include <filesystem>
 #include <string>
 #include <vector>
+#include <thread>
+#include <windows.h>
 
 #include "core/scenario.h"
 #include "out/report.h"
@@ -34,6 +36,21 @@ static int run_gen(int argc, char** argv) {
 			std::sscanf(next().c_str(), "%d,%d", &g.min_pieces, &g.max_pieces);
 		else if (a == "--length")
 			std::sscanf(next().c_str(), "%lf,%lf", &g.min_length, &g.max_length);
+		else if (a == "--complex") {
+			g.complex_mode = true;
+			g.board_w = 9.15;
+			g.board_h = 7.32;
+			g.min_length = 65.0;
+			g.max_length = 85.0;
+			g.min_crossings = 2;
+		}
+		else if (a == "--hyper") {
+			g.hyper_mode = true;
+			g.min_length = 90.0;
+			g.max_length = 135.0;
+			g.board_w = 36.0;
+			g.board_h = 9.0;
+		}
 		else {
 			std::fprintf(stderr, "unknown argument: %s\n", a.c_str());
 			return 2;
@@ -73,13 +90,13 @@ static void usage() {
 		"  linesim run --track <track.json> [--robot <robot.json>] [options]\n"
 		"  linesim view <scenario.json> [options]             same run in a 3D window, real time\n"
 		"  linesim view --interactive --track <track.json>    firmware menu driven from the keyboard\n"
-		"  linesim view --session --track <track.json>        keep driving: pick drive 1-4, tune params, new maps\n"
-		"  linesim gen [--seed n] [--out file] [--board 6.1x4.88] [--length 35,55] [--crossings n]\n"
+		"  linesim view --session --track <track.json>        keep driving: pick drive 1-5, tune params, new maps\n"
+		"  linesim gen [--complex] [--seed n] [--out file] [--board 6.1x4.88] [--length 35,55] [--crossings n]\n"
 		"                                                     random ZETIN course (short: --board 4.88x4.88 --length 8,30)\n"
 		"\n"
 		"options:\n"
 		"  --out <dir>          output folder (default: runs/<date-time>)\n"
-		"  --drives 1,2,3,4     drives to run in order (default from scenario, else 1)\n"
+		"  --drives 1,2,3,4,5   drives to run in order (default from scenario, else 1)\n"
 		"  --set key=value      override a firmware drive parameter (repeatable):\n"
 		"                       base_mps max_mps accel decel steer_kp steer_kd pos_atten_gain\n"
 		"                       pit_in_m target_shift fan_en, steer_kd_s (kd in seconds)\n"
@@ -127,6 +144,50 @@ int main(int argc_in, char** argv_in) {
 	std::string cmd = argc >= 2 ? argv[1] : "";
 	if (cmd == "gen")
 		return run_gen(argc, argv);
+	if (cmd == "eval-worker") {
+		ScenarioOptions opt;
+		opt.view = false;
+		opt.quiet = true;
+		opt.session = false;
+		opt.auto_tune = false;
+		for (int i = 2; i < argc; i++) {
+			std::string a = argv[i];
+			auto next = [&]() -> std::string {
+				if (i + 1 >= argc) std::exit(2);
+				return argv[++i];
+			};
+			if (a == "--track") opt.track_path = next();
+			else if (a == "--robot") opt.robot_path = next();
+			else if (a == "--off-track") opt.off_track_mm = std::atof(next().c_str());
+			else if (a == "--set") {
+				std::string kv = next();
+				size_t eq = kv.find('=');
+				if (eq != std::string::npos)
+					opt.params[kv.substr(0, eq)] = std::atof(kv.c_str() + eq + 1);
+			}
+		}
+		char stamp[64];
+		std::snprintf(stamp, sizeof stamp, "worker_%u_%u",
+			static_cast<unsigned>(GetCurrentProcessId()),
+			static_cast<unsigned>(std::rand()));
+		opt.out_dir = (fs::path("runs") / stamp).string();
+
+		TrialResult tr = evaluate_trial_headless(opt);
+
+		std::error_code ec;
+		fs::remove_all(opt.out_dir, ec);
+
+		if (tr.pass) {
+			std::printf("WORKER_RESULT: PASS lap4=%.4f pace=%.4f dist_diff=%.4f max_beta=%.2f weave=%.2f detail=%s\n",
+				tr.lap4_s, tr.pace, tr.dist_diff, tr.max_beta_deg, tr.weave_dps, tr.detail.c_str());
+		} else {
+			std::printf("WORKER_RESULT: FAIL d1=%d ov=%d beta=%.2f lat=%.2f weave=%.2f fail_v=%.2f detail=%s\n",
+				tr.d1_failed ? 1 : 0, tr.was_oversteer ? 1 : 0,
+				tr.max_beta_deg, tr.max_lat_mm, tr.weave_dps, tr.fail_v, tr.detail.c_str());
+		}
+		std::fflush(stdout);
+		return 0;
+	}
 	if (cmd != "run" && cmd != "view") {
 		usage();
 		return 2;
@@ -186,6 +247,10 @@ int main(int argc_in, char** argv_in) {
 			opt.session = true;
 			if (cmd == "view")
 				opt.view = true;
+		} else if (a == "--complex") {
+			opt.complex_track = true;
+		} else if (a == "--hyper") {
+			opt.hyper_track = true;
 		} else if (a == "--tune") {
 			std::string m = next();
 			opt.session = true;
@@ -207,6 +272,8 @@ int main(int argc_in, char** argv_in) {
 			opt.endless_max_fail_pct = std::atof(next().c_str());
 		} else if (a == "--pass-rate" || a == "--success-rate") {
 			opt.endless_max_fail_pct = std::max(1.0, 100.0 - std::atof(next().c_str()));
+		} else if (a == "--jobs" || a == "-j") {
+			opt.jobs = std::max(1, std::atoi(next().c_str()));
 		} else if (a == "--window") {
 			opt.endless_window = std::atoi(next().c_str());
 		} else if (a == "--min-speed" || a == "--speed-floor") {
@@ -264,6 +331,14 @@ int main(int argc_in, char** argv_in) {
 		}
 	}
 
+	if (opt.jobs == 0) {
+		if (opt.tune_mode == 2 && !opt.view) {
+			unsigned hc = std::thread::hardware_concurrency();
+			opt.jobs = (hc > 2) ? std::min(8u, hc - 2) : 1;
+		} else {
+			opt.jobs = 1;
+		}
+	}
 	ScenarioResult res = run_scenario(opt);
 
 	Track track;

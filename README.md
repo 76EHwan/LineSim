@@ -48,7 +48,7 @@ build.bat
 | 하고 싶은 것 | 방법 |
 |---|---|
 | 빌드 | `Ctrl+Shift+B` |
-| **백그라운드 AI 게인 튜닝 (창 없이)** | `build\Release\linesim.exe run --tune A --track tracks/practice_board.json --robot robots/full.json --set base_mps=2.1 --trials 100` |
+| **백그라운드 AI 게인 튜닝 (창 없이)** | `build\Release\linesim.exe run --tune A --track tracks/practice_board.json --robot robots/full.json --set base_mps=2.1 --trials 50` |
 | **백그라운드 엔드리스 속도 튜닝** | `build\Release\linesim.exe run --tune E --robot robots/full.json --set base_mps=2.05 --min-speed 1.50 --fail-rate 20` |
 | **계속 주행하며 튜닝 (3D 창)** | `F5` (무작위 코스) 또는 작업 **LineSim: 3D session** → 코스 선택(`random` / figure8 / oval) → 기본 속도, 최고 속도, 가속도, 감속도 입력 |
 | 시나리오 그대로 보기 | 작업 **LineSim: 3D scenario** |
@@ -69,11 +69,11 @@ build\Release\linesim.exe view --session --track random --robot robots/full.json
 
 | 키 | 동작 |
 |---|---|
-| `1` `2` `3` `4` | 해당 회차 주행 (`Drive_First` … `Drive_Fourth`). 로봇은 출발선에 자동으로 놓입니다 |
+| `1` `2` `3` `4` `5` | 해당 회차 주행 (`Drive_First` … `Drive_Fifth`). 로봇은 출발선에 자동으로 놓입니다 |
 | `↑` `↓` / `←` `→` | 파라미터 선택 / 변경 (`Shift` = 10배, 속도는 0.01 m/s 단위): 기본·최고 속도, 가·감속, steer kp/kd, pos atten, target shift, pit-in. 다음 주행부터 적용. steer kd는 초 단위로 보이고 괄호 안이 로봇 메뉴에 넣을 값(`steer_gain_d` = kd ÷ 0.0005) |
 | `Enter` → 숫자 → `Enter` | 선택한 파라미터 값을 직접 입력 (예: steer kp `18.5`). `Esc` 취소, `Backspace` 지우기. 입력 중에는 숫자·`-` 키가 주행·배속으로 쓰이지 않음 |
-| `A` | **3-코스 AI 게인 오토튜닝 (`A` 키)**: 3개 코스(`c1, c2, c3`)에서 1회차 → 4회차를 돌리며 최고 랩타임 및 조향/곡선 게인을 베이지안(GP)으로 탐색합니다. 다시 `A`(또는 `X`)를 누르면 종료 |
-| `E` | **Endless 한계 속도 검증 + 5단계 AI 게인 자가치유 (`E` 키)**: 매 시도마다 새로운 무작위 코스를 생성해 1회차 → 4회차를 주행합니다. 실패 시 해당 코스에서 5단계 AI 게인 자가치유 후보를 먼저 시도하고, 50개 맵 윈도우 실패율 기준(기본 10% 이하)과 최저 속도 하한선(`--min-speed`)을 적용해 기본 속도를 자동 조절합니다 |
+| `A` | **3-코스 AI 게인 오토튜닝 (`A` 키)**: 3개 코스(`c1, c2, c3`)에서 1회차 → 3회차를 돌리며 최고 랩타임 및 조향/곡선 게인을 베이지안(GP)으로 탐색합니다. 다시 `A`(또는 `X`)를 누르면 종료 |
+| `E` | **Endless 한계 속도 검증 + 5단계 AI 게인 자가치유 (`E` 키)**: 매 시도마다 새로운 무작위 코스를 생성해 1회차 → 3회차를 주행합니다. 실패 시 해당 코스에서 5단계 AI 게인 자가치유 후보를 먼저 시도하고, 50개 맵 윈도우 실패율 기준(기본 10% 이하)과 최저 속도 하한선(`--min-speed`)을 적용해 기본 속도를 자동 조절합니다 |
 | `N` | 무작위 코스 새로 생성 (`runs/latest/random_<seed>.json`에 저장). 새 코스에서는 1회차부터 |
 | `X` | 주행 중인 로봇 들어 올리기 (펌웨어가 Line Lost로 종료) |
 | `R` | 로봇을 출발선으로 |
@@ -133,106 +133,74 @@ python tools/compare_logs.py "real_logs/주행 로그" "real_logs/주행 로그/
 - `compare_logs.py`: 실제 로그의 파라미터 조합마다 시뮬레이터로 1회차를 돌려, 마커를 처음 틀리는 위치와 구간 거리를 비교. 로그를 남긴 시점의 펌웨어와 `firmware/` 버전이 다르면 결과도 달라집니다.
 - `oscillation.py`: 직선 구간의 흔들림(yaw 진폭·주파수). 시뮬레이터 결과나 Vibe Test 로그(`vib_log_*.csv`)를 그대로 넣으면 됩니다.
 
-## 자동 튜닝: 기본 속도 + 조향 PD
+## 🎯 자동 튜닝 (Auto-Tuning)
 
-1회차는 학습 주행이라 **데이터가 깨끗해야** 하고(마커 전부 정확, 흔들림·미끄러짐 적게), 2회차가 그 데이터로 직선에서 가속합니다. 그래서 두 도구 모두 **1회차 → 2회차를 한 번의 시도**로 평가합니다.
+1회차(학습 주행)와 3회차(본 주행: `Drive_Third`)를 연속 평가하여 탈선 없이 최고 랩타임과 최적 조향 파라미터를 찾아냅니다. 최적 파라미터가 갱신될 때마다 `firmware/Main/Src/drive.c`에 즉시 자동 저장되며, 3D 뷰어(`linesim.exe`) 기동 시 동적으로 자동 로드됩니다.
 
-- **통과**: 1·2회차 모두 완주, 라인에서 70 mm 이내, 마커 전부 정확.
-- **점수**(낮을수록 좋음): 5 × 2회차 랩타임[s] + 1회차 깨끗함(라인 오차 rms[mm] + 흔들림[dps]/20 + 바퀴 미끄러짐[%]/2).
-- 2회차의 최고 속도·가감속은 패널(또는 `--set max_mps=… accel=… decel=…`) 값 그대로이고, 찾는 것은 **기본 속도(곡선·1회차 속도)와 steer kp/kd**입니다.
-- **모델 오차 스트레스**: 조향 지연(`sensor_delay` 7 ms)은 자이로 로그 하나로 맞춘 값이라 실제는 더 클 수 있습니다. 통과한 게인은 지연 ×1.4(≈10 ms)에서 1회차를 다시 돌려 라인을 지키고 흔들림이 1.5배 + 10 dps 이내여야 하고, ×1.85(≈13 ms)에서도 라인을 지켜야 합니다. 못 버티면 "불안정"으로 칩니다.
-- 안정 경계 바로 옆 값은 피합니다(kp·kd 한 칸 옆이 라인을 놓치거나 불안정하면 선택하지 않음).
-- 최고 점수의 1 % 안(2회차 약 0.1 s)이면 **더 순한 게인**(낮은 kp, 그다음 낮은 kd)을 고릅니다. 큰 kd는 실제 센서 위치의 계단형 변화를 키우는데 시뮬레이터는 이를 부드럽게 봅니다.
+### 1. 모드 한눈에 보기
 
-**3D 세션 (`A` 키, 끝없이)**: 연습판 또는 원하는 코스를 열고(`--track tracks/all_elements.json` 등) `A`를 누르면 AI 베이지안 가우스 과정(GP) 기반 오토튜너가 가동됩니다.
+| 모드 | 목적 | 특징 및 동작 방식 |
+|---|---|---|
+| **E (Endless, 추천)** | **최적 속도 & 안정성 탐색 (SpeedOptimizer)** | 무작위 ZETIN 코스에서 1회차 + 3회차 주행을 반복하며 최적 속도와 조향 게인을 동시 탐색.<br>속도 상승에 따른 타이어 슬립(Slip %)과 랩타임 상관관계를 분석하여, 슬립 없이 가장 빠른 랩타임을 기록하는 **스위트스팟 최적 속도(Optimal Speed)**를 자동 수렴.<br>탈선 발생 시 **실패한 그 맵에서 5단계 AI 게인 자가치유(Auto-Heal)** 수행 |
+| **A (AI Bayes)** | **지정 속도 최적 게인 탐색** | 설정한 속도를 고정한 채 6개 제어 파라미터(`kp`, `kd`, `lat_acc_max`, `brake_margin`, 선행 조향 등)를 가우시안 프로세스(GP) 베이지안 최적화로 탐색 |
+| **다중 코어 (Python)** | **10코어 동시 병렬 전수 탐색** | Python 프로세스 풀링으로 CPU의 10개 코어를 동시 풀가동하여 격자/한계 속도를 초고속 병렬 탐색 (`--jobs 10`) |
 
-- **3개 코스 동시 평가 (오버피팅 방지)**:
-  - 현재 코스(c1)와 무작위 생성 코스 2개(c2, c3)에서 후보 파라미터마다 1회차(탐색) → 4회차(고속 주행)를 실행합니다.
-  - 특정 코스에만 맞춰지는 과적합(Overfitting)을 방지하기 위해, **3개 코스 모두에서 이전 4차 랩타임을 단축(갱신)했을 때만** 새로운 BEST로 승인하고 게인을 변경합니다.
-- **인코스 파고들기 및 최단 이동 거리 가중치**:
-  - 주행 거리 단축 비율(`dist_diff`, `LINESIM_DIST_WEIGHT`)을 평가 점수에 반영합니다.
-  - 곡선에서 코너 안쪽을 파고드는 선행 조향(`target_shift`, `target_curve_gain`)과 흔들림 없는 최단 주행선을 타는 후보에 높은 점수를 부여합니다.
-- **최소 속도 하한선 정책 (속도 저하 방지)**:
-  - 튜닝 시작 시 사용자가 설정한 기본 속도(예: 2.04 m/s) 이하로는 속도를 임의로 떨어뜨리지 않습니다.
-  - 통과하지 못하더라도 속도를 포기하고 내리는 대신, 해당 기본 속도를 유지한 채 게인 조합(`AI-AntiOver`, `AI-Exploit`, `AI-Explore`)을 계속 탐색하여 완주할 수 있는 파라미터를 찾아냅니다.
-- **후보/회차 태그 표시**:
-  - 주행 시점마다 `#[후보번호]-[회차]` (예: `#15-1`, `#15-2`) 형식으로 HUD 및 로그에 명확히 표기됩니다.
-- **스트레스 주행 검증**:
-  - 3개 코스를 모두 갱신한 우수 후보는 조향 지연 스트레스(×1.4, ×1.85) 환경에서 추가 검증을 통과해야 최종 BEST로 확정 및 자동 저장(`firmware/Main/Src/drive.c`)됩니다.
+---
 
-**3D 세션 (`E` 키, Endless 한계 속도 검증 + 5단계 AI 게인 자가치유)**:
-- **무한 랜덤 맵 1차 → 4차 주행**: 매 시도마다 수식 기반 초고속 생성기로 새로운 ZETIN 코스를 만들고 1회차 → 4회차를 주행합니다.
-- **실패 맵 5단계 AI 게인 자가치유 (Auto-Heal)**: 특정 맵에서 1차 또는 4차 주행이 실패하면 기본 속도를 바로 낮추지 않고, **실패한 바로 그 맵에서 5단계 AI 게인 보정 후보(`Heal-Damp`, `Heal-Track`, `Heal-AI`, `Heal-Brake`, `Heal-Apex`)를 먼저 시도**합니다. 게인 보정으로 통과하면 속도를 깎지 않고 새로운 게인을 채택합니다.
-- **최저 속도 하한선 보호 및 윈도우 실패율 검증**: 단 1회 우연한 실패로는 감속하지 않으며, 2회 연속 실패나 윈도우 실패율 허용치(기본 `<= 10%`, `--fail-rate`로 변경 가능) 초과 시에만 기본 속도를 `-0.01 m/s` 낮춥니다(하한선 `--min-speed` 이하로는 절대 하락하지 않음). 시작 속도보다 낮아진 상태에서는 **10맵 연속 통과마다 `+0.01 m/s`씩 빠르게 시작 속도로 복구**하며, 평가 윈도우(기본 50맵, `--window`) 통과 시 `+0.01 m/s`씩 한계 속도를 높여 나갑니다.
+### 2. 추천 실행 명령어
 
-### 🚀 백그라운드 고속 오토튜닝 (창 없이 터미널 실행, C++ 네이티브)
-
-3D 그래픽 렌더링 없이 순수 물리 시뮬레이션 연산만으로 초고속(실제 시간 대비 수십~수백 배속) 백그라운드 튜닝을 실행합니다.
-
-#### 1. AI 베이지안 게인 오토튜닝 (`run --tune A`)
-설정 속도(예: `base_mps=2.1`)를 임의로 낮추지 않고 고정한 채, 6가지 핵심 제어 파라미터(`steer_kp`, `steer_kd`, `lat_acc_max`, `brake_margin_m`, `target_shift_val`, `target_curve_gain`)를 가우시안 프로세스(GP) 기반 베이지안 최적화로 동시 탐색합니다. 신기록 달성 시 `firmware/Main/Src/drive.c`에 즉시 자동 저장됩니다.
-
+#### ⚡ 백그라운드 초고속 실행 (C++ 네이티브, 3D 창 없음)
 ```bash
-# [추천] 100회 시도 후 최적 파라미터 요약 출력 및 자동 종료 (--trials 100)
-build\Release\linesim.exe run --tune A --track tracks\practice_board.json --robot robots\full.json --set base_mps=2.1 --trials 100
+# [추천] Endless 한계 속도 탐색 (기본속도 2.05m/s 시작, 하한선 1.50m/s, 실패율 <=20%, 15맵 단위 판정)
+build\Release\linesim.exe run --tune E --robot robots/full.json --set base_mps=2.2 --min-speed 2.0 --fail-rate 10 --window 50
 
-# 무제한 탐색 (원하는 만큼 돌리다가 Ctrl+C 누르면 최적 게인 요약 출력 및 drive.c 저장 후 안전 종료)
-build\Release\linesim.exe run --tune A --track tracks\practice_board.json --robot robots\full.json --set base_mps=2.1
+# AI 베이지안 게인 100회 집중 탐색 후 요약 출력 및 자동 종료 (--trials 100)
+build\Release\linesim.exe run --tune A --track tracks/practice_board.json --robot robots/full.json --set base_mps=2.1 --trials 100
 ```
 
-#### 2. Endless 속도 한계 검증 튜닝 (`run --tune E`)
-매 시도마다 새로운 무작위 ZETIN 코스를 실시간 생성하여 1차(탐색) → 4차(최고속) 주행을 검증합니다. 실패 시 해당 코스에서 5단계 AI 게인 자가치유(`Heal-Damp`, `Heal-Track`, `Heal-AI`, `Heal-Brake`, `Heal-Apex`)를 먼저 시도하고, 50개 맵 평가 윈도우에서 설정된 실패율(기본 10% 이하) 달성 시 `base_mps`를 자동으로 상향(+0.01 m/s) 조정하며 한계 속도를 확장합니다.
-- **최저 속도 하한선 보호 (`--min-speed`)**: 실패가 누적되더라도 속도가 바닥으로 추락하지 않도록 하한선(지정하지 않으면 `시작 속도 - 0.20 m/s`) 이하로는 절대 내려가지 않으며, 하한선 도달 시 속도를 고정하고 게인 자가치유에 집중합니다.
-- **안정적 감속**: 단 1번 맵에서 튕겼다고 바로 감속되지 않고, 연속 2회 실패나 윈도우 실패율 기준 초과 시에만 안전하게 감속 조절됩니다.
-
+#### 🚀 10개 코어 풀가동 병렬 실행 (Python, 8~10배 가속)
 ```bash
-# 기본 실행: 50개 맵 윈도우 평가, 실패율 <=10% 검증 시 속도 상향 (Ctrl+C로 안전 종료)
-build\Release\linesim.exe run --tune E --robot robots\full.json --set base_mps=2.1
+# 10개 CPU 코어를 100% 동시 활용하는 적응형 최적 속도 Endless 탐색 (1회차 + 3회차 평가, drive.c 자동 반영)
+tools\.venv\Scripts\python.exe tools/autotune.py 2.2 --robot robots/full.json --endless --jobs 10 --drives 1,3 --apply
 
-# 최저 속도 하한선(예: 1.50 m/s) 및 실패율 허용치(예: 20%) 지정 실행
-build\Release\linesim.exe run --tune E --robot robots\full.json --set base_mps=2.05 --min-speed 1.50 --fail-rate 20
+# 통과 가능한 최고 기본 속도 한계 탐색
+tools\.venv\Scripts\python.exe tools/autotune.py 1.6 --robot robots/full.json --max-speed --jobs 10 --drives 1,3
 ```
 
 > [!TIP]
-> **종료 및 결과 확인 방법**: 터미널에서 언제든지 `Ctrl + C`를 누르면 현재 주행을 안전하게 중단하고, 그동안 찾은 최종 1위 파라미터 세트를 요약 출력한 뒤 `firmware/Main/Src/drive.c`에 저장하고 정상 종료합니다.
+> **적응형 최적 속도(SpeedOptimizer) 알고리즘**:
+> 무작정 속도를 올리면 타이어 슬립율(Slip %)이 급증하고 코너를 크게 돌아(원심가속도 $a_{lat}=v^2/R$) 랩타임이 오히려 2~3초 이상 느려집니다. Endless 튜닝은 **속도별 슬립율 페널티 + 3차 랩타임 + 라인 정밀도**를 복합 평가하여, 가속($v_{opt} + 0.03$)과 감속($v_{opt} - 0.03$) 탐색을 통해 가장 안정적이고 빠른 스위트스팟 최적 속도를 찾아냅니다. 결과는 `runs/tune/endless/speed_curve.csv`에 실시간 누적 기록됩니다.
 
-### 🎮 3D 뷰어 세션 오토튜닝 (화면을 보며 실행)
-
+#### 🎮 3D 화면을 보며 실행 (GUI 뷰어)
 ```bash
-# 3D 창에서 AI 게인 오토튜닝 바로 시작 (키보드 A 키와 동일)
-build\Release\linesim.exe view --tune A --track tracks\practice_board.json --robot robots\full.json --set base_mps=2.1
-
-# 3D 창에서 Endless 무한 맵 검증 바로 시작 (키보드 E 키와 동일)
-build\Release\linesim.exe view --tune E --robot robots\full.json --set base_mps=2.1
+# 3D 뷰어에서 Endless(E) 또는 AI 게인(A) 바로 시작 (주행 중 키보드 E 또는 A 키로도 토글 가능)
+build\Release\linesim.exe view --tune E --robot robots/full.json --set base_mps=2.05
+build\Release\linesim.exe view --tune A --track tracks/practice_board.json --robot robots/full.json --set base_mps=2.1
 ```
 
-### 🐍 구형 Python 격자 탐색 (참고용)
+> [!TIP]
+> **안전 종료 및 결과 확인**: 언제든지 터미널에서 `Ctrl + C`를 누르면 현재 주행을 안전하게 중단하고, 지금까지 찾은 최종 BEST 파라미터를 요약 출력한 뒤 `firmware/Main/Src/drive.c`에 영구 저장하고 종료합니다.
 
-```bash
-# 기본 속도 2.0 m/s에서 1회 탐색
-tools\.venv\Scripts\python.exe tools\autotune.py 2.0
+---
 
-# 3시간 동안 무작위 맵을 계속 바꾸며 무한 한계 속도 탐색 (--hours N)
-tools\.venv\Scripts\python.exe tools\autotune.py 2.0 --hours 3
+### 3. 주요 튜닝 옵션
 
-# 중단(Ctrl+C)할 때까지 무제한 엔드리스 탐색 (--endless)
-tools\.venv\Scripts\python.exe tools\autotune.py 2.0 --endless
+| 옵션 | 설명 | 기본값 |
+|---|---|---|
+| `--set base_mps=V` | 시작 기본 속도 (곡선 및 1회차 속도) [m/s] | `2.1` |
+| `--drives N,M` | 평가에 사용할 주행 회차 (기본값: `1,3` - 1회차 학습 주행 + 3회차 본 주행) | `1,3` |
+| `--apply` | (`autotune.py`) 최적 속도 및 게인 갱신 시 `firmware/Main/Src/drive.c`에 영구 자동 저장 | `False` |
+| `--min-speed V` | (`--tune E`) 최저 속도 하한선 [m/s] (연속 실패 시에도 이 속도 밑으로 내려가지 않음) | `시작 속도 - 0.2` |
+| `--fail-rate PCT` | (`--tune E`) 속도 상향 검증 시 허용할 최대 실패율 [%] (예: `20` = 완주율 80% 이상이면 속도 UP) | `10` |
+| `--window N` | (`--tune E`) 판정 윈도우 맵 개수 (빠른 증속 주기를 원할 경우 `15~20` 추천) | `50` |
+| `--trials N` | (`--tune A`) 평가할 후보 파라미터 시도 횟수 (도달 시 자동 종료) | `무제한` |
+| `--jobs N` | (`autotune.py`) 동시 실행할 병렬 CPU 코어 수 | `CPU 코어 수 - 1` |
 
-# 통과 가능한 최고 기본 속도 한계 탐색
-tools\.venv\Scripts\python.exe tools\autotune.py 1.6 --max-speed
-```
-
-VS Code: **Run Task → LineSim: Auto-tune steering gains (target speed)**. 코스는 `tracks/practice_board.json`이 있으면 그것, 없으면 무작위 코스 4개(고정 시드), `--track`으로 지정 가능. 기본적으로 실전 결승 주행인 **1회차 → 4회차(`--drives 1,4`)**를 평가하며, 2회차 주행으로 평가하려면 `--drives 1,2`를 지정합니다. `--hours N`이나 `--endless`를 지정하면 매 라운드 새로운 무작위 ZETIN 코스를 만들어 과적합 없이 최고 속도를 올리며 최적 게인을 찾아 `firmware/Main/Src/drive.c`에 즉시 자동 저장합니다. kp 8–40 × kd 0–0.5 s(104조합)를 11개씩 병렬로 돌립니다. 결과: `runs/tune/endless/best.json`, `runs/tune/<속도>/result.txt`, `runs/tune/max_speed.txt`.
-
-**steer kd 단위**: 펌웨어의 `steer_pid`는 CMSIS `arm_pid_f32`이고 조향 주기(TIM14, `Core/Src/tim.c`에서 읽은 500 µs)마다 한 번 불립니다. Kd는 호출 사이 오차 변화에 곱해지므로 초 단위 kd를 쓰려면 **로봇 값 = kd ÷ 0.0005**(예: 0.3 s → 600)입니다. 시뮬레이터 화면과 도구는 초 단위로 보여주고 로봇 값을 함께 적습니다(`--set steer_kd_s=0.3`, 펌웨어 값 그대로는 `--set steer_kd=600`). 지금까지 쓰던 kd 0.2–1.3은 0.0001–0.00065 s라 미분이 거의 없습니다.
-
-**접지 한계 감속 · 캐스케이드 조향** (펌웨어 브랜치 `feat/cascade-steer`): 자이로를 1.66 kHz로 바꾸고 1 ms마다 읽습니다(원래 104 Hz, 10 ms).
-
-- `lat_acc_max` [m/s²]: 속도 × 자이로 요레이트(= 횡가속도)가 이 값을 넘으면 그만큼 감속(빨리 내리고 약 0.1 s에 걸쳐 회복). 곡선을 미끄러지지 않고 접지 한계 속도로 돌아 1회차 데이터(마커, 엔코더 거리)가 깨끗해집니다. 연습판 시뮬레이션: 기본 속도 2.4 m/s에서 1·2회차 통과 0/3 → 3/3(`lat_acc_max` 12), 1회차 미끄러짐 35 % → 9 %.
-- `yaw_kp`, `yaw_ki`: 라인 PD 출력(곡률)을 목표 요레이트(속도 × 곡률)로 바꾸고 자이로로 추종하는 안쪽 루프. 0 / 0이면 기존 PD와 같습니다. 시뮬레이션에서는 kp 33 / kd 0의 직선 진동을 `yaw_kp` 2로 없애지만(kd와 같은 효과), 4 이상이나 적분을 넣으면 불안정하고, 마커 인식은 개선하지 못했습니다.
-- 로봇 메뉴: `Yaw KP`, `Yaw KI`, `Lat Acc Max`. 시뮬레이터: `--set yaw_kp=… yaw_ki=… lat_acc_max=…`, 세션 패널.
-- 자동 튜닝에 축으로 추가: `--lat 10,12,14,16`. 자동 튜닝은 접지 스트레스도 봅니다(타이어 마찰 ×0.85에서도 1회차가 마커까지 맞아야 통과). 실제 마찰계수를 정확히 모르기 때문입니다.
-- 실제 로봇에 넣기 전: 왼쪽으로 돌릴 때 `Gyro_Z`가 +인지(부호), 1 ms I2C DMA 읽기가 매번 끝나는지 확인하세요.
+> [!NOTE]
+> **핵심 파라미터 단위 및 접지 제어**:
+> - **steer kd 단위**: 펌웨어의 `steer_pid`는 CMSIS `arm_pid_f32` (TIM14, 500 µs 주기)입니다. 초(s) 단위 kd를 쓰려면 **로봇 펌웨어 값 = 초(s) 단위 kd × 2000**입니다. (예: `0.3s` → `600`).
+> - **접지 한계 감속 (`lat_acc_max`)**: 횡가속도($v \times \omega$)가 이 값을 넘으면 속도를 일시적으로 줄여 곡선 탈선을 방지합니다. (무흡착 기준 `11.0 ~ 13.0 m/s²` 권장).
+> - **3D 뷰어 동기화**: `linesim.exe` 기동 시 디스크의 `firmware/Main/Src/drive.c`를 파싱하여 최신 게인을 자동으로 불러오므로, 오토튠으로 저장된 최적 파라미터가 3D 뷰어에 그대로 반영됩니다.
 
 ## 실행
 

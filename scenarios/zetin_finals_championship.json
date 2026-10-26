@@ -1,0 +1,7 @@
+{
+  "track": "../tracks/zetin_finals_championship.json",
+  "robot": "../robots/full.json",
+  "drives": [1, 3],
+  "seed": 1,
+  "max_drive_time": 120
+}

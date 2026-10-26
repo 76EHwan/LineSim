@@ -87,6 +87,7 @@ void fwb_drive(int n) {
 	case 2: Drive_Second(); break;
 	case 3: Drive_Third();  break;
 	case 4: Drive_Fourth(); break;
+	case 5: Drive_Fifth();  break;
 	default: break;
 	}
 }

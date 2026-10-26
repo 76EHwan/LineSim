@@ -504,8 +504,11 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 	auto rand_deg = [&](int max_steps) { return 45 * (1 + pick(max_steps)); };   // 45 .. 45*max_steps
 	const double R = kR, start_len = 1.0, goal_s = 0.2, start_s = 0.65;
 	const double bw = opt.board_w - 0.2, bh = opt.board_h - 0.2;
-	const double target = uni(opt.min_length, opt.max_length);
-	const int want_cross = opt.crossings >= 0 ? opt.crossings : std::max(opt.min_crossings, 1 + pick(3));
+	const double target = opt.complex_mode
+		? uni(std::max(opt.min_length, 65.0), std::max(opt.max_length, 85.0))
+		: uni(opt.min_length, opt.max_length);
+	const int default_want_cross = opt.complex_mode ? std::max(2, 2 + pick(2)) : std::max(opt.min_crossings, 1 + pick(2));
+	const int want_cross = opt.crossings >= 0 ? opt.crossings : default_want_cross;
 
 	auto full_check = [&](const Pieces& ps, Track* t) {
 		std::string e;
@@ -532,10 +535,10 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 			{false, R + u + h, 0}, {true, 0, 90}, {false, z, 0}, {true, 0, 90}, {false, h - R, 0}, {true, 0, -90}}, sgn());
 	};
 	auto detour = [&]() -> Pieces {
-		const int kind = pick(12);
+		const int kind = pick(opt.complex_mode ? 16 : 12);
 		const int s = sgn();
-		if (kind == 0) {   // snake of 1 or 3 lobes of 270 deg
-			int lobes = 1 + 2 * pick(2);
+		if (kind == 0) {   // snake of 1, 3, or 5 lobes of 270 deg
+			int lobes = opt.complex_mode ? (1 + 2 * pick(3)) : (1 + 2 * pick(2));
 			Pieces m = {{true, 0, 135 * s}};
 			for (int k = 0; k < lobes; k++)
 				m.push_back({true, 0, (k % 2 ? 270 : -270) * s});
@@ -562,6 +565,26 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 		if (kind == 7 || kind == 8) {   // 45 deg hump (compact span, good diagonal straight)
 			double a = len_q(0.25, 1.2);
 			return mirror({{true, 0, 45}, {false, a, 0}, {true, 0, -90}, {false, a, 0}, {true, 0, 45}}, s);
+		}
+		if (kind == 9 && opt.complex_mode) {   // Quad chicane / slalom cascade: 4 alternating 45 deg bends
+			double a = len_q(0.2, 0.45), b = len_q(0.2, 0.55), c = len_q(0.2, 0.4);
+			return mirror({
+				{true, 0, 45}, {false, a, 0}, {true, 0, -45}, {false, b, 0}, {true, 0, -45}, {false, a, 0}, {true, 0, 45},
+				{false, c, 0},
+				{true, 0, -45}, {false, a, 0}, {true, 0, 45}, {false, b, 0}, {true, 0, 45}, {false, a, 0}, {true, 0, -45}
+			}, s);
+		}
+		if (kind == 10 && opt.complex_mode) {  // Omega hairpin bulb (135 -> -270 -> 135)
+			double a = len_q(0.2, 0.4);
+			return mirror({{true, 0, 135}, {false, a, 0}, {true, 0, -270}, {false, a, 0}, {true, 0, 135}}, s);
+		}
+		if (kind == 11 && opt.complex_mode) {  // Double 180 deg hairpin weave
+			double d1 = len_q(0.35, 1.2), d2 = len_q(0.35, 1.2), c = len_q(0.2, 0.4);
+			return mirror({
+				{true, 0, 90}, {false, d1, 0}, {true, 0, -180}, {false, d1, 0}, {true, 0, 90},
+				{false, c, 0},
+				{true, 0, -90}, {false, d2, 0}, {true, 0, 180}, {false, d2, 0}, {true, 0, -90}
+			}, s);
 		}
 		// random mirror-symmetric shape: half H, a middle piece, H backwards
 		Pieces h;
@@ -607,16 +630,68 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 
 	// ---- base loops; piece 0 is the end-mark straight and is never touched
 	auto base = [&]() -> Pieces {
-		double W = round_to(uni(0.85, 0.92) * bw, 0.05), H = round_to(uni(0.68, 0.80) * bh, 0.05);
+		double W = opt.complex_mode ? round_to(uni(0.88, 0.93) * bw, 0.05) : round_to(uni(0.85, 0.92) * bw, 0.05);
+		double H = opt.complex_mode ? round_to(uni(0.74, 0.82) * bh, 0.05) : round_to(uni(0.68, 0.80) * bh, 0.05);
 		const double top_total = W - 2 * R;
-		const double main_len = std::min(1.2, top_total * 0.3);
+		if (opt.complex_mode) {
+			// Championship Infield Serpentine Base with 2 Guaranteed Crossing-Protected Long Straights:
+			// - Piece 0: short start straight (1.2m, not main_straight). No launch at start!
+			// - Sector 1 technical warmup turns away from start into infield.
+			// - Long Straight 1 (6.6m, East, Y=1.80) is in the middle of the lap, marked main_straight = true.
+			//   Crossed at 90 deg by Vertical Corridor 1 (X=3.00)!
+			// - Sector 2 central/east infield connects to Long Straight 2.
+			// - Long Straight 2 (6.85m, West, Y=4.20) is in the middle of the lap, marked main_straight = true.
+			//   Crossed at 90 deg by Vertical Corridor 2 (X=2.00)!
+			// - Sector 3 technical infield connects back to Start line with outside perimeter return.
+			// Both long straights have guaranteed 90 deg crossings and remain unbroken.
+			double dw = round_to(uni(-0.25, 0.25), 0.05);
+			double str1_len = 6.60 + dw;
+			double str2_len = 6.85 + dw;
+			return {
+				{false, 1.20, 0, false},     // 0: start straight
+				{true,  0,    90, false},    // 1
+				{false, 0.60, 0, false},     // 2
+				{true,  0,    90, false},    // 3
+				{false, 1.50, 0, false},     // 4
+				{true,  0,   -90, false},    // 5
+				{false, 0.20, 0, false},     // 6
+				{true,  0,   -90, false},    // 7
+				{false, str1_len, 0, true},  // 8: LONG STRAIGHT 1 (protected, crossed at 90 deg by #14)
+				{true,  0,    90, false},    // 9
+				{false, 0.95, 0, false},     // 10
+				{true,  0,    90, false},    // 11
+				{false, 3.05 + dw, 0, false},// 12
+				{true,  0,    90, false},    // 13
+				{false, 2.40, 0, false},     // 14: VERTICAL CORRIDOR 1 (crosses #8 at 90 deg)
+				{true,  0,    90, false},    // 15
+				{false, 3.30 + dw, 0, false},// 16
+				{true,  0,    90, false},    // 17
+				{false, 3.35, 0, false},     // 18
+				{true,  0,    90, false},    // 19
+				{false, str2_len, 0, true},  // 20: LONG STRAIGHT 2 (protected, crossed at 90 deg by #26)
+				{true,  0,   -90, false},    // 21
+				{false, 0.90, 0, false},     // 22
+				{true,  0,   -90, false},    // 23
+				{false, 2.05, 0, false},     // 24
+				{true,  0,   -90, false},    // 25
+				{false, 2.75, 0, false},     // 26: VERTICAL CORRIDOR 2 (crosses #20 at 90 deg)
+				{true,  0,   -90, false},    // 27
+				{false, 2.35, 0, false},     // 28: extended to outside corridor
+				{true,  0,    90, false},    // 29
+				{false, 1.85, 0, false},     // 30: outside return
+				{true,  0,    90, false},    // 31
+				{false, 0.60, 0, false}      // 32: finish straight connector
+			};
+		}
+		const double main_len = std::min(1.4, top_total * 0.35);
 		return {{false, start_len, 0}, {false, W - 2 * R - start_len, 0}, {true, 0, 90}, {false, H - 2 * R, 0},
 			{true, 0, 90}, {false, main_len, 0, true}, {false, top_total - main_len, 0},
 			{true, 0, 90}, {false, H - 2 * R, 0}, {true, 0, 90}};
 	};
 
 	int checks = 0;
-	for (int attempt = 1; attempt <= 60; attempt++) {
+	const int max_attempts = opt.complex_mode ? 250 : 60;
+	for (int attempt = 1; attempt <= max_attempts; attempt++) {
 		Pieces ps = base();
 		if (ps.empty())
 			continue;
@@ -627,7 +702,8 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 			continue;
 		if (opt.crossings >= 0 && crossings > opt.crossings)
 			continue;
-		while ((cur_len < target || crossings < want_cross) && fails < 800) {
+		const int max_fails = opt.complex_mode ? 2500 : 800;
+		while ((cur_len < target || crossings < want_cross) && fails < max_fails) {
 			std::vector<int> hd(ps.size() + 1, 0);
 			for (size_t i = 0; i < ps.size(); i++)
 				hd[i + 1] = hd[i] + (ps[i].arc ? ps[i].deg : 0);
@@ -636,22 +712,40 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 			// Place crossings early while base straights are still long and uncut
 			const bool force_cross = (crossings < want_cross) && (fails < 120 || uni(0, 1) < 0.75);
 			if (force_cross || r < 0.65) {
-				const bool need_cross = force_cross || (crossings < want_cross && (opt.crossings >= 0 || uni(0, 1) < 0.5));
+				bool need_cross = force_cross || (crossings < want_cross && (opt.crossings >= 0 || uni(0, 1) < 0.5));
 				Pieces m_base = need_cross ? cross_loop() : detour();
 				double span;
 				if (m_base.empty() || !module_span(m_base, &span) || span < 0.25 || (!need_cross && !module_clear(m_base, span))) {
 					fails++;
 					continue;
 				}
-				const double before_min = need_cross ? m_base[3].len + R + 0.55 : 0.2;
+				double before_min = need_cross ? m_base[3].len + R + 0.55 : 0.2;
 				std::vector<int> cand;
 				for (size_t i = 1; i < ps.size(); i++) {
 					if (!ps[i].arc && !ps[i].main_straight && ps[i].len >= before_min + span + 0.2)
 						cand.push_back(static_cast<int>(i));
 				}
 				if (cand.empty()) {
-					fails++;
-					continue;
+					if (need_cross) {
+						need_cross = false;
+						m_base = detour();
+						if (m_base.empty() || !module_span(m_base, &span) || span < 0.25 || !module_clear(m_base, span)) {
+							fails++;
+							continue;
+						}
+						before_min = 0.2;
+						for (size_t i = 1; i < ps.size(); i++) {
+							if (!ps[i].arc && !ps[i].main_straight && ps[i].len >= before_min + span + 0.2)
+								cand.push_back(static_cast<int>(i));
+						}
+						if (cand.empty()) {
+							fails++;
+							continue;
+						}
+					} else {
+						fails++;
+						continue;
+					}
 				}
 				int i = cand[pick(static_cast<int>(cand.size()))];
 				double rem = ps[i].len - span - before_min - 0.2;
@@ -774,9 +868,194 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 
 std::string generate_walk(const TrackGenOptions& opt, std::string* err, int* attempts_out);
 
+std::string generate_hyper_speedway(const TrackGenOptions& opt, std::string* err, int* attempts_out) {
+	const double R = kR;
+	const double goal_s = 0.25, start_s = 0.75;
+	for (int attempt = 1; attempt <= 200; attempt++) {
+		unsigned seed = opt.seed + attempt - 1;
+		std::mt19937 rng(seed);
+		auto uni = [&](double a, double b) { return std::uniform_real_distribution<double>(a, b)(rng); };
+		auto pick = [&](int n) { return std::uniform_int_distribution<int>(0, n - 1)(rng); };
+
+		// 1. Main drag strip length: 34.0 ~ 37.0 m
+		double L_main = round_to(uni(31.0, 34.0), 0.05);
+
+		// Slalom 1 parameters: 2, 3, or 4 stages
+		int s1_stages = 2 + pick(3);
+		double s1_len = round_to(uni(0.35, 0.45), 0.05);
+
+		// Hairpin 1 leg length
+		double hp1_len = round_to(uni(0.70, 1.10), 0.05);
+		double loop_entry = round_to(uni(0.40, 0.55), 0.05);
+
+		// Sector 2 infield variations
+		double c_len = round_to(uni(0.35, 0.50), 0.05);
+		double hp2_len = round_to(uni(1.0, 1.5), 0.05);
+		double hp3_len = round_to(uni(1.0, 1.4), 0.05);
+		double hp4_len = round_to(uni(0.9, 1.3), 0.05);
+
+		std::vector<Piece> segs;
+		// 0: True End-to-End Drag Strip (34~37m)
+		segs.push_back({false, L_main, 0, true});
+
+		// 1-6: Right perimeter boundary
+		segs.push_back({true, 0, 90});
+		segs.push_back({false, 0.50, 0});
+		segs.push_back({true, 0, 90});
+		segs.push_back({false, 0.80, 0});
+		segs.push_back({true, 0, -90});
+		segs.push_back({false, 3.00, 0});
+
+		// 7-15: Sweeping Compound Curve #1 with Crossing #1
+		segs.push_back({true, 0, 45});
+		segs.push_back({false, 0.80, 0});
+		segs.push_back({true, 0, 45});
+		segs.push_back({false, 1.60, 0});
+		// Crossing #1 intersection
+		segs.push_back({false, 1.60, 0});
+		segs.push_back({true, 0, 45});
+		segs.push_back({false, 0.80, 0});
+		segs.push_back({true, 0, -45});
+		segs.push_back({false, 0.60, 0});
+
+		// Slalom chicane sector 1 (net turn = 0)
+		for (int k = 0; k < s1_stages; k++) {
+			int deg1 = (k % 2 == 0) ? 45 : -45;
+			segs.push_back({true, 0, deg1});
+			segs.push_back({false, s1_len, 0});
+			segs.push_back({true, 0, -2 * deg1});
+			segs.push_back({false, s1_len, 0});
+			segs.push_back({true, 0, deg1});
+			segs.push_back({false, 0.30, 0});
+		}
+
+		// Hairpin sector 1 (net turn = 0)
+		segs.push_back({true, 0, 90});
+		segs.push_back({false, hp1_len, 0});
+		segs.push_back({true, 0, -180});
+		segs.push_back({false, hp1_len, 0});
+		segs.push_back({true, 0, 90});
+		segs.push_back({false, 0.60, 0});
+
+		// Loop section (net turn = -270)
+		segs.push_back({true, 0, 90});
+		segs.push_back({false, loop_entry, 0});
+		segs.push_back({true, 0, -270});
+		segs.push_back({false, 0.50, 0});
+		segs.push_back({true, 0, -90});
+		segs.push_back({false, 0.65, 0});
+
+		// Eastbound run to cross Sweeping Curve perpendicularly at 90 deg
+		segs.push_back({true, 0, 90});
+		segs.push_back({false, 6.80, 0});
+		segs.push_back({true, 0, 90});
+		segs.push_back({false, 2.365, 0});
+		segs.push_back({false, 1.185, 0});
+		segs.push_back({true, 0, 90});
+
+		// Sector 2: Infield running West (net turn = 0)
+		segs.push_back({false, 4.50, 0});
+		// Chicane A
+		segs.push_back({true, 0, -45}); segs.push_back({false, c_len, 0});
+		segs.push_back({true, 0, 90});  segs.push_back({false, c_len, 0});
+		segs.push_back({true, 0, -90}); segs.push_back({false, c_len, 0});
+		segs.push_back({true, 0, 90});  segs.push_back({false, c_len, 0});
+		segs.push_back({true, 0, -45}); segs.push_back({false, 0.60, 0});
+		// Hairpin Comb B
+		segs.push_back({true, 0, 90});  segs.push_back({false, hp2_len, 0});
+		segs.push_back({true, 0, -180});segs.push_back({false, hp2_len, 0});
+		segs.push_back({true, 0, 90});  segs.push_back({false, 0.80, 0});
+		// Chicane C
+		segs.push_back({true, 0, 45});  segs.push_back({false, c_len, 0});
+		segs.push_back({true, 0, -90}); segs.push_back({false, c_len, 0});
+		segs.push_back({true, 0, 90});  segs.push_back({false, c_len, 0});
+		segs.push_back({true, 0, -90}); segs.push_back({false, c_len, 0});
+		segs.push_back({true, 0, 45});  segs.push_back({false, 0.60, 0});
+		// Hairpin Comb D
+		segs.push_back({true, 0, -90}); segs.push_back({false, hp3_len, 0});
+		segs.push_back({true, 0, 180}); segs.push_back({false, hp3_len, 0});
+		segs.push_back({true, 0, -90}); segs.push_back({false, 0.80, 0});
+		// Technical E
+		segs.push_back({true, 0, 90});  segs.push_back({false, hp4_len, 0});
+		segs.push_back({true, 0, -180});segs.push_back({false, hp4_len, 0});
+		segs.push_back({true, 0, 90});  segs.push_back({false, 1.00, 0});
+
+		// Adjustable Westbound straight
+		size_t idx_x = segs.size();
+		segs.push_back({false, 1.0, 0});
+
+		// Bottom-left corner
+		segs.push_back({true, 0, 90});
+		size_t idx_y = segs.size();
+		segs.push_back({false, 1.0, 0});
+		segs.push_back({true, 0, -90});
+		segs.push_back({true, 0, 90});
+		segs.push_back({true, 0, 90});
+
+		// Solve 2x2 closure
+		segs[idx_x].len = 0.0;
+		segs[idx_y].len = 0.0;
+
+		double x = 0.0, y = 0.0, th = 0.0;
+		double th_x = 0.0, th_y = 0.0;
+		for (size_t i = 0; i < segs.size(); i++) {
+			if (i == idx_x) th_x = th;
+			if (i == idx_y) th_y = th;
+			if (!segs[i].arc) {
+				x += segs[i].len * std::cos(th);
+				y += segs[i].len * std::sin(th);
+			} else {
+				int turn = segs[i].deg > 0 ? 1 : -1;
+				double rad = std::fabs(segs[i].deg) * kPi / 180.0;
+				double cx = x - turn * R * std::sin(th), cy = y + turn * R * std::cos(th);
+				double phi = turn * rad;
+				double rx = x - cx, ry = y - cy;
+				x = cx + rx * std::cos(phi) - ry * std::sin(phi);
+				y = cy + rx * std::sin(phi) + ry * std::cos(phi);
+				th += phi;
+			}
+		}
+
+		double ex = x;
+		double ey = y;
+		double ux = std::cos(th_x), uy = std::sin(th_x);
+		double vx = std::cos(th_y), vy = std::sin(th_y);
+		double det = ux * vy - uy * vx;
+		if (std::fabs(det) < 1e-4) continue;
+
+		double da = (-ex * vy + ey * vx) / det;
+		double db = (-ey * ux + ex * uy) / det;
+
+		if (da < 0.20 || db < 0.20) continue;
+
+		segs[idx_x].len = std::round(da * 10000.0) / 10000.0;
+		segs[idx_y].len = std::round(db * 10000.0) / 10000.0;
+
+		double end_x, end_y, end_th;
+		walk(segs, &end_x, &end_y, &end_th);
+		double res_err = std::hypot(end_x, end_y);
+		if (res_err > 0.005) continue;
+
+		std::string text = to_json(segs, seed, goal_s, start_s);
+		Track t;
+		std::string e;
+		if (!t.load_text(text, "random", &e)) continue;
+
+		double bw = std::max(opt.board_w, 45.0);
+		double bh = std::max(opt.board_h, 15.0);
+		if (!t.rule_problems(bw - 0.2, bh - 0.2).empty()) continue;
+
+		if (attempts_out) *attempts_out = attempt;
+		return text;
+	}
+	*err = "failed to generate hyper speedway course";
+	return "";
+}
 std::string generate_track(const TrackGenOptions& opt, std::string* err, int* attempts_out) {
+	if (opt.hyper_mode || opt.board_w > 15.0)
+		return generate_hyper_speedway(opt, err, attempts_out);
 	// long courses grow by insertion, short ones come from one random walk
-	if (opt.max_length > 30.0)
+	if (opt.max_length > 30.0 || opt.complex_mode)
 		return generate_grown(opt, err, attempts_out);
 	return generate_walk(opt, err, attempts_out);
 }

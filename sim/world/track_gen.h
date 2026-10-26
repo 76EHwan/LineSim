@@ -5,14 +5,16 @@
 
 struct TrackGenOptions {
 	unsigned seed = 1;
-	// About 3x the length of a qualifying-board course, packed like a final course on a 6.1 x 4.88 m
-	// board. max_length > 30 m: grown from a closed loop by inserting detours and reshaping corners;
-	// else one random walk (e.g. --board 4.88x4.88 --length 8,30 for the qualifying board).
-	double board_w = 6.1, board_h = 4.88;
+	// 1.5x scale of ZETIN championship finals board (6.10 x 4.88 m * 1.5 = 9.15 x 7.32 m).
+	// In complex mode (default for 1.5x finals), generates high-density courses with 2+ crossings,
+	// dense chicane cascades, multi-lobe hairpins, and unbroken ~8m launch straights.
+	double board_w = 9.15, board_h = 7.32;
 	int min_pieces = 14, max_pieces = 28;     // random walk only: pieces before the closing ones
 	int crossings = -1;                       // exact number of crossings, -1 = at least min_crossings
-	int min_crossings = 1;                    // courses always have a crossing unless set to 0
-	double min_length = 35.0, max_length = 55.0;
+	int min_crossings = 2;                    // courses always have at least 2 crossings in complex mode
+	double min_length = 65.0, max_length = 85.0;
+	bool complex_mode = true;                 // enhanced complexity: higher density, multi-crossings, chicane cascades
+	bool hyper_mode = false;                  // hyper speedway: extreme drag strip
 };
 
 // Returns the track JSON (same format as tracks/*.json) or "" with *err set.

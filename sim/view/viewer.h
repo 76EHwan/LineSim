@@ -19,6 +19,7 @@ struct ViewerHud {
 	bool sensor_on[18] = {};
 	double live_beta = 0.0;
 	double live_lat_mm = 0.0;
+	std::string marker_hud;             // 3D HUD 마커 분석 및 복원 정보 카드
 };
 
 class Viewer {
@@ -59,6 +60,24 @@ public:
 	void set_fast_mode(bool fast) { fast_mode_ = fast; }
 	bool fast_mode() const { return fast_mode_; }
 
+	void set_marker_diags(const std::vector<MarkerVisualInfo>& diags) {
+		marker_diags_ = diags;
+		focused_miss_idx_ = -1;
+		for (size_t i = 0; i < marker_diags_.size(); ++i) {
+			if (marker_diags_[i].status >= 2) {
+				focused_miss_idx_ = (int)i;
+				break;
+			}
+		}
+	}
+	void clear_marker_diags() {
+		marker_diags_.clear();
+		focused_miss_idx_ = -1;
+	}
+	const std::vector<MarkerVisualInfo>& marker_diags() const { return marker_diags_; }
+	int focused_miss_idx() const { return focused_miss_idx_; }
+	void jump_to_next_marker_miss();
+
 private:
 	static long long __stdcall wndproc(void* hwnd, unsigned msg, unsigned long long wp, long long lp);
 	long long handle(unsigned msg, unsigned long long wp, long long lp);
@@ -96,4 +115,6 @@ private:
 	void map_cam(void* cam) const;      // top-down track map view
 	double cx_ = 0, cy_ = 0, extent_ = 2;   // track center / size for the top view
 	bool fast_mode_ = false;
+	std::vector<MarkerVisualInfo> marker_diags_;
+	int focused_miss_idx_ = -1;
 };

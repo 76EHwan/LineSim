@@ -57,7 +57,7 @@
     "friction": 0.25e-3,
     "viscous": 2.0e-8,
     "current_tau": 1.3e-4,
-    "voltage_ratio": 0.40,
+    "voltage_ratio": 0.90,
     "drive_lag": 0.0                  // first-order lag on the wheel torque [s] (see sensor_delay)
   }
 }

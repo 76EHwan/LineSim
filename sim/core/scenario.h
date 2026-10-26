@@ -18,6 +18,8 @@ struct Sample {
 	float omega_t[2], omega_m[2], iq_cmd[2];
 	int lost, markers, contact;
 	float beta_deg;         // sideslip angle [deg]
+	uint32_t sensor_state = 0;
+	uint8_t normalized[18] = {};
 };
 
 struct DriveResult {
@@ -55,6 +57,23 @@ struct ScenarioOptions {
 	double endless_max_fail_pct = 10.0; // max allowed fail rate in Endless mode (default 10.0%)
 	int endless_window = 50;          // window size for Endless verification (default 50 maps)
 	double endless_min_speed = 0.0;   // minimum speed floor for Endless mode (default start_v - 0.20 m/s)
+	int jobs = 0;                     // parallel workers (0 = auto / default 8 for headless endless, 1 = single core)
+	bool complex_track = false;       // generate complex courses (multi-crossings, chicane cascades)
+	bool hyper_track = false;         // generate hyper speedway courses (35m+ straight, 10m/s cruise, 30s+ lap time)
+};
+
+struct TrialResult {
+	bool pass = false;
+	bool d1_failed = false;
+	bool was_oversteer = false;
+	double max_beta_deg = 0.0;
+	double max_lat_mm = 0.0;
+	double weave_dps = 0.0;
+	double fail_v = 0.0;
+	double lap4_s = 0.0;
+	double pace = 0.0;
+	double dist_diff = 0.0;
+	std::string detail;
 };
 
 struct ScenarioResult {
@@ -68,6 +87,7 @@ struct ScenarioResult {
 };
 
 ScenarioResult run_scenario(const ScenarioOptions& opt);
+TrialResult evaluate_trial_headless(const ScenarioOptions& opt);
 bool load_scenario_file(const std::string& path, ScenarioOptions* opt, std::string* err);
 bool apply_param(FwDriveParams* p, const std::string& key, double v);
 bool save_drive_params_to_firmware_file(const FwDriveParams& p, std::string* out_path = nullptr);

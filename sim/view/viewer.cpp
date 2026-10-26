@@ -246,6 +246,41 @@ void Viewer::set_cam_mode(int mode) {
 	}
 }
 
+void Viewer::jump_to_next_marker_miss() {
+	if (marker_diags_.empty() || !im_)
+		return;
+	int n = static_cast<int>(marker_diags_.size());
+	int start = (focused_miss_idx_ >= 0) ? (focused_miss_idx_ + 1) % n : 0;
+	int next_idx = -1;
+	// 1. First priority: find next misread marker (status >= 2: missed, wrong type, or ghost)
+	for (int step = 0; step < n; ++step) {
+		int idx = (start + step) % n;
+		if (marker_diags_[idx].status >= 2) {
+			next_idx = idx;
+			break;
+		}
+	}
+	// 2. If no misreads exist, cycle through any marker
+	if (next_idx < 0) {
+		next_idx = start;
+	}
+	focused_miss_idx_ = next_idx;
+	if (focused_miss_idx_ >= 0 && focused_miss_idx_ < n) {
+		const auto& d = marker_diags_[focused_miss_idx_];
+		double tx = d.has_reconstruction ? d.robot_x : d.tape_center.x;
+		double ty = d.has_reconstruction ? d.robot_y : d.tape_center.y;
+		im_->cam.lookat[0] = tx;
+		im_->cam.lookat[1] = ty;
+		im_->cam.lookat[2] = 0.02;
+		im_->cam.distance = 0.45;
+		im_->cam.elevation = -45.0;
+		double th_deg = (d.has_reconstruction ? d.robot_th : d.tape_th) * 57.29577951308232;
+		im_->cam.azimuth = th_deg - 40.0;
+		im_->cam.type = mjCAMERA_FREE;
+		cam_mode_ = kFree;
+	}
+}
+
 bool Viewer::pump() {
 	MSG msg;
 	while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -544,6 +579,175 @@ void Viewer::render(const ViewerHud& hud) {
 		g->emission = 1.0f;
 	}
 
+	// Marker visual diagnostics: tape boxes on floor
+	for (size_t i = 0; i < marker_diags_.size() && scn.ngeom < scn.maxgeom; ++i) {
+		const auto& m = marker_diags_[i];
+		float c[4];
+		float emission = 0.4f;
+		if (m.status == 1) { // OK
+			c[0] = 0.15f; c[1] = 0.85f; c[2] = 0.25f; c[3] = 0.75f; // Green
+		} else if (m.status == 2) { // MISSED (unread)
+			c[0] = 1.0f; c[1] = 0.15f; c[2] = 0.15f; c[3] = 0.95f; // Red
+			emission = 0.9f;
+		} else if (m.status == 3) { // WRONG_TYPE
+			c[0] = 1.0f; c[1] = 0.65f; c[2] = 0.05f; c[3] = 0.95f; // Amber
+			emission = 0.9f;
+		} else if (m.status == 4) { // GHOST
+			c[0] = 0.95f; c[1] = 0.15f; c[2] = 0.95f; c[3] = 0.95f; // Magenta
+			emission = 0.9f;
+		} else {
+			c[0] = 0.5f; c[1] = 0.5f; c[2] = 0.5f; c[3] = 0.5f;
+		}
+
+		mjvGeom* g = &scn.geoms[scn.ngeom++];
+		box_geom(g, m.tape_center.x, m.tape_center.y, 0.0007, m.tape_hl, m.tape_hw, 0.0006, m.tape_th, c);
+		g->emission = emission;
+
+		// Highlight currently focused marker with an outer halo
+		if ((int)i == focused_miss_idx_ && scn.ngeom < scn.maxgeom) {
+			const float halo[4] = {1.0f, 1.0f, 0.2f, 0.9f};
+			mjvGeom* h = &scn.geoms[scn.ngeom++];
+			box_geom(h, m.tape_center.x, m.tape_center.y, 0.0009, m.tape_hl + 0.006, m.tape_hw + 0.006, 0.0003, m.tape_th, halo);
+			h->emission = 1.0f;
+		}
+	}
+
+	// Reconstructed Robot Crime Scene Visualization
+	if (focused_miss_idx_ >= 0 && focused_miss_idx_ < (int)marker_diags_.size()) {
+		const auto& d = marker_diags_[focused_miss_idx_];
+		if (d.has_reconstruction) {
+			const double c_th = std::cos(d.robot_th);
+			const double s_th = std::sin(d.robot_th);
+
+			// 1. Robot ghost chassis box
+			if (scn.ngeom < scn.maxgeom) {
+				float ghost_c[4];
+				if (d.status == 2) { // Missed: translucent red
+					ghost_c[0] = 1.0f; ghost_c[1] = 0.25f; ghost_c[2] = 0.25f; ghost_c[3] = 0.40f;
+				} else if (d.status == 3) { // Wrong type: translucent amber
+					ghost_c[0] = 1.0f; ghost_c[1] = 0.65f; ghost_c[2] = 0.15f; ghost_c[3] = 0.40f;
+				} else if (d.status == 4) { // Ghost: translucent magenta
+					ghost_c[0] = 0.95f; ghost_c[1] = 0.20f; ghost_c[2] = 0.95f; ghost_c[3] = 0.40f;
+				} else {
+					ghost_c[0] = 0.25f; ghost_c[1] = 0.75f; ghost_c[2] = 1.0f; ghost_c[3] = 0.40f;
+				}
+				mjvGeom* g = &scn.geoms[scn.ngeom++];
+				box_geom(g, d.robot_x, d.robot_y, 0.014, 0.055, 0.038, 0.010, d.robot_th, ghost_c);
+				g->emission = 0.7f;
+			}
+
+			// 2. Ghost wheels
+			if (scn.ngeom + 1 < scn.maxgeom) {
+				const float wheel_c[4] = {0.15f, 0.15f, 0.15f, 0.60f};
+				// Left wheel
+				mjvGeom* gw_l = &scn.geoms[scn.ngeom++];
+				double wx_l = d.robot_x - 0.038 * s_th;
+				double wy_l = d.robot_y + 0.038 * c_th;
+				box_geom(gw_l, wx_l, wy_l, 0.013, 0.015, 0.005, 0.013, d.robot_th, wheel_c);
+				gw_l->emission = 0.4f;
+
+				// Right wheel
+				mjvGeom* gw_r = &scn.geoms[scn.ngeom++];
+				double wx_r = d.robot_x + 0.038 * s_th;
+				double wy_r = d.robot_y - 0.038 * c_th;
+				box_geom(gw_r, wx_r, wy_r, 0.013, 0.015, 0.005, 0.013, d.robot_th, wheel_c);
+				gw_r->emission = 0.4f;
+			}
+
+			// 3. Ghost sensor bar
+			if (scn.ngeom < scn.maxgeom) {
+				const float bar_c[4] = {0.2f, 0.9f, 0.9f, 0.75f};
+				double bar_x = d.robot_x + sensor_x_ * c_th;
+				double bar_y = d.robot_y + sensor_x_ * s_th;
+				mjvGeom* gb = &scn.geoms[scn.ngeom++];
+				box_geom(gb, bar_x, bar_y, 0.003, 0.003, 0.045, 0.002, d.robot_th, bar_c);
+				gb->emission = 0.8f;
+			}
+
+			// 3b. 18 ghost sensor spots on floor under the ghost bar
+			for (size_t k = 0; k < sensor_pts_.size() && scn.ngeom < scn.maxgeom; ++k) {
+				double bx = sensor_pts_[k][0], by = sensor_pts_[k][1];
+				mjtNum gpos[3] = {d.robot_x + c_th * bx - s_th * by,
+				                  d.robot_y + s_th * bx + c_th * by, 0.0020};
+				mjtNum gsz[3] = {0.0025, 0.0025, 0.0005};
+				const bool son = (k < 18) ? d.sensor_on[k] : false;
+				float sv = (k < 18) ? d.sensors[k] : 0.0f;
+				float srgba[4];
+				if (k == 16 || k == 17) {
+					if (son) {
+						srgba[0] = 0.2f; srgba[1] = 1.0f; srgba[2] = 0.3f; srgba[3] = 1.0f; // Green: marker hit
+					} else {
+						srgba[0] = 0.85f; srgba[1] = 0.15f; srgba[2] = 0.15f; srgba[3] = 0.8f; // Red: marker missed
+					}
+				} else {
+					if (son) {
+						srgba[0] = 1.0f; srgba[1] = 0.85f; srgba[2] = 0.1f; srgba[3] = 1.0f; // Yellow: line detected
+					} else {
+						srgba[0] = 0.15f + 0.6f * sv; srgba[1] = 0.15f + 0.6f * sv; srgba[2] = 0.2f + 0.6f * sv; srgba[3] = 0.7f;
+					}
+				}
+				mjvGeom* gs = &scn.geoms[scn.ngeom++];
+				mjv_initGeom(gs, mjGEOM_CYLINDER, gsz, gpos, nullptr, srgba);
+				gs->category = mjCAT_DECOR;
+				gs->emission = son ? 1.0f : 0.2f;
+			}
+
+			// 4. Misread Sensor Spot (glowing cylinder on floor)
+			if (scn.ngeom < scn.maxgeom) {
+				mjtNum spos[3] = {d.sensor_pos.x, d.sensor_pos.y, 0.0022};
+				mjtNum ssize[3] = {0.004, 0.004, 0.0012};
+				float sc[4];
+				if (d.miss_gap_mm > 0.0) {
+					sc[0] = 1.0f; sc[1] = 0.1f; sc[2] = 0.1f; sc[3] = 1.0f; // Red: off tape
+				} else {
+					sc[0] = 0.2f; sc[1] = 1.0f; sc[2] = 0.3f; sc[3] = 1.0f; // Green: on tape
+				}
+				mjvGeom* gs = &scn.geoms[scn.ngeom++];
+				mjv_initGeom(gs, mjGEOM_CYLINDER, ssize, spos, nullptr, sc);
+				gs->category = mjCAT_DECOR;
+				gs->emission = 1.0f;
+			}
+
+			// 5. Tape Edge Target Point (glowing cylinder on floor)
+			if (scn.ngeom < scn.maxgeom) {
+				mjtNum epos[3] = {d.tape_edge_pos.x, d.tape_edge_pos.y, 0.0022};
+				mjtNum esize[3] = {0.004, 0.004, 0.0012};
+				const float ec[4] = {1.0f, 0.9f, 0.1f, 1.0f}; // Yellow: tape edge target
+				mjvGeom* ge = &scn.geoms[scn.ngeom++];
+				mjv_initGeom(ge, mjGEOM_CYLINDER, esize, epos, nullptr, ec);
+				ge->category = mjCAT_DECOR;
+				ge->emission = 1.0f;
+			}
+
+			// 6. Miss Gap Vector Line (connector between sensor and tape edge)
+			if (d.miss_gap_mm > 0.1 && scn.ngeom < scn.maxgeom) {
+				const float lc[4] = {1.0f, 0.15f, 0.15f, 1.0f};
+				mjvGeom* gl = &scn.geoms[scn.ngeom++];
+				mjv_initGeom(gl, mjGEOM_LINE, nullptr, nullptr, nullptr, lc);
+				mjtNum p0[3] = {d.sensor_pos.x, d.sensor_pos.y, 0.0025};
+				mjtNum p1[3] = {d.tape_edge_pos.x, d.tape_edge_pos.y, 0.0025};
+				mjv_connector(gl, mjGEOM_LINE, 5, p0, p1);
+				gl->category = mjCAT_DECOR;
+				gl->emission = 1.0f;
+			}
+
+			// 7. Velocity / Slip vector arrow (showing robot motion direction vs heading)
+			if (scn.ngeom < scn.maxgeom) {
+				double beta_rad = d.robot_beta * 0.017453292519943295;
+				double v_ang = d.robot_th + beta_rad;
+				double arrow_len = std::clamp(d.robot_v * 0.05, 0.06, 0.15);
+				const float vc[4] = {1.0f, 0.55f, 0.05f, 0.95f}; // Orange
+				mjvGeom* gv = &scn.geoms[scn.ngeom++];
+				mjv_initGeom(gv, mjGEOM_LINE, nullptr, nullptr, nullptr, vc);
+				mjtNum vp0[3] = {d.robot_x, d.robot_y, 0.014};
+				mjtNum vp1[3] = {d.robot_x + arrow_len * std::cos(v_ang), d.robot_y + arrow_len * std::sin(v_ang), 0.014};
+				mjv_connector(gv, mjGEOM_LINE, 4, vp0, vp1);
+				gv->category = mjCAT_DECOR;
+				gv->emission = 1.0f;
+			}
+		}
+	}
+
 	mjrRect view{0, 0, width_, height_};
 	mjr_render(view, &scn, &im_->con);
 
@@ -592,15 +796,66 @@ void Viewer::render(const ViewerHud& hud) {
 	if (!lcd.empty() && !lcd_left)
 		overlay(mjGRID_TOPRIGHT, view.left, view.bottom, view.width, view.height, lcd);
 
+	// HUD overlay card for misread marker crime scene reconstruction
+	if (focused_miss_idx_ >= 0 && focused_miss_idx_ < (int)marker_diags_.size()) {
+		const auto& d = marker_diags_[focused_miss_idx_];
+		char line_bits[17];
+		for (int k = 0; k < 16; ++k)
+			line_bits[k] = d.sensor_on[k] ? '#' : '.';
+		line_bits[16] = '\0';
+
+		char card[640];
+		std::snprintf(card, sizeof card,
+			"[MARKER RECONSTRUCTION: #%d '%c' -> '%c' (%s)]\n"
+			"Pose: pos=(%+.3f, %+.3f)m | yaw=%+.1f deg | v=%.2fm/s\n"
+			"Drift: lat_err=%+.1f mm | sideslip beta=%+.1f deg\n"
+			"Sensors: M_L=%d%% (%s) | Lines=[%s] | M_R=%d%% (%s)\n"
+			"Gap to Tape: %.1f mm (%s) | Focus: %s\n"
+			"Reason: %s\n"
+			"Press [K] to jump / cycle misread markers",
+			d.marker_idx, d.want, d.got, d.label.c_str(),
+			d.robot_x, d.robot_y, d.robot_th * 57.29577951308232, d.robot_v,
+			d.robot_lat_mm, d.robot_beta,
+			(int)(d.sensors[16] * 100.0f + 0.5f), d.sensor_on[16] ? "ON" : "OFF",
+			line_bits,
+			(int)(d.sensors[17] * 100.0f + 0.5f), d.sensor_on[17] ? "ON" : "OFF",
+			d.miss_gap_mm, (d.miss_gap_mm > 0.0 ? "MISSED" : "HIT"), d.sensor_name.c_str(),
+			d.reason.c_str());
+
+		overlay(mjGRID_BOTTOMRIGHT, view.left, view.bottom, view.width, view.height, card);
+	}
+
 	// IR bar: 16 line sensors left->right as mounted (sensor 0 = left), then the two mark sensors
+	const bool show_miss_sensors = (focused_miss_idx_ >= 0 && focused_miss_idx_ < (int)marker_diags_.size());
+	const MarkerVisualInfo* miss_m = show_miss_sensors ? &marker_diags_[focused_miss_idx_] : nullptr;
+
 	const int cell = std::max(14, width_ / 60), gap = 3, h = cell * 2;
 	const int n = 18, total = n * (cell + gap) + 2 * cell;
 	int x = (width_ - total) / 2, y = height_ - h - 16;   // top center
-	mjr_rectangle({x - 8, y - 8, total + 16, h + 16}, 0.05f, 0.05f, 0.06f, 0.75f);
+
+	if (miss_m) {
+		mjr_rectangle({x - 12, y - 24, total + 24, h + 34}, 0.08f, 0.04f, 0.05f, 0.88f);
+		char top_title[160];
+		std::snprintf(top_title, sizeof top_title,
+			"[MISREAD MOMENT SENSORS #%d '%c'] M_L:%d%% (%s) | M_R:%d%% (%s)",
+			miss_m->marker_idx, miss_m->want,
+			(int)(miss_m->sensors[16] * 100.0f + 0.5f), miss_m->sensor_on[16] ? "ON" : "OFF",
+			(int)(miss_m->sensors[17] * 100.0f + 0.5f), miss_m->sensor_on[17] ? "ON" : "OFF");
+		mjrRect title_r{x - 10, y - 22, total + 20, 20};
+		mjr_overlay(mjFONT_NORMAL, mjGRID_TOPLEFT, title_r, top_title, nullptr, &im_->con);
+	} else {
+		mjr_rectangle({x - 8, y - 8, total + 16, h + 16}, 0.05f, 0.05f, 0.06f, 0.75f);
+	}
+
 	auto draw_cell = [&](int i, int px) {
-		float v = hud.sensors[i];
-		if (hud.sensor_on[i])
-			mjr_rectangle({px - 2, y - 2, cell + 4, h + 4}, 0.9f, 0.25f, 0.2f, 1);
+		float v = miss_m ? miss_m->sensors[i] : hud.sensors[i];
+		bool on = miss_m ? miss_m->sensor_on[i] : hud.sensor_on[i];
+		if (on) {
+			if (miss_m && (i == 16 || i == 17))
+				mjr_rectangle({px - 2, y - 2, cell + 4, h + 4}, 0.2f, 1.0f, 0.3f, 1);
+			else
+				mjr_rectangle({px - 2, y - 2, cell + 4, h + 4}, 0.95f, 0.25f, 0.2f, 1);
+		}
 		mjr_rectangle({px, y, cell, h}, v, v, v, 1);
 	};
 	draw_cell(16, x);

@@ -478,8 +478,8 @@ public:
 
 		for (int i = 0; i < 60; i++) {
 			Set s = best_;
-			s.kp = std::clamp(best_.kp + norm(rng) * 1.2, 8.0, 32.0);
-			s.kd = std::clamp(best_.kd + norm(rng) * 0.012, 0.04, 0.35);
+			s.kp = std::max(0.0, best_.kp + norm(rng) * 1.2);
+			s.kd = std::max(0.0, best_.kd + norm(rng) * 0.012);
 			s.lat = std::clamp(best_.lat + norm(rng) * 0.4, 7.5, 12.8);
 			s.sl = std::clamp(best_.sl + norm(rng) * 0.015, 0.01, 0.25);
 			s.target_shift = std::clamp(best_.target_shift + norm(rng) * 0.03, 0.20, 0.65);
@@ -494,8 +494,8 @@ public:
 
 		for (int i = 0; i < 45; i++) {
 			Set s = best_;
-			s.kp = std::clamp(best_.kp + (-2.0 + unif(rng) * 3.0), 8.0, 28.0);
-			s.kd = std::clamp(best_.kd + (-0.005 + unif(rng) * 0.030), 0.05, 0.35);
+			s.kp = std::max(0.0, best_.kp + (-2.0 + unif(rng) * 3.0));
+			s.kd = std::max(0.0, best_.kd + (-0.005 + unif(rng) * 0.030));
 			s.lat = std::clamp(best_.lat + (-1.0 + unif(rng) * 1.5), 7.5, 12.8);
 			s.brake_margin = std::clamp(best_.brake_margin + unif(rng) * 0.06, 0.08, 0.28);
 			s.target_shift = std::clamp(best_.target_shift + sym(rng) * 0.06, 0.25, 0.60);
@@ -510,8 +510,8 @@ public:
 
 		for (int i = 0; i < 45; i++) {
 			Set s = best_;
-			s.kp = std::clamp(best_.kp + sym(rng) * 4.5, 8.0, 28.0);
-			s.kd = std::clamp(best_.kd + sym(rng) * 0.035, 0.04, 0.32);
+			s.kp = std::max(0.0, best_.kp + sym(rng) * 4.5);
+			s.kd = std::max(0.0, best_.kd + sym(rng) * 0.035);
 			s.lat = std::clamp(best_.lat + sym(rng) * 1.5, 7.5, 12.8);
 			s.sl = std::clamp(best_.sl + sym(rng) * 0.05, 0.02, 0.22);
 			s.target_shift = std::clamp(best_.target_shift + sym(rng) * 0.10, 0.22, 0.62);
@@ -674,8 +674,8 @@ public:
 		best_ = from;
 		best_.pos_atten = 0.0;
 		// Clamp initial gains to healthy non-saturated bounds before storing anchor_
-		best_.kp = std::clamp(std::round(best_.kp * 1000.0) / 1000.0, 11.5, 24.0);
-		best_.kd = std::clamp(best_.kd, 0.07, 0.24);   // 140 .. 480 in steer_kd
+		best_.kp = std::max(0.0, std::round(best_.kp * 1000.0) / 1000.0);
+		best_.kd = std::max(0.0, best_.kd);
 		best_.lat = std::clamp(best_.lat, 11.0, 15.0);
 		best_.brake_margin = std::clamp(best_.brake_margin, 0.06, 0.24);
 		anchor_ = best_;
@@ -719,12 +719,8 @@ public:
 		base.target_shift = 0.85 * best_.target_shift + 0.15 * anchor_.target_shift;
 		base.target_curve_gain = 0.85 * best_.target_curve_gain + 0.15 * anchor_.target_curve_gain;
 
-		// Detect if D-gain is already saturated high (> 390, i.e., kd_s > 0.195s), which causes D-kick chatter
-		const bool kd_oversaturated = (best_.kd > 0.195);
-		if (kd_oversaturated)
-			base.kd = std::clamp(0.65 * best_.kd + 0.35 * std::min(anchor_.kd, 0.165), 0.12, 0.21);
-		if (best_.kp < 12.2)
-			base.kp = std::round(std::max(12.8, 0.65 * best_.kp + 0.35 * std::max(anchor_.kp, 14.2)) * 1000.0) / 1000.0;
+		// (Unbounded: no artificial saturation clamping on kp or kd)
+		const bool kd_oversaturated = false;
 
 		// 2. Normalized Failure Severity Factors (0.0 .. 1.5) from actual telemetry
 		// - slip_sev: how much beta exceeded the 22 deg drift onset (e.g., 35 deg -> 0.34, 60 deg -> 1.0, 90 deg -> 1.5)
@@ -738,7 +734,7 @@ public:
 		const double speed_sev = fm.d1_failed ? 0.0 : std::clamp((fm.fail_v - v_) / 0.75, 0.0, 1.5);
 
 		// Ideal damping ratio target: steer_kd ~= 22 * steer_kp  =>  kd_s ~= 0.011 * kp
-		const auto ideal_kd = [](double kp) { return std::clamp(kp * 0.0112, 0.11, 0.22); };
+		const auto ideal_kd = [](double kp) { return std::max(0.0, kp * 0.0112); };
 
 		std::vector<HealCandidate> cands;
 
@@ -748,22 +744,22 @@ public:
 			if (fm.was_oversteer) {
 				// Proportional kp reduction based on slip & oscillation severity
 				const double dkp = -(0.35 * slip_sev + 0.45 * osc_sev);
-				s.kp = std::clamp(std::round((base.kp + dkp) * 1000.0) / 1000.0, 11.5, 24.0);
+				s.kp = std::max(0.0, std::round((base.kp + dkp) * 1000.0) / 1000.0);
 				// If kd was already oversaturated, high weave is caused by D-noise kick -> lower kd!
 				// Otherwise, increase kd proportionally to slip/oscillation toward healthy ceiling (<= 0.23s = 460)
 				if (kd_oversaturated) {
-					s.kd = std::clamp(best_.kd - (0.012 + 0.018 * osc_sev), 0.12, 0.21);
+					s.kd = std::max(0.0, best_.kd - (0.012 + 0.018 * osc_sev));
 				} else {
 					const double dkd = 0.007 * slip_sev + 0.010 * osc_sev;
-					s.kd = std::clamp(base.kd + dkd, 0.08, 0.23);
+					s.kd = std::max(0.0, base.kd + dkd);
 				}
 				s.yaw_kp = std::clamp(base.yaw_kp + 0.03 * slip_sev, 0.15, 0.60);
 			} else {
 				// Understeer / line loss: increase kp proportionally to understeer severity!
 				const double dkp = 0.65 * under_sev - 0.25 * osc_sev;
-				s.kp = std::clamp(std::round((base.kp + dkp) * 1000.0) / 1000.0, 12.0, 24.0);
+				s.kp = std::max(0.0, std::round((base.kp + dkp) * 1000.0) / 1000.0);
 				// Pull kd toward the ideal damping ratio for the new kp instead of blindly adding +kd
-				s.kd = std::clamp(0.65 * base.kd + 0.35 * ideal_kd(s.kp) + 0.005 * osc_sev, 0.08, 0.22);
+				s.kd = std::max(0.0, 0.65 * base.kd + 0.35 * ideal_kd(s.kp) + 0.005 * osc_sev);
 			}
 			if (!fm.d1_failed) {
 				s.lat = std::clamp(base.lat - (0.25 * slip_sev + 0.35 * speed_sev), 11.2, 15.0);
@@ -778,14 +774,14 @@ public:
 			Set s = base;
 			const double entry_sev = std::max({speed_sev, slip_sev, 0.35 * under_sev});
 			// Keep kp/kd well-balanced near ideal damping ratio while fixing corner entry speed
-			s.kp = std::clamp(std::round((base.kp + (fm.was_oversteer ? -0.25 * slip_sev : +0.40 * under_sev)) * 1000.0) / 1000.0, 11.8, 23.5);
-			s.kd = std::clamp(0.60 * base.kd + 0.40 * ideal_kd(s.kp), 0.10, 0.22);
+			s.kp = std::max(0.0, std::round((base.kp + (fm.was_oversteer ? -0.25 * slip_sev : +0.40 * under_sev)) * 1000.0) / 1000.0);
+			s.kd = std::max(0.0, 0.60 * base.kd + 0.40 * ideal_kd(s.kp));
 			if (!fm.d1_failed) {
 				s.brake_margin = std::clamp(base.brake_margin + (0.015 + 0.030 * entry_sev), 0.07, 0.24);
 				s.lat = std::clamp(base.lat - (0.30 + 0.55 * entry_sev), 11.0, 14.8);
 				s.sl = std::clamp(base.sl - 0.015 * slip_sev, 0.03, 0.20);
 			} else {
-				s.kd = std::clamp(s.kd + 0.008 * (osc_sev - 0.5), 0.09, 0.22);
+				s.kd = std::max(0.0, s.kd + 0.008 * (osc_sev - 0.5));
 			}
 			s.pos_atten = 0.0;
 			cands.push_back({s, "Heal-Entry"});
@@ -795,10 +791,10 @@ public:
 		// Specifically tests lowering excessive kd and restoring brisk kp/lat response
 		{
 			Set s = best_;
-			s.kp = std::clamp(std::round((0.55 * best_.kp + 0.45 * std::max(anchor_.kp, 14.5) + 0.35 * under_sev) * 1000.0) / 1000.0, 12.2, 23.5);
+			s.kp = std::max(0.0, std::round((0.55 * best_.kp + 0.45 * anchor_.kp + 0.35 * under_sev) * 1000.0) / 1000.0);
 			// Explicitly reduce kd toward nominal (280..350) to eliminate high-D derivative kick!
-			const double nominal_kd = std::clamp(anchor_.kd, 0.135, 0.175);
-			s.kd = std::clamp(0.50 * best_.kd + 0.50 * nominal_kd - 0.008 * (kd_oversaturated ? 1.0 : 0.0), 0.10, 0.20);
+			const double nominal_kd = anchor_.kd;
+			s.kd = std::max(0.0, 0.50 * best_.kd + 0.50 * nominal_kd);
 			if (!fm.d1_failed) {
 				s.lat = std::clamp(0.60 * best_.lat + 0.40 * anchor_.lat - 0.20 * slip_sev, 11.4, 14.8);
 				s.brake_margin = std::clamp(0.60 * best_.brake_margin + 0.40 * anchor_.brake_margin + 0.015 * speed_sev, 0.07, 0.22);
@@ -811,8 +807,8 @@ public:
 		{
 			Set s = base;
 			const double turn_need = fm.was_oversteer ? -0.30 * slip_sev : +0.55 * under_sev;
-			s.kp = std::clamp(std::round((base.kp + turn_need + sym(rng) * 0.35) * 1000.0) / 1000.0, 11.8, 24.0);
-			s.kd = std::clamp(0.70 * base.kd + 0.30 * ideal_kd(s.kp) + sym(rng) * 0.006, 0.09, 0.22);
+			s.kp = std::max(0.0, std::round((base.kp + turn_need + sym(rng) * 0.35) * 1000.0) / 1000.0);
+			s.kd = std::max(0.0, 0.70 * base.kd + 0.30 * ideal_kd(s.kp) + sym(rng) * 0.006);
 			if (!fm.d1_failed) {
 				const double shift_dir = fm.was_oversteer ? (-0.02 * slip_sev) : (+0.035 * under_sev);
 				s.target_shift = std::clamp(base.target_shift + shift_dir + sym(rng) * 0.025, 0.26, 0.56);
@@ -827,8 +823,8 @@ public:
 		{
 			Set s = base;
 			const double scale = std::clamp(0.5 + 0.35 * std::max({slip_sev, under_sev, osc_sev}), 0.5, 1.2);
-			s.kp = std::clamp(std::round((base.kp + norm(rng) * (0.85 * scale)) * 1000.0) / 1000.0, 11.5, 24.0);
-			s.kd = std::clamp(base.kd + norm(rng) * (0.009 * scale), 0.09, 0.23);
+			s.kp = std::max(0.0, std::round((base.kp + norm(rng) * (0.85 * scale)) * 1000.0) / 1000.0);
+			s.kd = std::max(0.0, base.kd + norm(rng) * (0.009 * scale));
 			if (!fm.d1_failed) {
 				s.lat = std::clamp(base.lat + norm(rng) * (0.35 * scale), 11.2, 15.0);
 				s.brake_margin = std::clamp(base.brake_margin + norm(rng) * (0.015 * scale), 0.06, 0.24);
@@ -845,8 +841,8 @@ public:
 		// Soft-blend healed gains (15% healed + 85% previous best_) to prevent a single outlier map
 		// from ratcheting gains to extreme boundaries, ensuring generalized robust convergence.
 		constexpr double a = 0.15;
-		best_.kp = std::clamp(std::round((a * healed.kp + (1.0 - a) * best_.kp) * 1000.0) / 1000.0, 11.5, 24.0);
-		best_.kd = std::clamp(a * healed.kd + (1.0 - a) * best_.kd, 0.08, 0.23);   // max 460 in steer_kd (never 600!)
+		best_.kp = std::max(0.0, std::round((a * healed.kp + (1.0 - a) * best_.kp) * 1000.0) / 1000.0);
+		best_.kd = std::max(0.0, a * healed.kd + (1.0 - a) * best_.kd);
 		best_.lat = std::clamp(a * healed.lat + (1.0 - a) * best_.lat, 11.0, 15.0);
 		best_.brake_margin = std::clamp(a * healed.brake_margin + (1.0 - a) * best_.brake_margin, 0.06, 0.24);
 		best_.target_shift = std::clamp(a * healed.target_shift + (1.0 - a) * best_.target_shift, 0.24, 0.58);
@@ -1029,17 +1025,17 @@ public:
 			just_recovered_ = true;
 			last_ = fmt("Map #%d: %d/%d RECOVER PASS at %.2f m/s -> speed recovered to %.2f m/s! (window reset)",
 				total_maps_, step_need, step_need, old_v, v_);
-			std::snprintf(log_buf, sizeof log_buf, "#%03d [RECOVER %d/%d] %.2f->%.2fm/s | 4:%.2fs",
+			std::snprintf(log_buf, sizeof log_buf, "#%03d [RECOVER %d/%d] %.2f->%.2fm/s | 3:%.2fs",
 				total_maps_, step_need, step_need, old_v, v_, lap4_s);
 		} else if (was_healed) {
-			last_ = fmt("Map #%d HEALED [%s] (Window %zu/%d: Pass %.0f%%, Heal %d, Fail %.0f%%) at %.2f m/s | kp=%.3f kd=%.0f lat=%.1f | 4th: %.2fs",
+			last_ = fmt("Map #%d HEALED [%s] (Window %zu/%d: Pass %.0f%%, Heal %d, Fail %.0f%%) at %.2f m/s | kp=%.3f kd=%.0f lat=%.1f | 3rd: %.2fs",
 				total_maps_, heal_role.c_str(), cur_win_cnt, step_need, sr_pct, heals_in_window(), fr_pct, v_, best_.kp, best_.kd / 0.0005, best_.lat, lap4_s);
-			std::snprintf(log_buf, sizeof log_buf, "#%03d [HEALED:%s %zu/%d] %.2fm/s (P:%.0f%% F:%.0f%%) | 4:%.2fs",
+			std::snprintf(log_buf, sizeof log_buf, "#%03d [HEALED:%s %zu/%d] %.2fm/s (P:%.0f%% F:%.0f%%) | 3:%.2fs",
 				total_maps_, heal_role.c_str(), cur_win_cnt, step_need, v_, sr_pct, fr_pct, lap4_s);
 		} else {
-			last_ = fmt("Map #%d PASS (Window %zu/%d: Pass %.0f%% [>=%.0f%%], Fail %.0f%%) at %.2f m/s | 4th: %.2fs (%+.2fm)",
+			last_ = fmt("Map #%d PASS (Window %zu/%d: Pass %.0f%% [>=%.0f%%], Fail %.0f%%) at %.2f m/s | 3rd: %.2fs (%+.2fm)",
 				total_maps_, cur_win_cnt, step_need, sr_pct, need_sr_pct, fr_pct, v_, lap4_s, dist_diff);
-			std::snprintf(log_buf, sizeof log_buf, "#%03d [PASS %zu/%d (P:%.0f%%)] %.2fm/s | 4:%.2fs",
+			std::snprintf(log_buf, sizeof log_buf, "#%03d [PASS %zu/%d (P:%.0f%%)] %.2fm/s | 3:%.2fs",
 				total_maps_, cur_win_cnt, step_need, sr_pct, v_, lap4_s);
 		}
 		log_.push_back(log_buf);
@@ -1054,7 +1050,7 @@ public:
 		const double need_sr_pct = min_pass_rate_pct();
 		std::vector<std::string> v;
 		v.push_back(fmt("ENDLESS %d-MAP + AI HEAL [E]  Map #%d  (E: stop | A: 3-course)", target_win_, total_maps_ + 1));
-		v.push_back("Mode: Drive 1 + Drive 4/Map + AI Gain Auto-Heal on Fail");
+		v.push_back("Mode: Drive 1 + Drive 3/Map + AI Gain Auto-Heal on Fail");
 		v.push_back("Map:  " + cur_map_info);
 		if (verified_v_ > 0.0)
 			v.push_back(fmt("Base Speed: %.2f m/s  (Start: %.2f | Floor: %.2f | Verified >=%.0f%% Pass: %.2f m/s)", v_, start_v_, min_v_, need_sr_pct, verified_v_));
@@ -1205,6 +1201,69 @@ bool save_drive_params_to_firmware_file(const FwDriveParams& p, std::string* out
 	return true;
 }
 
+bool load_drive_params_from_firmware_file(FwDriveParams* p, std::string* out_path) {
+	const std::vector<std::string> candidates = {
+		"firmware/Main/Src/drive.c",
+		"../firmware/Main/Src/drive.c",
+		"../../firmware/Main/Src/drive.c",
+		"../../../firmware/Main/Src/drive.c"
+	};
+	std::string found_path;
+	for (const auto& path : candidates) {
+		std::error_code ec;
+		if (fs::exists(path, ec)) {
+			found_path = fs::canonical(path, ec).string();
+			if (found_path.empty())
+				found_path = path;
+			break;
+		}
+	}
+	if (found_path.empty() || !p) return false;
+	if (out_path) *out_path = found_path;
+
+	std::ifstream in(found_path);
+	if (!in.is_open()) return false;
+
+	std::string line;
+	bool inside = false;
+	while (std::getline(in, line)) {
+		if (line.find("DriveParam_t driveData") != std::string::npos) {
+			inside = true;
+			continue;
+		}
+		if (inside) {
+			if (line.find("};") != std::string::npos)
+				break;
+			auto extract = [&](const char* key, float* out) {
+				size_t kpos = line.find(key);
+				if (kpos != std::string::npos) {
+					size_t eq = line.find('=', kpos);
+					if (eq != std::string::npos) {
+						*out = std::strtof(line.c_str() + eq + 1, nullptr);
+					}
+				}
+			};
+			extract(".base_mps", &p->base_mps);
+			extract(".max_mps", &p->max_mps);
+			extract(".accel", &p->accel);
+			extract(".decel", &p->decel);
+			extract(".steer_gain_p", &p->steer_kp);
+			extract(".steer_gain_d", &p->steer_kd);
+			extract(".pos_atten_gain", &p->pos_atten_gain);
+			extract(".pit_in_distance_m", &p->pit_in_m);
+			extract(".target_shift_val", &p->target_shift);
+			extract(".yaw_gain_p", &p->yaw_kp);
+			extract(".yaw_gain_i", &p->yaw_ki);
+			extract(".lat_acc_max", &p->lat_acc_max);
+			extract(".target_curve_gain", &p->target_curve_gain);
+			extract(".slalom_ratio", &p->slalom_ratio);
+			extract(".brake_margin_m", &p->brake_margin_m);
+		}
+	}
+	return true;
+}
+
+
 bool apply_param(FwDriveParams* p, const std::string& key, double v) {
 	if (key == "base_mps") p->base_mps = (float) v;
 	else if (key == "max_mps") p->max_mps = (float) v;
@@ -1235,6 +1294,8 @@ bool load_scenario_file(const std::string& path, ScenarioOptions* opt, std::stri
 	auto rel = [&](const std::string& p) { return p.empty() || fs::path(p).is_absolute() ? p : (base / p).string(); };
 	opt->track_path = rel(j.str("track", opt->track_path));
 	opt->robot_path = rel(j.str("robot", opt->robot_path));
+	if (path.find("hyper") != std::string::npos || opt->track_path.find("hyper") != std::string::npos)
+		opt->hyper_track = true;
 	if (j.has("out"))
 		opt->out_dir = rel(j.str("out", ""));
 	if (const json::Value* d = j.get("drives"); d && d->is_arr()) {
@@ -1268,12 +1329,827 @@ static void enable_ansi_console() {
 	static bool done = false;
 	if (done) return;
 	done = true;
+#ifdef _WIN32
+	SetConsoleOutputCP(CP_UTF8);
+#endif
 	HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
 	if (hOut != INVALID_HANDLE_VALUE) {
 		DWORD mode = 0;
 		if (GetConsoleMode(hOut, &mode))
 			SetConsoleMode(hOut, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
 	}
+}
+
+
+// ============================================================================
+// Multi-core parallel tuning worker helpers (Win32 anonymous pipe IPC)
+// ============================================================================
+#ifdef _WIN32
+struct WorkerProcess {
+	HANDLE hProcess = NULL;
+	HANDLE hPipeRead = NULL;
+	std::string tag;
+	std::string role;
+	TuneSet set;
+	TrialResult result;
+};
+
+static std::string get_self_exe_path() {
+	char buf[MAX_PATH];
+	DWORD len = GetModuleFileNameA(NULL, buf, MAX_PATH);
+	return std::string(buf, len);
+}
+
+static bool spawn_eval_worker(const std::string& exe_path, const std::string& track_path,
+                              const std::string& robot_path, double speed, const TuneSet& ts,
+                              const ScenarioOptions& opt,
+                              const std::string& tag, const std::string& role, WorkerProcess* wp) {
+	wp->tag = tag;
+	wp->role = role;
+	wp->set = ts;
+
+	SECURITY_ATTRIBUTES sa{};
+	sa.nLength = sizeof(sa);
+	sa.bInheritHandle = TRUE;
+	HANDLE hRead = NULL, hWrite = NULL;
+	if (!CreatePipe(&hRead, &hWrite, &sa, 0))
+		return false;
+	SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0);
+
+	std::string cmd = "\"" + exe_path + "\" eval-worker --track \"" + track_path + "\"";
+	if (!robot_path.empty())
+		cmd += " --robot \"" + robot_path + "\"";
+	if (opt.off_track_mm > 0)
+		cmd += " --off-track " + std::to_string(opt.off_track_mm);
+
+	char buf[300];
+	std::snprintf(buf, sizeof buf,
+		" --set base_mps=%.3f --set steer_kp=%.4f --set steer_kd_s=%.4f "
+		"--set lat_acc_max=%.2f --set brake_margin_m=%.2f "
+		"--set target_shift=%.2f --set target_curve_gain=%.2f "
+		"--set slalom_ratio=%.2f --set yaw_kp=%.2f --set yaw_ki=%.2f",
+		speed, ts.kp, ts.kd,
+		ts.lat, ts.brake_margin,
+		ts.target_shift, ts.target_curve_gain,
+		ts.sl, ts.yaw_kp, ts.yaw_ki);
+	cmd += buf;
+
+	for (const auto& [k, v] : opt.params) {
+		if (k != "base_mps" && k != "steer_kp" && k != "steer_kd" && k != "steer_kd_s" &&
+		    k != "lat_acc_max" && k != "brake_margin_m" && k != "target_shift" &&
+		    k != "target_curve_gain" && k != "slalom_ratio" && k != "yaw_kp" && k != "yaw_ki") {
+			cmd += " --set " + k + "=" + std::to_string(v);
+		}
+	}
+
+	STARTUPINFOA si{};
+	si.cb = sizeof(si);
+	si.dwFlags |= STARTF_USESTDHANDLES;
+	si.hStdOutput = hWrite;
+	si.hStdError = hWrite;
+	PROCESS_INFORMATION pi{};
+
+	BOOL ok = CreateProcessA(NULL, cmd.data(), NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+	CloseHandle(hWrite);
+
+	if (!ok) {
+		CloseHandle(hRead);
+		return false;
+	}
+	CloseHandle(pi.hThread);
+	wp->hProcess = pi.hProcess;
+	wp->hPipeRead = hRead;
+	return true;
+}
+
+static bool read_worker_result(WorkerProcess* wp) {
+	if (!wp->hProcess) return false;
+	WaitForSingleObject(wp->hProcess, INFINITE);
+	CloseHandle(wp->hProcess);
+	wp->hProcess = NULL;
+
+	std::string out;
+	char buf[512];
+	DWORD read_bytes = 0;
+	while (ReadFile(wp->hPipeRead, buf, sizeof(buf) - 1, &read_bytes, NULL) && read_bytes > 0) {
+		buf[read_bytes] = '\0';
+		out += buf;
+	}
+	CloseHandle(wp->hPipeRead);
+	wp->hPipeRead = NULL;
+
+	size_t p = out.find("WORKER_RESULT:");
+	if (p == std::string::npos) return false;
+	std::string line = out.substr(p + 14);
+	size_t s = line.find_first_not_of(" \t");
+	if (s != std::string::npos) line = line.substr(s);
+
+	wp->result = TrialResult{};
+	if (line.rfind("PASS", 0) == 0) {
+		wp->result.pass = true;
+		std::sscanf(line.c_str(), "PASS lap4=%lf pace=%lf dist_diff=%lf max_beta=%lf weave=%lf",
+			&wp->result.lap4_s, &wp->result.pace, &wp->result.dist_diff, &wp->result.max_beta_deg, &wp->result.weave_dps);
+		size_t dpos = line.find("detail=");
+		if (dpos != std::string::npos) {
+			wp->result.detail = line.substr(dpos + 7);
+			while (!wp->result.detail.empty() && (wp->result.detail.back() == '\r' || wp->result.detail.back() == '\n'))
+				wp->result.detail.pop_back();
+		}
+	} else if (line.rfind("FAIL", 0) == 0) {
+		wp->result.pass = false;
+		int d1 = 0, ov = 0;
+		std::sscanf(line.c_str(), "FAIL d1=%d ov=%d beta=%lf lat=%lf weave=%lf fail_v=%lf",
+			&d1, &ov, &wp->result.max_beta_deg, &wp->result.max_lat_mm, &wp->result.weave_dps, &wp->result.fail_v);
+		wp->result.d1_failed = (d1 != 0);
+		wp->result.was_oversteer = (ov != 0);
+		size_t dpos = line.find("detail=");
+		if (dpos != std::string::npos) {
+			wp->result.detail = line.substr(dpos + 7);
+			while (!wp->result.detail.empty() && (wp->result.detail.back() == '\r' || wp->result.detail.back() == '\n'))
+				wp->result.detail.pop_back();
+		}
+	}
+	return true;
+}
+#endif
+
+struct SensorPassDiag {
+	std::string name;             // "M_L", "IR_0", "IR_15", "M_R"
+	std::string role;             // "Left Mark", "Left Line", "Right Line", "Right Mark"
+	int index = -1;
+	double lat_mm = 0.0;          // Trajectory lateral position at marker crossing (mm)
+	double dist_to_center_mm = 0.0;// Absolute distance from target marker center (mm)
+	double boundary_miss_mm = 0.0; // >0: outside outer edge by, <0: inside inner edge by, 0: inside zone
+	bool in_zone = false;         // Whether sensor trajectory entered marker zone
+	bool is_opposite = false;     // True if sensor is on opposite side of track
+	double clearance_mm = 0.0;    // Margin inside zone (mm)
+	double min_2d_dist_mm = 0.0;  // Minimum 2D Euclidean distance to marker patch
+};
+
+struct MarkerMissDiag {
+	size_t k = 0;
+	char want = '?';
+	char got = '?';
+	double marker_s = 0.0;              // Expected marker position on track
+	Vec2 marker_pos;                    // Expected marker 2D center
+
+	bool is_skipped = false;            // True if completely unread / skipped
+	bool is_ghost = false;              // True if extra trigger on track with no marker
+	bool has_actual_trigger = false;
+	double actual_odom_m = 0.0;         // Odometer distance where firmware triggered
+	double actual_s = 0.0;              // Track s where firmware triggered
+	Vec2 actual_pos;                    // Robot position where firmware triggered
+	double longitudinal_err_m = 0.0;    // actual_s - marker_s
+	double spatial_gap_m = 0.0;         // distance between actual trigger and expected marker
+
+	std::vector<SensorPassDiag> edge_sensors; // M_L, IR_0, IR_15, M_R
+	SensorPassDiag primary_mark_sensor;      // Target side marker sensor (M_L or M_R)
+	SensorPassDiag primary_line_sensor;      // Target side line sensor (IR_0 or IR_15)
+
+	std::string closest_sensor;
+	double closest_dist_mm = 0.0;
+	double closest_lat_mm = 0.0;
+
+	double robot_lat_mm = 0.0;
+	double robot_beta_deg = 0.0;
+	bool valid = false;
+};
+
+static MarkerMissDiag analyze_marker_miss(const DriveResult& d, const Track& track, const RobotParams& rp) {
+	MarkerMissDiag diag;
+	const auto events = track.expected_marker_events();
+
+	// 1. Resolve all firmware triggers to exact track s via sample marker transition
+	struct FwTriggerInfo {
+		int idx;
+		char type;
+		double odom_m;
+		double s_m;
+		Vec2 pos;
+	};
+	std::vector<FwTriggerInfo> fw_trigs;
+	size_t cur_marker_idx = 0;
+	for (const Sample& smp : d.samples) {
+		while (cur_marker_idx < (size_t)smp.markers && cur_marker_idx < d.markers.size()) {
+			char t = "?LRCU"[d.markers[cur_marker_idx].type >= 1 && d.markers[cur_marker_idx].type <= 4 ? d.markers[cur_marker_idx].type : 0];
+			fw_trigs.push_back({(int)cur_marker_idx, t, smp.odom, smp.s, {smp.x, smp.y}});
+			cur_marker_idx++;
+		}
+	}
+	while (cur_marker_idx < d.markers.size()) {
+		char t = "?LRCU"[d.markers[cur_marker_idx].type >= 1 && d.markers[cur_marker_idx].type <= 4 ? d.markers[cur_marker_idx].type : 0];
+		double last_s = d.samples.empty() ? 0.0 : d.samples.back().s;
+		Vec2 last_pos = d.samples.empty() ? Vec2{0, 0} : Vec2{d.samples.back().x, d.samples.back().y};
+		fw_trigs.push_back({(int)cur_marker_idx, t, 0.0, last_s, last_pos});
+		cur_marker_idx++;
+	}
+
+	// 2. Spatial matching: match each expected marker to closest unused trigger within 0.60m
+	std::vector<bool> matched_fw(fw_trigs.size(), false);
+	int first_miss_idx = -1;
+	int associated_fw_idx = -1;
+	bool is_skipped = false;
+
+	for (size_t i = 0; i < events.size(); ++i) {
+		const auto& ev = events[i];
+		int best_j = -1;
+		double best_ds = 1e9;
+		for (size_t j = 0; j < fw_trigs.size(); ++j) {
+			if (matched_fw[j]) continue;
+			double ds = fw_trigs[j].s_m - ev.s;
+			if (track.closed()) {
+				while (ds > track.length() / 2.0) ds -= track.length();
+				while (ds < -track.length() / 2.0) ds += track.length();
+			}
+			if (std::abs(ds) <= 0.60 && fw_trigs[j].type == ev.type) {
+				if (std::abs(ds) < best_ds) {
+					best_ds = std::abs(ds);
+					best_j = (int)j;
+				}
+			}
+		}
+		if (best_j >= 0) {
+			matched_fw[best_j] = true;
+		} else {
+			first_miss_idx = (int)i;
+			int wrong_j = -1;
+			double best_wrong_ds = 1e9;
+			for (size_t j = 0; j < fw_trigs.size(); ++j) {
+				if (matched_fw[j]) continue;
+				double ds = fw_trigs[j].s_m - ev.s;
+				if (track.closed()) {
+					while (ds > track.length() / 2.0) ds -= track.length();
+					while (ds < -track.length() / 2.0) ds += track.length();
+				}
+				if (std::abs(ds) <= 0.60) {
+					if (std::abs(ds) < best_wrong_ds) {
+						best_wrong_ds = std::abs(ds);
+						wrong_j = (int)j;
+					}
+				}
+			}
+			if (wrong_j >= 0) {
+				associated_fw_idx = wrong_j;
+				matched_fw[wrong_j] = true;
+				is_skipped = false;
+			} else {
+				associated_fw_idx = -1;
+				is_skipped = true; // COMPLETELY SKIPPED / UNREAD / 못보고 지나침!
+			}
+			break;
+		}
+	}
+
+	if (first_miss_idx < 0) {
+		int ghost_j = -1;
+		for (size_t j = 0; j < fw_trigs.size(); ++j) {
+			if (!matched_fw[j]) {
+				ghost_j = (int)j;
+				break;
+			}
+		}
+		if (ghost_j < 0) {
+			return diag; // All OK!
+		}
+		diag.valid = true;
+		diag.is_ghost = true;
+		diag.k = events.size();
+		diag.got = fw_trigs[ghost_j].type;
+		diag.want = '?';
+		diag.marker_s = fw_trigs[ghost_j].s_m;
+		diag.actual_s = fw_trigs[ghost_j].s_m;
+		diag.actual_odom_m = fw_trigs[ghost_j].odom_m;
+		diag.has_actual_trigger = true;
+		return diag;
+	}
+
+	const auto& ev = events[first_miss_idx];
+	diag.valid = true;
+	diag.k = (size_t)first_miss_idx;
+	diag.want = ev.type;
+	diag.is_skipped = is_skipped;
+	diag.marker_s = ev.s;
+	diag.marker_pos = ev.center;
+
+	if (associated_fw_idx >= 0) {
+		diag.has_actual_trigger = true;
+		diag.got = fw_trigs[associated_fw_idx].type;
+		diag.actual_odom_m = fw_trigs[associated_fw_idx].odom_m;
+		diag.actual_s = fw_trigs[associated_fw_idx].s_m;
+		diag.actual_pos = fw_trigs[associated_fw_idx].pos;
+		double ds_err = diag.actual_s - ev.s;
+		if (track.closed()) {
+			while (ds_err > track.length() / 2.0) ds_err -= track.length();
+			while (ds_err < -track.length() / 2.0) ds_err += track.length();
+		}
+		diag.longitudinal_err_m = ds_err;
+		double dx = diag.actual_pos.x - ev.center.x;
+		double dy = diag.actual_pos.y - ev.center.y;
+		diag.spatial_gap_m = std::sqrt(dx * dx + dy * dy);
+	} else {
+		diag.got = '?';
+	}
+
+	struct SensorInfo {
+		std::string name;
+		std::string role;
+		Vec2 local;
+	};
+	std::vector<SensorInfo> sensors(18);
+	for (int i = 0; i < 16; i++) {
+		double sx = (rp.ir_sensors.size() >= 16) ? rp.ir_sensors[i][0] : rp.sensor_x;
+		double sy = (rp.ir_sensors.size() >= 16) ? rp.ir_sensors[i][1] : -(-1.0 + 2.0 * i / 15.0) * rp.sensor_half_width;
+		std::string role = (i == 0) ? "Left Line " : ((i == 15) ? "Right Line" : ("Line " + std::to_string(i)));
+		sensors[i] = {"IR_" + std::to_string(i), role, {sx, sy}};
+	}
+	double mark_sx = (rp.ir_sensors.size() >= 16) ? rp.ir_sensors[0][0] : rp.sensor_x;
+	sensors[16] = {"M_L", "Left Mark ", {mark_sx, rp.marker_sensor_y}};
+	sensors[17] = {"M_R", "Right Mark", {mark_sx, -rp.marker_sensor_y}};
+
+	const Vec2 P = ev.p_centerline;
+	const Vec2 T = {std::cos(ev.th), std::sin(ev.th)};
+	const Vec2 N = {-std::sin(ev.th), std::cos(ev.th)};
+	const double hl = 0.010; // half length 10mm along track
+
+	struct SensorSample {
+		double u;
+		double v;
+	};
+	std::vector<std::vector<SensorSample>> sensor_traj(18);
+
+	double best_sample_ds = 1e9;
+	double best_robot_lat = 0.0;
+	double best_robot_beta = 0.0;
+
+	for (const Sample& smp : d.samples) {
+		double ds = smp.s - ev.s;
+		if (track.closed()) {
+			while (ds > track.length() / 2.0) ds -= track.length();
+			while (ds < -track.length() / 2.0) ds += track.length();
+		}
+		if (std::abs(ds) > 0.50)
+			continue;
+
+		const double rad = smp.yaw_deg * 0.017453292519943295;
+		const double cos_th = std::cos(rad);
+		const double sin_th = std::sin(rad);
+
+		for (int i = 0; i < 18; i++) {
+			double wx = smp.x + sensors[i].local.x * cos_th - sensors[i].local.y * sin_th;
+			double wy = smp.y + sensors[i].local.x * sin_th + sensors[i].local.y * cos_th;
+
+			double u = (wx - P.x) * T.x + (wy - P.y) * T.y;
+			double v = (wx - P.x) * N.x + (wy - P.y) * N.y;
+			sensor_traj[i].push_back({u, v});
+		}
+
+		if (std::abs(ds) < best_sample_ds) {
+			best_sample_ds = std::abs(ds);
+			best_robot_lat = smp.lat_mm;
+			best_robot_beta = smp.beta_deg;
+		}
+	}
+	diag.robot_lat_mm = best_robot_lat;
+	diag.robot_beta_deg = best_robot_beta;
+
+	auto get_crossing_v = [](const std::vector<SensorSample>& traj) -> double {
+		if (traj.empty())
+			return 0.0;
+		for (size_t k = 1; k < traj.size(); ++k) {
+			double u0 = traj[k - 1].u;
+			double u1 = traj[k].u;
+			if ((u0 <= 0.0 && u1 >= 0.0) || (u0 >= 0.0 && u1 <= 0.0)) {
+				double denom = u1 - u0;
+				double alpha = (std::abs(denom) > 1e-6) ? (-u0 / denom) : 0.5;
+				alpha = std::clamp(alpha, 0.0, 1.0);
+				return traj[k - 1].v + alpha * (traj[k].v - traj[k - 1].v);
+			}
+		}
+		size_t best_k = 0;
+		double min_abs_u = 1e9;
+		for (size_t k = 0; k < traj.size(); ++k) {
+			double au = std::abs(traj[k].u);
+			if (au < min_abs_u) {
+				min_abs_u = au;
+				best_k = k;
+			}
+		}
+		return traj[best_k].v;
+	};
+
+	auto get_min_2d_dist = [&](int i, char side) -> double {
+		double min_dist = 1e9;
+		for (const auto& pt : sensor_traj[i]) {
+			double du = std::max(0.0, std::abs(pt.u) - hl);
+			double dv = 0.0;
+			if (side == 'L') {
+				dv = (pt.v < 0.050) ? (0.050 - pt.v) : ((pt.v > 0.100) ? (pt.v - 0.100) : 0.0);
+			} else if (side == 'R') {
+				dv = (pt.v > -0.050) ? (-0.050 - pt.v) : ((pt.v < -0.100) ? (-pt.v - 0.100) : 0.0);
+			} else { // 'C'
+				double abs_v = std::abs(pt.v);
+				dv = (abs_v < 0.050) ? (0.050 - abs_v) : ((abs_v > 0.100) ? (abs_v - 0.100) : 0.0);
+			}
+			double d = std::hypot(du, dv);
+			if (d < min_dist)
+				min_dist = d;
+		}
+		return (min_dist < 1e8) ? min_dist : 0.0;
+	};
+
+	auto eval_sensor = [&](int idx, char side) -> SensorPassDiag {
+		SensorPassDiag sp;
+		sp.index = idx;
+		sp.name = sensors[idx].name;
+		sp.role = sensors[idx].role;
+		double v_cross = get_crossing_v(sensor_traj[idx]);
+		sp.lat_mm = v_cross * 1000.0;
+		sp.min_2d_dist_mm = get_min_2d_dist(idx, side) * 1000.0;
+
+		double center_lat = (side == 'L') ? +75.0 : -75.0;
+		sp.dist_to_center_mm = std::abs(sp.lat_mm - center_lat);
+
+		if (side == 'L') {
+			if (sp.lat_mm > 100.0) {
+				sp.boundary_miss_mm = +(sp.lat_mm - 100.0);
+				sp.in_zone = false;
+				sp.is_opposite = false;
+			} else if (sp.lat_mm < 50.0) {
+				sp.boundary_miss_mm = -(50.0 - sp.lat_mm);
+				sp.in_zone = false;
+				sp.is_opposite = (sp.lat_mm < 0.0);
+			} else {
+				sp.boundary_miss_mm = 0.0;
+				sp.in_zone = true;
+				sp.is_opposite = false;
+				sp.clearance_mm = std::min(sp.lat_mm - 50.0, 100.0 - sp.lat_mm);
+			}
+		} else if (side == 'R') {
+			if (sp.lat_mm < -100.0) {
+				sp.boundary_miss_mm = +(-sp.lat_mm - 100.0);
+				sp.in_zone = false;
+				sp.is_opposite = false;
+			} else if (sp.lat_mm > -50.0) {
+				sp.boundary_miss_mm = -(-50.0 - sp.lat_mm);
+				sp.in_zone = false;
+				sp.is_opposite = (sp.lat_mm > 0.0);
+			} else {
+				sp.boundary_miss_mm = 0.0;
+				sp.in_zone = true;
+				sp.is_opposite = false;
+				sp.clearance_mm = std::min(sp.lat_mm - (-100.0), -50.0 - sp.lat_mm);
+			}
+		}
+		return sp;
+	};
+
+	char eval_side_left = (ev.type == 'R') ? 'R' : 'L';
+	char eval_side_right = (ev.type == 'L') ? 'L' : 'R';
+	if (ev.type == 'C') {
+		eval_side_left = 'L';
+		eval_side_right = 'R';
+	}
+
+	diag.edge_sensors.push_back(eval_sensor(16, eval_side_left));  // M_L
+	diag.edge_sensors.push_back(eval_sensor(0,  eval_side_left));  // IR_0
+	diag.edge_sensors.push_back(eval_sensor(15, eval_side_right)); // IR_15
+	diag.edge_sensors.push_back(eval_sensor(17, eval_side_right)); // M_R
+
+	if (ev.type == 'L') {
+		diag.primary_mark_sensor = diag.edge_sensors[0]; // M_L
+		diag.primary_line_sensor = diag.edge_sensors[1]; // IR_0
+	} else if (ev.type == 'R') {
+		diag.primary_mark_sensor = diag.edge_sensors[3]; // M_R
+		diag.primary_line_sensor = diag.edge_sensors[2]; // IR_15
+	} else { // 'C'
+		diag.primary_mark_sensor = diag.edge_sensors[0]; // M_L
+		diag.primary_line_sensor = diag.edge_sensors[3]; // M_R
+	}
+
+	int best_i = 0;
+	double best_dist = 1e9;
+	char target_side = (ev.type == 'R') ? 'R' : 'L';
+	for (int i = 0; i < 18; i++) {
+		double d = get_min_2d_dist(i, target_side);
+		if (d < best_dist) {
+			best_dist = d;
+			best_i = i;
+		}
+	}
+	diag.closest_sensor = sensors[best_i].name;
+	diag.closest_dist_mm = best_dist * 1000.0;
+	diag.closest_lat_mm = get_crossing_v(sensor_traj[best_i]) * 1000.0;
+
+	return diag;
+}
+
+static std::vector<MarkerVisualInfo> build_marker_visual_diags(const DriveResult& d, const Track& track, const RobotParams& rp) {
+	std::vector<MarkerVisualInfo> diags;
+	const auto events = track.expected_marker_events();
+
+	// 1. Resolve all firmware triggers to exact track s via sample marker transition
+	struct FwTriggerInfo {
+		int idx;
+		char type;
+		double odom_m;
+		double s_m;
+		Vec2 pos;
+	};
+	std::vector<FwTriggerInfo> fw_trigs;
+	size_t cur_marker_idx = 0;
+	for (const Sample& smp : d.samples) {
+		while (cur_marker_idx < (size_t)smp.markers && cur_marker_idx < d.markers.size()) {
+			char t = "?LRCU"[d.markers[cur_marker_idx].type >= 1 && d.markers[cur_marker_idx].type <= 4 ? d.markers[cur_marker_idx].type : 0];
+			fw_trigs.push_back({(int)cur_marker_idx, t, smp.odom, smp.s, {smp.x, smp.y}});
+			cur_marker_idx++;
+		}
+	}
+	while (cur_marker_idx < d.markers.size()) {
+		char t = "?LRCU"[d.markers[cur_marker_idx].type >= 1 && d.markers[cur_marker_idx].type <= 4 ? d.markers[cur_marker_idx].type : 0];
+		double last_s = d.samples.empty() ? 0.0 : d.samples.back().s;
+		Vec2 last_pos = d.samples.empty() ? Vec2{0, 0} : Vec2{d.samples.back().x, d.samples.back().y};
+		fw_trigs.push_back({(int)cur_marker_idx, t, 0.0, last_s, last_pos});
+		cur_marker_idx++;
+	}
+
+	std::vector<bool> matched_fw(fw_trigs.size(), false);
+	double mark_sx = (rp.ir_sensors.size() >= 16) ? rp.ir_sensors[0][0] : rp.sensor_x;
+	double mark_sy = rp.marker_sensor_y;
+
+	// Loop over all expected markers
+	for (size_t i = 0; i < events.size(); ++i) {
+		const auto& ev = events[i];
+		MarkerVisualInfo m;
+		m.marker_idx = (int)i;
+		m.want = ev.type;
+		m.s = ev.s;
+		m.tape_center = ev.center;
+		m.tape_th = ev.th;
+		m.tape_hl = track.mark_along() / 2.0;
+		m.tape_hw = track.mark_across() / 2.0;
+		m.side = ev.side;
+
+		// 1. Try to find exact type match within 0.60m
+		int best_j = -1;
+		double best_ds = 1e9;
+		for (size_t j = 0; j < fw_trigs.size(); ++j) {
+			if (matched_fw[j]) continue;
+			double ds = fw_trigs[j].s_m - ev.s;
+			if (track.closed()) {
+				while (ds > track.length() / 2.0) ds -= track.length();
+				while (ds < -track.length() / 2.0) ds += track.length();
+			}
+			if (std::abs(ds) <= 0.60 && fw_trigs[j].type == ev.type) {
+				if (std::abs(ds) < best_ds) {
+					best_ds = std::abs(ds);
+					best_j = (int)j;
+				}
+			}
+		}
+
+		if (best_j >= 0) {
+			matched_fw[best_j] = true;
+			m.got = ev.type;
+			m.status = 1; // OK
+			m.label = "OK";
+			m.reason = "Correctly detected by firmware";
+		} else {
+			// Check for wrong type match within 0.60m
+			int wrong_j = -1;
+			double best_wrong_ds = 1e9;
+			for (size_t j = 0; j < fw_trigs.size(); ++j) {
+				if (matched_fw[j]) continue;
+				double ds = fw_trigs[j].s_m - ev.s;
+				if (track.closed()) {
+					while (ds > track.length() / 2.0) ds -= track.length();
+					while (ds < -track.length() / 2.0) ds += track.length();
+				}
+				if (std::abs(ds) <= 0.60) {
+					if (std::abs(ds) < best_wrong_ds) {
+						best_wrong_ds = std::abs(ds);
+						wrong_j = (int)j;
+					}
+				}
+			}
+			if (wrong_j >= 0) {
+				matched_fw[wrong_j] = true;
+				m.got = fw_trigs[wrong_j].type;
+				m.status = 3; // WRONG_TYPE
+				m.label = "WRONG TYPE";
+			} else {
+				m.got = '?';
+				m.status = 2; // MISSED
+				m.label = "MISSED (UNREAD)";
+			}
+		}
+
+		// Reconstruct robot pose at marker crossing
+		const Vec2 P = ev.p_centerline;
+		const Vec2 T = {std::cos(ev.th), std::sin(ev.th)};
+		const Vec2 N = {-std::sin(ev.th), std::cos(ev.th)};
+
+		double target_sens_y = 0.0;
+		if (ev.type == 'L') {
+			target_sens_y = mark_sy;
+			m.sensor_name = "M_L";
+		} else if (ev.type == 'R') {
+			target_sens_y = -mark_sy;
+			m.sensor_name = "M_R";
+		} else {
+			target_sens_y = (ev.side < 0) ? -mark_sy : mark_sy;
+			m.sensor_name = (ev.side < 0) ? "M_R" : "M_L";
+		}
+
+		double best_u_abs = 1e9;
+		int best_smp_idx = -1;
+		Vec2 best_sensor_w = {0, 0};
+
+		for (int s_idx = 0; s_idx < (int)d.samples.size(); ++s_idx) {
+			const auto& smp = d.samples[s_idx];
+			double ds = smp.s - ev.s;
+			if (track.closed()) {
+				while (ds > track.length() / 2.0) ds -= track.length();
+				while (ds < -track.length() / 2.0) ds += track.length();
+			}
+			if (std::abs(ds) > 0.60)
+				continue;
+
+			double rad = smp.yaw_deg * 0.017453292519943295;
+			double c_rad = std::cos(rad), s_rad = std::sin(rad);
+			double wx = smp.x + mark_sx * c_rad - target_sens_y * s_rad;
+			double wy = smp.y + mark_sx * s_rad + target_sens_y * c_rad;
+
+			double u = (wx - P.x) * T.x + (wy - P.y) * T.y;
+			if (std::abs(u) < best_u_abs) {
+				best_u_abs = std::abs(u);
+				best_smp_idx = s_idx;
+				best_sensor_w = {wx, wy};
+			}
+		}
+
+		if (best_smp_idx >= 0) {
+			const auto& smp = d.samples[best_smp_idx];
+			m.has_reconstruction = true;
+			m.robot_x = smp.x;
+			m.robot_y = smp.y;
+			m.robot_th = smp.yaw_deg * 0.017453292519943295;
+			m.robot_v = smp.v;
+			m.robot_beta = smp.beta_deg;
+			m.robot_lat_mm = smp.lat_mm;
+			m.sensor_pos = best_sensor_w;
+			m.sensor_state = smp.sensor_state;
+			bool any_nonzero = false;
+			for (int k = 0; k < 18; ++k) {
+				m.raw_normalized[k] = smp.normalized[k];
+				m.sensors[k] = smp.normalized[k] / 255.0f;
+				m.sensor_on[k] = ((smp.sensor_state >> k) & 1u) != 0;
+				if (smp.normalized[k] > 0 || m.sensor_on[k])
+					any_nonzero = true;
+			}
+			if (!any_nonzero) {
+				for (int k = 0; k < 18; ++k) {
+					double sx = (k < 16) ? ((rp.ir_sensors.size() >= 16) ? rp.ir_sensors[k][0] : rp.sensor_x) : mark_sx;
+					double sy = (k < 16) ? ((rp.ir_sensors.size() >= 16) ? rp.ir_sensors[k][1] : -(-1.0 + 2.0 * k / 15.0) * rp.sensor_half_width)
+					                     : (k == 16 ? mark_sy : -mark_sy);
+					double rad = m.robot_th;
+					double c_rad = std::cos(rad), s_rad = std::sin(rad);
+					double wx = m.robot_x + sx * c_rad - sy * s_rad;
+					double wy = m.robot_y + sx * s_rad + sy * c_rad;
+					double cov = track.coverage({wx, wy}, 0.003);
+					m.sensors[k] = static_cast<float>(cov);
+					m.sensor_on[k] = (cov >= 0.40);
+					m.raw_normalized[k] = static_cast<uint8_t>(std::clamp(cov * 255.0, 0.0, 255.0));
+					if (m.sensor_on[k])
+						m.sensor_state |= (1u << k);
+				}
+			}
+
+			double u = (best_sensor_w.x - P.x) * T.x + (best_sensor_w.y - P.y) * T.y;
+			double v = (best_sensor_w.x - P.x) * N.x + (best_sensor_w.y - P.y) * N.y;
+
+			double inner_v = 0.050; // track.line_width()/2 + mark_gap
+			double outer_v = 0.100; // inner_v + mark_across
+			if (ev.type == 'L') {
+				if (v > outer_v) {
+					m.miss_gap_mm = (v - outer_v) * 1000.0;
+					m.tape_edge_pos = {P.x + outer_v * N.x + u * T.x, P.y + outer_v * N.y + u * T.y};
+					char r_buf[160];
+					std::snprintf(r_buf, sizeof r_buf, "Physical miss: %s was %.1f mm OUTSIDE outer edge (drift)", m.sensor_name.c_str(), m.miss_gap_mm);
+					m.reason = r_buf;
+				} else if (v < inner_v) {
+					m.miss_gap_mm = (inner_v - v) * 1000.0;
+					m.tape_edge_pos = {P.x + inner_v * N.x + u * T.x, P.y + inner_v * N.y + u * T.y};
+					char r_buf[160];
+					std::snprintf(r_buf, sizeof r_buf, "Physical miss: %s was %.1f mm INSIDE inner edge", m.sensor_name.c_str(), m.miss_gap_mm);
+					m.reason = r_buf;
+				} else {
+					m.miss_gap_mm = 0.0;
+					m.tape_edge_pos = best_sensor_w;
+					if (m.status == 3) {
+						char r_buf[160];
+						std::snprintf(r_buf, sizeof r_buf, "Logic issue: %s passed tape, but triggered '%c' instead of '%c'", m.sensor_name.c_str(), m.got, m.want);
+						m.reason = r_buf;
+					} else if (m.status == 2) {
+						char r_buf[160];
+						std::snprintf(r_buf, sizeof r_buf, "Threshold issue: %s passed over tape, but firmware failed to trigger", m.sensor_name.c_str());
+						m.reason = r_buf;
+					}
+				}
+			} else if (ev.type == 'R') {
+				inner_v = -0.050;
+				outer_v = -0.100;
+				if (v < outer_v) {
+					m.miss_gap_mm = (outer_v - v) * 1000.0;
+					m.tape_edge_pos = {P.x + outer_v * N.x + u * T.x, P.y + outer_v * N.y + u * T.y};
+					char r_buf[160];
+					std::snprintf(r_buf, sizeof r_buf, "Physical miss: %s was %.1f mm OUTSIDE outer edge (drift)", m.sensor_name.c_str(), m.miss_gap_mm);
+					m.reason = r_buf;
+				} else if (v > inner_v) {
+					m.miss_gap_mm = (v - inner_v) * 1000.0;
+					m.tape_edge_pos = {P.x + inner_v * N.x + u * T.x, P.y + inner_v * N.y + u * T.y};
+					char r_buf[160];
+					std::snprintf(r_buf, sizeof r_buf, "Physical miss: %s was %.1f mm INSIDE inner edge", m.sensor_name.c_str(), m.miss_gap_mm);
+					m.reason = r_buf;
+				} else {
+					m.miss_gap_mm = 0.0;
+					m.tape_edge_pos = best_sensor_w;
+					if (m.status == 3) {
+						char r_buf[160];
+						std::snprintf(r_buf, sizeof r_buf, "Logic issue: %s passed tape, but triggered '%c' instead of '%c'", m.sensor_name.c_str(), m.got, m.want);
+						m.reason = r_buf;
+					} else if (m.status == 2) {
+						char r_buf[160];
+						std::snprintf(r_buf, sizeof r_buf, "Threshold issue: %s passed over tape, but firmware failed to trigger", m.sensor_name.c_str());
+						m.reason = r_buf;
+					}
+				}
+			} else {
+				m.miss_gap_mm = 0.0;
+				m.tape_edge_pos = best_sensor_w;
+				if (m.status == 2)
+					m.reason = "Unread crossing / goal marker";
+				else if (m.status == 3)
+					m.reason = "Wrong type detected at crossing / goal";
+			}
+		} else {
+			m.has_reconstruction = false;
+			m.reason = "Robot did not reach marker (stopped or went off-track beforehand)";
+		}
+
+		diags.push_back(m);
+	}
+
+	// 2. Ghost triggers (unmatched firmware triggers)
+	for (size_t j = 0; j < fw_trigs.size(); ++j) {
+		if (matched_fw[j]) continue;
+		MarkerVisualInfo gi;
+		gi.marker_idx = -(int)(j + 1);
+		gi.want = '-';
+		gi.got = fw_trigs[j].type;
+		gi.s = fw_trigs[j].s_m;
+		gi.tape_center = fw_trigs[j].pos;
+		gi.status = 4; // GHOST
+		gi.label = "GHOST TRIGGER";
+		char r_buf[160];
+		std::snprintf(r_buf, sizeof r_buf, "Ghost trigger: firmware fired '%c' at s=%.2fm with no marker on track", gi.got, gi.s);
+		gi.reason = r_buf;
+
+		double best_ds = 1e9;
+		int best_smp_idx = -1;
+		for (int s_idx = 0; s_idx < (int)d.samples.size(); ++s_idx) {
+			double ds = std::abs(d.samples[s_idx].s - gi.s);
+			if (ds < best_ds) {
+				best_ds = ds;
+				best_smp_idx = s_idx;
+			}
+		}
+		if (best_smp_idx >= 0) {
+			const auto& smp = d.samples[best_smp_idx];
+			gi.has_reconstruction = true;
+			gi.robot_x = smp.x;
+			gi.robot_y = smp.y;
+			gi.robot_th = smp.yaw_deg * 0.017453292519943295;
+			gi.robot_v = smp.v;
+			gi.robot_beta = smp.beta_deg;
+			gi.robot_lat_mm = smp.lat_mm;
+			gi.sensor_name = (gi.got == 'R') ? "M_R" : "M_L";
+			double rad = gi.robot_th;
+			double target_sy = (gi.got == 'R') ? -mark_sy : mark_sy;
+			gi.sensor_pos = {smp.x + mark_sx * std::cos(rad) - target_sy * std::sin(rad),
+			                 smp.y + mark_sx * std::sin(rad) + target_sy * std::cos(rad)};
+			gi.tape_edge_pos = gi.sensor_pos;
+			gi.miss_gap_mm = 0.0;
+			gi.sensor_state = smp.sensor_state;
+			for (int k = 0; k < 18; ++k) {
+				gi.raw_normalized[k] = smp.normalized[k];
+				gi.sensors[k] = smp.normalized[k] / 255.0f;
+				gi.sensor_on[k] = ((smp.sensor_state >> k) & 1u) != 0;
+			}
+		}
+		diags.push_back(gi);
+	}
+
+	return diags;
 }
 
 ScenarioResult run_scenario(const ScenarioOptions& opt) {
@@ -1288,6 +2164,8 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 	if (opt.track_path == "random") {
 		TrackGenOptions g;
 		g.seed = map_seed;
+		g.complex_mode = opt.complex_track || !opt.hyper_track;
+		g.hyper_mode = opt.hyper_track;
 		generated = generate_track(g, &err);
 		if (generated.empty() || !track.load_text(generated, "random", &err)) {
 			res.error = err;
@@ -1414,6 +2292,9 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 			for (int i = 0; i < 16; i++)
 				pts.push_back(i < (int) rp.ir_sensors.size() ? rp.ir_sensors[i]
 				                                              : std::array<double, 2>{rp.sensor_x, -(-1.0 + 2.0 * i / 15.0) * rp.sensor_half_width});
+			double mark_sx = (rp.ir_sensors.size() >= 16) ? rp.ir_sensors[0][0] : rp.sensor_x;
+			pts.push_back({mark_sx, rp.marker_sensor_y});
+			pts.push_back({mark_sx, -rp.marker_sensor_y});
 			viewer->set_sensor_points(pts);
 		}
 		live = std::make_unique<LiveView>(*viewer, *robot, track, opt.interactive, opt.view_speed);
@@ -1529,6 +2410,8 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 		smp.markers = tm.marker_count;
 		smp.contact = r.chassis_contact();
 		smp.beta_deg = 0.0f;
+		smp.sensor_state = tm.sensor_state;
+		std::memcpy(smp.normalized, tm.normalized, 18);
 		if (cur->samples.size() >= 5) {
 			const Sample& pv = cur->samples[cur->samples.size() - 5];
 			double dt = smp.t - pv.t;
@@ -1637,20 +2520,36 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 		else
 			cur->outcome = "finished";
 
-		// logged markers vs. the course
-		std::string got, want = track.expected_markers();
-		for (const FwMarker& x : cur->markers)
-			got += "?LRCU"[x.type >= 1 && x.type <= 4 ? x.type : 0];
-		size_t k = 0;
-		while (k < got.size() && k < want.size() && got[k] == want[k])
-			k++;
-		char buf[96];
-		if (k == got.size() && k == want.size())
+		MarkerMissDiag miss_diag = analyze_marker_miss(*cur, track, rp);
+
+		auto marker_diags = build_marker_visual_diags(*cur, track, rp);
+		if (viewer)
+			viewer->set_marker_diags(marker_diags);
+
+		char buf[256];
+		if (!miss_diag.valid) {
 			cur->marker_check = "OK";
-		else if (k < got.size() && k < want.size())
-			std::snprintf(buf, sizeof buf, "#%zu %c (expected %c)", k, got[k], want[k]), cur->marker_check = buf;
-		else
-			std::snprintf(buf, sizeof buf, "%zu of %zu markers", got.size(), want.size()), cur->marker_check = buf;
+		} else if (miss_diag.is_skipped) {
+			const auto& ms = miss_diag.primary_mark_sensor;
+			const auto& ls = miss_diag.primary_line_sensor;
+			if (ms.boundary_miss_mm != 0.0 || ls.boundary_miss_mm != 0.0) {
+				std::snprintf(buf, sizeof buf, "#%zu %c missed at %.2fm (%s off %+.1fmm, unread)",
+					miss_diag.k, miss_diag.want, miss_diag.marker_s,
+					ms.name.c_str(), ms.boundary_miss_mm);
+			} else {
+				std::snprintf(buf, sizeof buf, "#%zu %c unread at %.2fm (sensor in-zone)",
+					miss_diag.k, miss_diag.want, miss_diag.marker_s);
+			}
+			cur->marker_check = buf;
+		} else if (miss_diag.is_ghost) {
+			std::snprintf(buf, sizeof buf, "ghost trigger '%c' at %.2fm",
+				miss_diag.got, miss_diag.actual_s);
+			cur->marker_check = buf;
+		} else {
+			std::snprintf(buf, sizeof buf, "#%zu %c (expected %c at %.2fm: wrong type)",
+				miss_diag.k, miss_diag.got, miss_diag.want, miss_diag.marker_s);
+			cur->marker_check = buf;
+		}
 
 		if (!opt.quiet) {
 			const double d_diff = cur->dist_m - track.length();
@@ -1697,6 +2596,91 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 					col::Bold, lap_col, cur->lap_time_fw, col::Rst,
 					col::Wht, cur->dist_m, col::Rst, diff_col, d_diff, col::Rst,
 					mk_col, cur->marker_check.c_str(), col::Rst);
+			}
+
+			if (miss_diag.valid) {
+				if (miss_diag.is_skipped) {
+					std::printf("%s[%8.3f s]%s %s[MARKER DIAGNOSIS]%s Missed #%zu '%c' at s=%.2fm (UNREAD / 못보고 지나침):\n",
+						col::Dim, sim->t(), col::Rst,
+						col::Yel, col::Rst,
+						miss_diag.k, miss_diag.want, miss_diag.marker_s);
+					bool any_in_zone = false;
+					double min_tape_miss = 1e9;
+					std::string closest_sensor_name;
+					for (const auto& sp : miss_diag.edge_sensors) {
+						if (sp.is_opposite)
+							continue;
+						double tape_miss = sp.in_zone ? 0.0 : std::abs(sp.boundary_miss_mm);
+						if (tape_miss < min_tape_miss) {
+							min_tape_miss = tape_miss;
+							closest_sensor_name = sp.name;
+						}
+						if (sp.in_zone) {
+							any_in_zone = true;
+							std::printf("              * %-5s (%-10s) : lat = %+6.1f mm | dist to marker:  0.0 mm | %sHIT marker%s (margin %4.1f mm)\n",
+								sp.name.c_str(), sp.role.c_str(), sp.lat_mm,
+								col::Grn, col::Rst, sp.clearance_mm);
+						} else if (sp.boundary_miss_mm > 0.0) {
+							std::printf("              * %-5s (%-10s) : lat = %+6.1f mm | dist to marker: %4.1f mm | %sMISSED by %4.1f mm (OUTSIDE outer edge)%s\n",
+								sp.name.c_str(), sp.role.c_str(), sp.lat_mm, sp.boundary_miss_mm,
+								col::Red, sp.boundary_miss_mm, col::Rst);
+						} else {
+							std::printf("              * %-5s (%-10s) : lat = %+6.1f mm | dist to marker: %4.1f mm | %sMISSED by %4.1f mm (INSIDE inner edge)%s\n",
+								sp.name.c_str(), sp.role.c_str(), sp.lat_mm, -sp.boundary_miss_mm,
+								col::Yel, -sp.boundary_miss_mm, col::Rst);
+						}
+					}
+					if (any_in_zone) {
+						std::printf("              - Miss Reason     : \033[93m[LOGIC/THRESHOLD]\033[0m Sensor passed over marker tape, but firmware failed to trigger\n");
+					} else {
+						std::printf("              - Miss Reason     : \033[91m[PHYSICAL MISS]\033[0m %s missed marker tape by %.1f mm\n",
+							closest_sensor_name.c_str(), min_tape_miss);
+					}
+				} else if (miss_diag.is_ghost) {
+					std::printf("%s[%8.3f s]%s %s[MARKER DIAGNOSIS]%s Ghost trigger '%c' at s=%.2fm (no marker on track at this location)\n",
+						col::Dim, sim->t(), col::Rst,
+						col::Yel, col::Rst,
+						miss_diag.got, miss_diag.actual_s);
+				} else {
+					std::printf("%s[%8.3f s]%s %s[MARKER DIAGNOSIS]%s Missed #%zu '%c' (expected '%c') at s=%.2fm (WRONG TYPE):\n",
+						col::Dim, sim->t(), col::Rst,
+						col::Yel, col::Rst,
+						miss_diag.k, miss_diag.got, miss_diag.want, miss_diag.marker_s);
+					bool any_in_zone = false;
+					double min_tape_miss = 1e9;
+					std::string closest_sensor_name;
+					for (const auto& sp : miss_diag.edge_sensors) {
+						if (sp.is_opposite)
+							continue;
+						double tape_miss = sp.in_zone ? 0.0 : std::abs(sp.boundary_miss_mm);
+						if (tape_miss < min_tape_miss) {
+							min_tape_miss = tape_miss;
+							closest_sensor_name = sp.name;
+						}
+						if (sp.in_zone) {
+							any_in_zone = true;
+							std::printf("              * %-5s (%-10s) : lat = %+6.1f mm | dist to marker:  0.0 mm | %sHIT marker%s (margin %4.1f mm)\n",
+								sp.name.c_str(), sp.role.c_str(), sp.lat_mm,
+								col::Grn, col::Rst, sp.clearance_mm);
+						} else if (sp.boundary_miss_mm > 0.0) {
+							std::printf("              * %-5s (%-10s) : lat = %+6.1f mm | dist to marker: %4.1f mm | %sMISSED by %4.1f mm (OUTSIDE outer edge)%s\n",
+								sp.name.c_str(), sp.role.c_str(), sp.lat_mm, sp.boundary_miss_mm,
+								col::Red, sp.boundary_miss_mm, col::Rst);
+						} else {
+							std::printf("              * %-5s (%-10s) : lat = %+6.1f mm | dist to marker: %4.1f mm | %sMISSED by %4.1f mm (INSIDE inner edge)%s\n",
+								sp.name.c_str(), sp.role.c_str(), sp.lat_mm, -sp.boundary_miss_mm,
+								col::Yel, -sp.boundary_miss_mm, col::Rst);
+						}
+					}
+					if (any_in_zone) {
+						std::printf("              - Miss Reason     : \033[93m[LOGIC/INVERTED DETECTION]\033[0m Sensor passed over marker, but firmware triggered '%c' instead of '%c'\n",
+							miss_diag.got, miss_diag.want);
+					} else {
+						std::printf("              - Miss Reason     : \033[91m[PHYSICAL MISS + FALSE TRIGGER]\033[0m %s missed marker tape by %.1f mm (and false '%c' triggered)\n",
+							closest_sensor_name.c_str(), min_tape_miss, miss_diag.got);
+					}
+				}
+				std::fflush(stdout);
 			}
 			std::fflush(stdout);
 		}
@@ -1757,9 +2741,13 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 	auto start_map_prefetch = [&]() {
 		if (!prefetched_map.valid()) {
 			const unsigned next_seed = ++map_seed;
-			prefetched_map = std::async(std::launch::async, [next_seed]() {
+			const bool is_complex = opt.complex_track || !opt.hyper_track;
+			const bool is_hyper = opt.hyper_track || (opt.track_path.find("hyper") != std::string::npos);
+			prefetched_map = std::async(std::launch::async, [next_seed, is_complex, is_hyper]() {
 				TrackGenOptions g;
 				g.seed = next_seed;
+				g.complex_mode = is_complex;
+				g.hyper_mode = is_hyper;
 				std::string e;
 				return std::make_pair(generate_track(g, &e), next_seed);
 			});
@@ -1781,6 +2769,8 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 		if (text.empty()) {
 			TrackGenOptions g;
 			g.seed = ++map_seed;
+			g.complex_mode = opt.complex_track || !opt.hyper_track;
+			g.hyper_mode = opt.hyper_track || (opt.track_path.find("hyper") != std::string::npos);
 			used_seed = g.seed;
 			std::string e;
 			text = generate_track(g, &e);
@@ -1800,8 +2790,10 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 			return false;
 		}
 		res.track_path_used = label;
-		if (viewer)
+		if (viewer) {
 			viewer->set_track(track);
+			viewer->clear_marker_diags();
+		}
 		start = start_pose();
 		robot->place(start);
 		ir.set_lifted(false);
@@ -1840,6 +2832,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 
 		FwDriveParams p;
 		fwb_get_drive_params(&p);
+		load_drive_params_from_firmware_file(&p, nullptr);
 		for (const auto& kv : opt.params)
 			apply_param(&p, kv.first, kv.second);
 		fwb_set_drive_params(&p);
@@ -2164,7 +3157,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 						if (m == 0)
 							weave_first = weave1;
 						if (lost_line(d1) || d1.marker_check != "OK" || oversteered(d1)) {
-							const bool ov = oversteered(d1);
+							const bool ov = oversteered(d1) || check_oversteer(d1, 22.0);
 							lost = lost_line(d1) || ov;
 							pass = false;
 							score = lost ? 1000 : 500 + clean1;
@@ -2366,6 +3359,11 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 					if (!endless_tuner.active) {
 						TuneSet from = params_to_tuneset();
 						endless_tuner.start(session.params.base_mps, from, opt.endless_max_fail_pct, opt.endless_window, opt.endless_min_speed);
+						if (opt.jobs > 1 && !opt.quiet) {
+							std::printf("%s%s[MULTI-CORE PARALLEL ENGINE ACTIVE]%s %d worker processes allocated across CPU cores\n",
+								col::Bold, col::Grn, col::Rst, opt.jobs);
+							std::fflush(stdout);
+						}
 						need_next_map = false;
 						session.busy = true;
 						session.message.clear();
@@ -2384,16 +3382,34 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 
 					const size_t map_no = endless_tuner.current_map_no();
 					auto extract_fail_v = [](const DriveResult& d) -> double {
-						double fv = 0.0;
 						for (size_t i = d.samples.size(); i > 0; i--) {
-							const Sample& s = d.samples[i - 1];
-							if (!s.lost && s.tgt_base > 0.1f) {
-								for (size_t j = i; j > 0 && (s.t - d.samples[j - 1].t) <= 0.30; j--)
-									fv = std::max(fv, static_cast<double>(d.samples[j - 1].v));
-								break;
+							if (d.samples[i - 1].lost) {
+								for (size_t j = i; j > 0; j--) {
+									if (!d.samples[j - 1].lost && d.samples[j - 1].tgt_base > 0.1f)
+										return d.samples[j - 1].v;
+								}
 							}
 						}
-						return fv > 0.0 ? fv : d.max_v;
+						if (d.max_beta_deg >= 20.0) {
+							double peak_b = 0.0;
+							double v_at_peak = 0.0;
+							for (const Sample& s : d.samples) {
+								if (s.beta_deg > peak_b) {
+									peak_b = s.beta_deg;
+									v_at_peak = s.v;
+								}
+							}
+							if (v_at_peak > 0.1) return v_at_peak;
+						}
+						double max_lat = 0.0, v_at_lat = 0.0;
+						for (const Sample& s : d.samples) {
+							if (std::abs(s.lat_mm) > max_lat) {
+								max_lat = std::abs(s.lat_mm);
+								v_at_lat = s.v;
+							}
+						}
+						if (v_at_lat > 0.1) return v_at_lat;
+						return d.max_v;
 					};
 
 					auto run_map_trial = [&](const TuneSet& cand_set, const std::string& tag_prefix,
@@ -2441,14 +3457,14 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 								: (d1.max_lat_mm > track_limit_mm() ? "track limit" : ("markers " + d1.marker_check).c_str()));
 							std::snprintf(buf, sizeof buf, "1st: %s", reason);
 						} else {
-							const DriveResult d4 = drive(4);
+							const DriveResult d4 = drive(3);
 							if (!session.auto_tune || session.tune_mode != 2) {
 								lap_key.clear();
 								lap_label.clear();
 								return false;   // user interrupted
 							}
 							if (lost_line(d4) || d4.marker_check != "OK" || d4.lap_time_fw <= 0 || oversteered(d4)) {
-								const bool ov = oversteered(d4);
+								const bool ov = oversteered(d4) || check_oversteer(d4, 22.0);
 								*out_pass = false;
 								if (out_fm) {
 									out_fm->d1_failed = false;
@@ -2461,13 +3477,21 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 								const char* reason = ov ? "oversteer"
 									: (!d4.is_finished() ? d4.outcome.c_str()
 									: (d4.max_lat_mm > track_limit_mm() ? "track limit" : ("markers " + d4.marker_check).c_str()));
-								std::snprintf(buf, sizeof buf, "1st: OK | 4th: %s", reason);
+								std::snprintf(buf, sizeof buf, "1st: OK | 3rd: %s", reason);
 							} else {
 								*out_lap4_s = d4.lap_time_fw;
 								*out_pace = (track.length() > 0) ? (10.0 * d4.lap_time_fw / track.length()) : 0.0;
 								*out_dist_diff = d4.dist_m - track.length();
-								std::snprintf(buf, sizeof buf, "1st: OK | 4th: %.2fs (%.2fs/10m, %+.2fm)",
+								std::snprintf(buf, sizeof buf, "1st: OK | 3rd: %.2fs (%.2fs/10m, %+.2fm)",
 									*out_lap4_s, *out_pace, *out_dist_diff);
+								if (out_fm) {
+									out_fm->d1_failed = false;
+									out_fm->was_oversteer = check_oversteer(d4, 18.0);
+									out_fm->max_beta_deg = d4.max_beta_deg;
+									out_fm->max_lat_mm = d4.max_lat_mm;
+									out_fm->weave_dps = weave_dps(d4.samples);
+									out_fm->fail_v = extract_fail_v(d4);
+								}
 							}
 						}
 						lap_key.clear();
@@ -2487,72 +3511,127 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 						continue;
 					}
 
-					// If initial trial on this map failed, run AI Gain Auto-Heal (up to 5 candidates) BEFORE lowering speed!
+					// AI Gain Auto-Heal (ONLY on failure)
 					bool was_healed = false;
 					std::string healed_role;
 					if (!pass) {
 						const auto heal_cands = endless_tuner.make_heal_candidates(fm);
-						bool aborted = false;
-						for (size_t h = 0; h < heal_cands.size(); h++) {
-							char heal_msg[220];
-							std::snprintf(heal_msg, sizeof heal_msg,
-								"AI AUTO-HEAL (%zu/%zu) [%s]: retrying Map #%zu at %.2f m/s (kp=%.3f kd=%.0f lat=%.1f brk=%.2f)",
-								h + 1, heal_cands.size(), heal_cands[h].role.c_str(), map_no, endless_tuner.speed(),
-								heal_cands[h].set.kp, heal_cands[h].set.kd / dt, heal_cands[h].set.lat, heal_cands[h].set.brake_margin);
-							session.tune_lines = endless_tuner.status(dt, cur_map_info(), heal_msg);
+
+						if (!opt.quiet) {
+							std::printf("%s[%8.3f s]%s %s[DIAGNOSIS]%s %s fail (%s): beta=%s%.1f deg%s, lat=%s%.0f mm%s, weave=%s%.0f dps%s, v_fail=%s%.2f m/s%s\n",
+								col::Dim, sim->t(), col::Rst,
+								col::Yel, col::Rst,
+								fm.d1_failed ? "1st drive" : "3rd drive",
+								fm.was_oversteer ? "OVERSTEER" : "UNDERSTEER/LINE-LOSS",
+								fm.max_beta_deg >= 25.0 ? col::Red : col::Grn, fm.max_beta_deg, col::Rst,
+								fm.max_lat_mm > 90.0 ? col::Yel : col::Wht, fm.max_lat_mm, col::Rst,
+								fm.weave_dps > 180.0 ? col::Yel : col::Wht, fm.weave_dps, col::Rst,
+								col::Cyn, fm.fail_v, col::Rst);
+							std::fflush(stdout);
+						}
+
+#ifdef _WIN32
+						if (opt.jobs > 1) {
 							if (!opt.quiet) {
-								if (h == 0) {
-									std::printf("%s[%8.3f s]%s %s[DIAGNOSIS]%s %s fail (%s): beta=%s%.1f deg%s, lat=%s%.0f mm%s, weave=%s%.0f dps%s, v_fail=%s%.2f m/s%s\n",
-										col::Dim, sim->t(), col::Rst,
-										col::Yel, col::Rst,
-										fm.d1_failed ? "1st drive" : "4th drive",
-										fm.was_oversteer ? "OVERSTEER" : "UNDERSTEER/LINE-LOSS",
-										fm.max_beta_deg >= 25.0 ? col::Red : col::Grn, fm.max_beta_deg, col::Rst,
-										fm.max_lat_mm > 90.0 ? col::Yel : col::Wht, fm.max_lat_mm, col::Rst,
-										fm.weave_dps > 180.0 ? col::Yel : col::Wht, fm.weave_dps, col::Rst,
-										col::Cyn, fm.fail_v, col::Rst);
-								}
-								std::printf("%s[%8.3f s]%s %s%sAI AUTO-HEAL (%zu/%zu)%s %s[%s]%s: retrying %sMap #%zu%s at %s%s%.2f m/s%s "
-									"(kp=%s%.3f%s kd=%s%.0f%s lat=%s%.1f%s brk=%s%.2f%s)\n",
+								std::printf("%s[%8.3f s]%s %sAI AUTO-HEAL%s (PARALLEL %zu CANDIDATES)%s: evaluating %zu candidates simultaneously across %d cores...\n",
 									col::Dim, sim->t(), col::Rst,
-									col::Bold, col::Mag, h + 1, heal_cands.size(), col::Rst,
-									col::Yel, heal_cands[h].role.c_str(), col::Rst,
-									col::Wht, map_no, col::Rst,
-									col::Bold, col::Yel, endless_tuner.speed(), col::Rst,
-									col::Cyn, heal_cands[h].set.kp, col::Rst,
-									col::Cyn, heal_cands[h].set.kd / dt, col::Rst,
-									col::Mag, heal_cands[h].set.lat, col::Rst,
-									col::Grn, heal_cands[h].set.brake_margin, col::Rst);
+									col::Bold, col::Mag, heal_cands.size(), col::Rst,
+									heal_cands.size(), std::min((int)heal_cands.size(), opt.jobs));
 								std::fflush(stdout);
 							}
+							const std::string exe = get_self_exe_path();
+							std::string rpath = opt.robot_path;
+							if (rpath.empty() && fs::exists("robots/full.json")) rpath = "robots/full.json";
+							else if (rpath.empty()) rpath = "robots/default.json";
 
-							bool h_pass = false;
-							EndlessTuner::FailMetrics h_fm;
-							double h_pace = 0.0, h_lap4 = 0.0, h_dd = 0.0;
-							std::string h_det;
-							const std::string h_tag = "#" + std::to_string(map_no) + "h" + std::to_string(h + 1);
-							if (!run_map_trial(heal_cands[h].set, h_tag, &h_pass, &h_fm, &h_pace, &h_lap4, &h_dd, &h_det)) {
-								aborted = true;
-								break;
+							std::vector<WorkerProcess> wp(heal_cands.size());
+							for (size_t h = 0; h < heal_cands.size(); h++) {
+								const std::string h_tag = "#" + std::to_string(map_no) + "h" + std::to_string(h + 1);
+								spawn_eval_worker(exe, res.track_path_used, rpath,
+									endless_tuner.speed(), heal_cands[h].set, opt,
+									h_tag, heal_cands[h].role, &wp[h]);
 							}
-							if (h_pass) {
-								pass = true;
-								was_healed = true;
-								healed_role = heal_cands[h].role;
-								pace = h_pace;
-								lap4_s = h_lap4;
-								dist_diff = h_dd;
-								detail = h_det;
-								endless_tuner.adopt_healed_gains(heal_cands[h].set);
+							for (size_t h = 0; h < heal_cands.size(); h++) {
+								read_worker_result(&wp[h]);
+							}
+
+							for (size_t h = 0; h < heal_cands.size(); h++) {
+								if (wp[h].result.pass) {
+									pass = true;
+									was_healed = true;
+									healed_role = wp[h].role;
+									pace = wp[h].result.pace;
+									lap4_s = wp[h].result.lap4_s;
+									dist_diff = wp[h].result.dist_diff;
+									detail = wp[h].result.detail;
+									endless_tuner.adopt_healed_gains(heal_cands[h].set);
+									apply_tuneset(endless_tuner.speed(), endless_tuner.best());
+									if (!opt.quiet) {
+										std::printf("%s[%8.3f s]%s %s%sAI AUTO-HEAL (%zu/%zu) [%s] PASSED!%s lap=%.2fs (%.2fs/10m, %+.2fm)\n",
+											col::Dim, sim->t(), col::Rst,
+											col::Bold, col::Grn, h + 1, heal_cands.size(), healed_role.c_str(), col::Rst,
+											lap4_s, pace, dist_diff);
+										std::fflush(stdout);
+									}
+									break;
+								}
+							}
+							if (!was_healed)
 								apply_tuneset(endless_tuner.speed(), endless_tuner.best());
-								break;
+						} else
+#endif
+						{
+							bool aborted = false;
+							for (size_t h = 0; h < heal_cands.size(); h++) {
+								char heal_msg[220];
+								std::snprintf(heal_msg, sizeof heal_msg,
+									"AI AUTO-HEAL (%zu/%zu) [%s]: Map #%zu at %.2f m/s (kp=%.3f kd=%.0f lat=%.1f brk=%.2f)",
+									h + 1, heal_cands.size(), heal_cands[h].role.c_str(), map_no, endless_tuner.speed(),
+									heal_cands[h].set.kp, heal_cands[h].set.kd / dt, heal_cands[h].set.lat, heal_cands[h].set.brake_margin);
+								session.tune_lines = endless_tuner.status(dt, cur_map_info(), heal_msg);
+								if (!opt.quiet) {
+									std::printf("%s[%8.3f s]%s %sAI AUTO-HEAL%s (%zu/%zu)%s %s[%s]%s: %sMap #%zu%s at %s%s%.2f m/s%s "
+										"(kp=%s%.3f%s kd=%s%.0f%s lat=%s%.1f%s brk=%s%.2f%s)\n",
+										col::Dim, sim->t(), col::Rst,
+										col::Bold, col::Mag,
+										h + 1, heal_cands.size(), col::Rst,
+										col::Yel, heal_cands[h].role.c_str(), col::Rst,
+										col::Wht, map_no, col::Rst,
+										col::Bold, col::Yel, endless_tuner.speed(), col::Rst,
+										col::Cyn, heal_cands[h].set.kp, col::Rst,
+										col::Cyn, heal_cands[h].set.kd / dt, col::Rst,
+										col::Mag, heal_cands[h].set.lat, col::Rst,
+										col::Grn, heal_cands[h].set.brake_margin, col::Rst);
+									std::fflush(stdout);
+								}
+
+								bool h_pass = false;
+								EndlessTuner::FailMetrics h_fm;
+								double h_pace = 0.0, h_lap4 = 0.0, h_dd = 0.0;
+								std::string h_det;
+								const std::string h_tag = "#" + std::to_string(map_no) + "h" + std::to_string(h + 1);
+								if (!run_map_trial(heal_cands[h].set, h_tag, &h_pass, &h_fm, &h_pace, &h_lap4, &h_dd, &h_det)) {
+									aborted = true;
+									break;
+								}
+								if (h_pass) {
+									pass = true;
+									was_healed = true;
+									healed_role = heal_cands[h].role;
+									pace = h_pace;
+									lap4_s = h_lap4;
+									dist_diff = h_dd;
+									detail = h_det;
+									endless_tuner.adopt_healed_gains(heal_cands[h].set);
+									apply_tuneset(endless_tuner.speed(), endless_tuner.best());
+									break;
+								}
 							}
+							if (aborted)
+								continue;
+							if (!was_healed)
+								apply_tuneset(endless_tuner.speed(), endless_tuner.best());
 						}
-						if (aborted)
-							continue;
-						// Restore best_ if none of the heal candidates passed
-						if (!was_healed)
-							apply_tuneset(endless_tuner.speed(), endless_tuner.best());
 					}
 
 					const double prev_v = endless_tuner.speed();
@@ -2694,4 +3773,105 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 	}
 	res.ok = true;
 	return res;
+}
+
+TrialResult evaluate_trial_headless(const ScenarioOptions& opt) {
+	ScenarioOptions worker_opt = opt;
+	worker_opt.view = false;
+	worker_opt.quiet = true;
+	worker_opt.session = false;
+	worker_opt.auto_tune = false;
+	worker_opt.drives = {1, 3};
+	ScenarioResult res = run_scenario(worker_opt);
+
+	TrialResult tr;
+	tr.pass = false;
+	if (res.drives.empty()) {
+		tr.detail = "no drives executed";
+		return tr;
+	}
+	const DriveResult& d1 = res.drives[0];
+	auto lost_line = [&](const DriveResult& d) {
+		return !d.is_finished() || d.max_lat_mm > opt.off_track_mm;
+	};
+	auto oversteered = [&](const DriveResult& d) {
+		return check_oversteer(d, 90.0) || (lost_line(d) && check_oversteer(d, 25.0));
+	};
+	auto extract_fail_v = [](const DriveResult& d) -> double {
+		for (size_t i = d.samples.size(); i > 0; i--) {
+			if (d.samples[i - 1].lost) {
+				for (size_t j = i; j > 0; j--) {
+					if (!d.samples[j - 1].lost && d.samples[j - 1].tgt_base > 0.1f)
+						return d.samples[j - 1].v;
+				}
+			}
+		}
+		if (d.max_beta_deg >= 20.0) {
+			double peak_b = 0.0;
+			double v_at_peak = 0.0;
+			for (const Sample& s : d.samples) {
+				if (s.beta_deg > peak_b) {
+					peak_b = s.beta_deg;
+					v_at_peak = s.v;
+				}
+			}
+			if (v_at_peak > 0.1) return v_at_peak;
+		}
+		double max_lat = 0.0, v_at_lat = 0.0;
+		for (const Sample& s : d.samples) {
+			if (std::abs(s.lat_mm) > max_lat) {
+				max_lat = std::abs(s.lat_mm);
+				v_at_lat = s.v;
+			}
+		}
+		if (v_at_lat > 0.1) return v_at_lat;
+		return d.max_v;
+	};
+
+	if (lost_line(d1) || d1.marker_check != "OK" || oversteered(d1)) {
+		tr.d1_failed = true;
+		tr.was_oversteer = oversteered(d1) || check_oversteer(d1, 22.0);
+		tr.max_beta_deg = d1.max_beta_deg;
+		tr.max_lat_mm = d1.max_lat_mm;
+		tr.weave_dps = weave_dps(d1.samples);
+		tr.fail_v = extract_fail_v(d1);
+		const char* reason = tr.was_oversteer ? "oversteer"
+			: (!d1.is_finished() ? d1.outcome.c_str()
+			: (d1.max_lat_mm > opt.off_track_mm ? "track limit" : ("markers " + d1.marker_check).c_str()));
+		tr.detail = std::string("1st: ") + reason;
+		return tr;
+	}
+	if (res.drives.size() < 2) {
+		tr.detail = "drive 3 did not run";
+		return tr;
+	}
+	const DriveResult& d4 = res.drives[1];
+	if (lost_line(d4) || d4.marker_check != "OK" || d4.lap_time_fw <= 0 || oversteered(d4)) {
+		tr.d1_failed = false;
+		tr.was_oversteer = oversteered(d4) || check_oversteer(d4, 22.0);
+		tr.max_beta_deg = d4.max_beta_deg;
+		tr.max_lat_mm = d4.max_lat_mm;
+		tr.weave_dps = weave_dps(d4.samples);
+		tr.fail_v = extract_fail_v(d4);
+		const char* reason = tr.was_oversteer ? "oversteer"
+			: (!d4.is_finished() ? d4.outcome.c_str()
+			: (d4.max_lat_mm > opt.off_track_mm ? "track limit" : ("markers " + d4.marker_check).c_str()));
+		tr.detail = std::string("1st: OK | 3rd: ") + reason;
+		return tr;
+	}
+	tr.pass = true;
+	tr.lap4_s = d4.lap_time_fw;
+	tr.max_beta_deg = d4.max_beta_deg;
+	tr.max_lat_mm = d4.max_lat_mm;
+	tr.weave_dps = weave_dps(d4.samples);
+	Track track;
+	std::string err;
+	if (track.load(res.track_path_used, &err) && track.length() > 0) {
+		tr.pace = 10.0 * d4.lap_time_fw / track.length();
+		tr.dist_diff = d4.dist_m - track.length();
+	}
+	char buf[120];
+	std::snprintf(buf, sizeof buf, "1st: OK | 3rd: %.2fs (%.2fs/10m, %+.2fm)", tr.lap4_s, tr.pace, tr.dist_diff);
+	tr.detail = buf;
+	return tr;
 }

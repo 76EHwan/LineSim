@@ -3,6 +3,8 @@
 __pycache__/
 /build-cmaketools/
 /robots/Full.step
+/robots/Fullv2.step
+/robots/*.step
 /robots/mesh/
 /tools/.venv/
 /real_logs/

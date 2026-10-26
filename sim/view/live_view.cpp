@@ -101,6 +101,7 @@ void LiveView::handle_keys() {
 			break;
 		case 'M':
 		case 'V': v_.cycle_inset(); break;
+		case 'K': v_.jump_to_next_marker_miss(); break;
 		case 'P': {
 			char name[64];
 			std::snprintf(name, sizeof name, "linesim_shot_%03d.bmp", ++shot_no_);
@@ -161,6 +162,7 @@ void LiveView::session_key(int k) {
 	case '2':
 	case '3':
 	case '4':
+	case '5':
 		if (s.busy)
 			s.message = "a drive is running (X stops it)";
 		else
@@ -340,7 +342,7 @@ void LiveView::run_session_script() {
 		return;
 	}
 	session_key(vk);
-	if (vk >= '1' && vk <= '4') {
+	if (vk >= '1' && vk <= '5') {
 		script_waiting_drive_ = true;
 		script_saw_busy_ = false;
 		script_wait_ticks_ = 0;
@@ -350,28 +352,36 @@ void LiveView::run_session_script() {
 std::string LiveView::session_panel() const {
 	const SessionState& s = *session;
 	std::string map_display = s.map_name;
-	if (map_display.size() > 24) {
-		size_t slash = map_display.find_last_of("/\\");
-		if (slash != std::string::npos)
-			map_display = map_display.substr(slash + 1);
-	}
-	std::string t = "course   " + map_display + "\n";
+	size_t slash = map_display.find_last_of("/\\");
+	if (slash != std::string::npos)
+		map_display = map_display.substr(slash + 1);
+	if (map_display.size() > 5 && map_display.substr(map_display.size() - 5) == ".json")
+		map_display.resize(map_display.size() - 5);
+	if (map_display.size() > 14)
+		map_display = map_display.substr(0, 12) + "..";
+
+	char c_buf[64];
+	if (track_.length() > 0)
+		std::snprintf(c_buf, sizeof c_buf, "course   %-12s %5.1fm\n", map_display.c_str(), track_.length());
+	else
+		std::snprintf(c_buf, sizeof c_buf, "course   %-18s\n", map_display.c_str());
+	std::string t = c_buf;
+
 	if (!s.expected.empty()) {
-		if (s.expected.size() > 36) {
-			t += "markers: ";
-			size_t col = 9;
-			for (size_t k = 0; k < s.expected.size(); ++k) {
-				t += s.expected[k];
-				col++;
-				if (col >= 35 && s.expected[k] == ' ') {
-					t += "\n         ";
-					col = 9;
-				}
-			}
-			t += "\n\n";
-		} else {
-			t += "markers: " + s.expected + "\n\n";
+		int count_l = 0, count_r = 0, count_c = 0, count_stop = 0;
+		for (char ch : s.expected) {
+			if (ch == 'L') count_l++;
+			else if (ch == 'R') count_r++;
+			else if (ch == 'C') count_c++;
+			else if (ch == 'S' || ch == 'U') count_stop++;
 		}
+		int total = count_l + count_r + count_c + count_stop;
+		char m_buf[64];
+		if (count_c > 0)
+			std::snprintf(m_buf, sizeof m_buf, "markers  %-3d (C:%d L:%d R:%d)\n\n", total, count_c, count_l, count_r);
+		else
+			std::snprintf(m_buf, sizeof m_buf, "markers  %-3d (L:%d R:%d)\n\n", total, count_l, count_r);
+		t += m_buf;
 	}
 	char buf[160];
 	for (int i = 0; i < kRowCount && s.tune_lines.empty(); i++) {   // auto-tune shows its own table instead
@@ -413,16 +423,16 @@ std::string LiveView::session_panel() const {
 	size_t from = s.history.size() > (s.tune_lines.empty() ? 6u : 3u) ? s.history.size() - (s.tune_lines.empty() ? 6 : 3) : 0;
 	for (size_t i = from; i < s.history.size(); i++) {
 		const std::string& h = s.history[i];
-		if (h.size() > 38) {
+		if (h.size() > 28) {
 			size_t p = 0;
 			while (p < h.size()) {
-				if (h.size() - p <= 38) {
+				if (h.size() - p <= 28) {
 					t += h.substr(p) + "\n";
 					break;
 				}
-				size_t cut = h.rfind(' ', p + 36);
+				size_t cut = h.rfind(' ', p + 27);
 				if (cut == std::string::npos || cut <= p)
-					cut = p + 36;
+					cut = p + 27;
 				t += h.substr(p, cut - p) + "\n  ";
 				p = (h[cut] == ' ') ? cut + 1 : cut;
 			}
@@ -430,8 +440,24 @@ std::string LiveView::session_panel() const {
 			t += h + "\n";
 		}
 	}
-	if (!s.message.empty())
-		t += s.message + "\n";
+	if (!s.message.empty()) {
+		if (s.message.size() > 28) {
+			size_t p = 0;
+			while (p < s.message.size()) {
+				if (s.message.size() - p <= 28) {
+					t += s.message.substr(p) + "\n";
+					break;
+				}
+				size_t cut = s.message.rfind(' ', p + 27);
+				if (cut == std::string::npos || cut <= p)
+					cut = p + 27;
+				t += s.message.substr(p, cut - p) + "\n";
+				p = (s.message[cut] == ' ') ? cut + 1 : cut;
+			}
+		} else {
+			t += s.message + "\n";
+		}
+	}
 	return t;
 }
 
@@ -498,12 +524,14 @@ void LiveView::render(double t_sim, const std::string& phase) {
 					hud.status += "\n   " + lap_line(d, c.d[d]);
 		}
 	}
-	hud.help = "C: camera (Follow/Sensor/Top Map)   M: minimap (Track Map/Sensor/Off)   T: trail (orange=drift, magenta=line-out, red=oversteer off)\n"
+	hud.help = "C: camera (Follow/Sensor/Top Map)   M: minimap (Track Map/Sensor/Off)   T: trail   K: marker misread 3D view\n"
 	           "Space: pause   +/-: speed   S: save to drive.c   P: screenshot   Esc: quit   (mouse: drag, wheel)";
+	if (v_.focused_miss_idx() >= 0)
+		hud.help += "\n[K]: Focus next misread marker (focused: #" + std::to_string(v_.focused_miss_idx()) + ")";
 	if (interactive_)
 		hud.help = "Arrows: U/D/L/R buttons   Enter: K button   R: robot back to start\n" + hud.help;
 	if (session) {
-		hud.help = "1-4: run drive 1-4   N: new random course   X: stop   R: robot to start   S: save to drive.c\n"
+		hud.help = "1-5: run drive 1-5   N: new random course   X: stop   R: robot to start   S: save to drive.c\n"
 		           "Up/Down: pick   Left/Right: change   Enter: type   A: gain auto-tune (3-course)   E: endless (1+4/map + AI heal)\n" + hud.help;
 		hud.panel = session_panel();
 	}

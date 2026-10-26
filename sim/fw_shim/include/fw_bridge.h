@@ -24,7 +24,7 @@ void fwb_adc_injected_irq(int adc);         /* ADC1/2 injected conversion (FOC c
 /* ---- firmware main fiber ---- */
 void fwb_boot(void);                        /* User_Init() */
 void fwb_menu_step(void);                   /* one Menu_ProcessLoop() pass */
-void fwb_drive(int n);                      /* 1..4: Drive_First .. Drive_Fourth */
+void fwb_drive(int n);                      /* 1..5: Drive_First .. Drive_Fifth */
 int  fwb_save_sensor_calibration(void);     /* Sensor_Save_Calibration() */
 
 /* ---- plant <-> firmware ---- */

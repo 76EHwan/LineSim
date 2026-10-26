@@ -27,10 +27,10 @@ ROOT = os.path.dirname(HERE)
 
 # part-name pattern -> (group, rgba). First match wins.
 GROUPS = [
-    (r"^Tire", "tires", [0.08, 0.08, 0.08, 1]),
+    (r"^(Tire|wheel 13mm)", "tires", [0.08, 0.08, 0.08, 1]),
     (r"^(Wheel|Spur Gear|bearing|Wheel_Axis)", "wheels", [0.72, 0.72, 0.75, 1]),
     (r"^(GearFrame|0 \(5\)|connector)", "drive", [0.55, 0.57, 0.6, 1]),
-    (r"^GNB", "battery", [0.15, 0.3, 0.75, 1]),
+    (r"^(GNB|battery)", "battery", [0.15, 0.3, 0.75, 1]),
     (r"^plate", "plate", [0.12, 0.12, 0.13, 1]),
     (r"^OPTO-SMD_ITR8307", "ir_sensors", [0.2, 0.2, 0.22, 1]),
     (r"^(Board|EasyEDA PCB Model|PCB|SENSOR NECK|Open CASCADE STEP translator)", "pcb", [0.05, 0.38, 0.18, 1]),
@@ -97,7 +97,7 @@ def main(step_path):
         parts.append((base_name(node), m))
 
     # ---- frame: from the four tires and sensors ----
-    tires = [m for n, m in parts if n.startswith("Tire")]
+    tires = [m for n, m in parts if n.startswith("Tire") or "wheel 13mm" in n]
     if len(tires) not in (2, 4):
         sys.exit(f"expected 2 or 4 parts named Tire*, found {len(tires)}")
     tc = np.array([t.bounds.mean(0) for t in tires])
