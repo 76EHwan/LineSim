@@ -646,6 +646,19 @@ public:
 		double fail_v = 0.0;         // Robot speed right before failure / peak error (m/s)
 	};
 
+	struct PassedWindow {
+		bool valid = false;
+		double speed = 0.0;
+		Set set;
+	};
+
+	struct ABScore {
+		int speed_up_wins = 0;
+		int prev_passed_wins = 0;
+		int ties = 0;
+		int total_compared = 0;
+	};
+
 	bool active = false;
 
 	int target_window() const { return target_win_; }
@@ -692,6 +705,9 @@ public:
 		just_verified_ = false;
 		just_recovered_ = false;
 		just_healed_ = false;
+		just_ab_selected_ = false;
+		prev_passed_ = PassedWindow{};
+		ab_score_ = ABScore{};
 		window_.clear();
 		last_.clear();
 		log_.clear();
@@ -703,6 +719,73 @@ public:
 	bool has_verified() const { return verified_v_ > 0.0; }
 	double verified_v() const { return verified_v_; }
 	const Set& best() const { return best_; }
+	const PassedWindow& prev_passed() const { return prev_passed_; }
+	bool has_prev_passed() const { return prev_passed_.valid; }
+	const ABScore& ab_score() const { return ab_score_; }
+
+	void record_ab_comparison(bool pass_curr, double lap_curr, bool pass_prev, double lap_prev) {
+		if (!prev_passed_.valid) return;
+		ab_score_.total_compared++;
+		if (pass_curr && pass_prev) {
+			if (lap_curr < lap_prev - 0.005) {
+				ab_score_.speed_up_wins++;
+			} else if (lap_prev < lap_curr - 0.005) {
+				ab_score_.prev_passed_wins++;
+			} else {
+				ab_score_.ties++;
+			}
+		} else if (pass_curr && !pass_prev) {
+			ab_score_.speed_up_wins++;
+		} else if (!pass_curr && pass_prev) {
+			ab_score_.prev_passed_wins++;
+		} else {
+			ab_score_.ties++;
+		}
+	}
+
+	void reset_ab_score() {
+		ab_score_ = ABScore{};
+	}
+
+	// 종료 직전 더 많이 이긴 값(속도 및 게인)을 결정하여 반환
+	void get_final_winning_params(double* out_v, Set* out_set, std::string* out_reason) const {
+		if (prev_passed_.valid) {
+			if (ab_score_.prev_passed_wins > ab_score_.speed_up_wins) {
+				// 이전 윈도우 통과 버전이 더 많은 맵에서 빠른 랩타임 기록!
+				*out_v = prev_passed_.speed;
+				*out_set = prev_passed_.set;
+				if (out_reason) {
+					*out_reason = fmt("Prev-Passed Window WON (%d vs %d wins) -> Overwrote with faster Prev-Passed (%.2f m/s, lat=%.1f)",
+						ab_score_.prev_passed_wins, ab_score_.speed_up_wins, prev_passed_.speed, prev_passed_.set.lat);
+				}
+				return;
+			} else if (ab_score_.speed_up_wins > ab_score_.prev_passed_wins) {
+				// 속도 올린 버전이 더 많은 맵에서 빠른 랩타임 기록!
+				*out_v = v_;
+				*out_set = best_;
+				if (out_reason) {
+					*out_reason = fmt("Speed-Up Window WON (%d vs %d wins) -> Overwrote with faster Speed-Up (%.2f m/s, lat=%.1f)",
+						ab_score_.speed_up_wins, ab_score_.prev_passed_wins, v_, best_.lat);
+				}
+				return;
+			} else {
+				// 동점인 경우: 이미 윈도우를 안정적으로 통과했던 이전 버전을 우선 보존
+				*out_v = prev_passed_.speed;
+				*out_set = prev_passed_.set;
+				if (out_reason) {
+					*out_reason = fmt("A/B Tied (%d vs %d wins) -> Preserved verified Prev-Passed (%.2f m/s, lat=%.1f)",
+						ab_score_.speed_up_wins, ab_score_.prev_passed_wins, prev_passed_.speed, prev_passed_.set.lat);
+				}
+				return;
+			}
+		}
+		// A/B 매치가 아직 없었던 경우 (첫 번째 윈도우 진행 중 등)
+		*out_v = v_;
+		*out_set = best_;
+		if (out_reason) {
+			*out_reason = fmt("Current best parameters (%.2f m/s, lat=%.1f)", v_, best_.lat);
+		}
+	}
 
 	// Generate 5 targeted AI Gain Auto-Heal candidates using proportional failure telemetry & anti-ratchet centering
 	std::vector<HealCandidate> make_heal_candidates(const FailMetrics& fm) const {
@@ -855,15 +938,17 @@ public:
 		just_healed_ = true;
 	}
 
-	bool consume_state_changed(bool* out_verified = nullptr, bool* out_recovered = nullptr, bool* out_healed = nullptr) {
+	bool consume_state_changed(bool* out_verified = nullptr, bool* out_recovered = nullptr, bool* out_healed = nullptr, bool* out_ab_selected = nullptr) {
 		if (out_verified) *out_verified = just_verified_;
 		if (out_recovered) *out_recovered = just_recovered_;
 		if (out_healed) *out_healed = just_healed_;
-		bool res = speed_changed_ || just_healed_;
+		if (out_ab_selected) *out_ab_selected = just_ab_selected_;
+		bool res = speed_changed_ || just_healed_ || just_ab_selected_;
 		speed_changed_ = false;
 		just_verified_ = false;
 		just_recovered_ = false;
 		just_healed_ = false;
+		just_ab_selected_ = false;
 		return res;
 	}
 
@@ -954,10 +1039,33 @@ public:
 			streak_ = 0;
 			consecutive_fails_ = 0;
 
-			if (sr_pct >= need_sr_pct) {
-				// Success Rate >= target (e.g. >= 80% pure Pass) -> Verified & step UP speed!
+			// ★ [A/B TOURNAMENT DECISION]:
+			// 이전 window 통과 버전 vs 속도 올린 버전 비교 결과 판정:
+			// 둘 중에 더 빠른 기록을 많이 세운 것으로 게인/속도 결정!
+			if (prev_passed_.valid && ab_score_.total_compared >= 10 && ab_score_.prev_passed_wins > ab_score_.speed_up_wins) {
+				// 이전 윈도우 통과 버전이 더 빠른 랩타임을 더 많이 기록함! (낮은 base_mps + 높은 lat_acc_max 우위)
+				const double rejected_v = v_;
+				v_ = prev_passed_.speed;
+				best_ = prev_passed_.set;
+				speed_changed_ = true;
+				just_ab_selected_ = true;
+				last_ = fmt("Map #%d: A/B DONE! Prev Passed (%.2fm/s, lat=%.1f) WON (%d vs %d) -> GAIN CHANGED to faster Prev Window!",
+					total_maps_, prev_passed_.speed, best_.lat, ab_score_.prev_passed_wins, ab_score_.speed_up_wins);
+				std::snprintf(log_buf, sizeof log_buf, "#%03d [A/B PREV WON: %d vs %d] %.2f->%.2fm/s (lat=%.1f)",
+					total_maps_, ab_score_.prev_passed_wins, ab_score_.speed_up_wins, rejected_v, v_, best_.lat);
+				reset_ab_score();
+			} else if (sr_pct >= need_sr_pct) {
+				// Success Rate >= target (e.g. >= 80% pure Pass)
+				// 그리고 속도 올린 버전이 이전 통과 버전보다 빠르거나 대등함!
 				const double old_v = v_;
 				verified_v_ = std::max(verified_v_, old_v);
+
+				// 이번에 윈도우를 통과한 값(속도 + 게인)을 다음 윈도우의 비교 기준으로 저장!
+				prev_passed_.valid = true;
+				prev_passed_.speed = old_v;
+				prev_passed_.set = best_;
+				reset_ab_score();
+
 				v_ = old_v + dv_up();
 				speed_changed_ = true;
 				just_verified_ = true;
@@ -968,6 +1076,7 @@ public:
 			} else if (fr_pct > max_fail_pct_) {
 				// Fail Rate > allowed -> step DOWN speed!
 				const double old_v = v_;
+				reset_ab_score();
 				if (old_v > min_v_ + 1e-4) {
 					v_ = std::max(min_v_, old_v - dv_down());
 					speed_changed_ = true;
@@ -983,6 +1092,7 @@ public:
 				}
 			} else {
 				// Pass Rate < target due to Healed maps, but Fail Rate <= max_fail_pct_ -> keep speed & reset window!
+				reset_ab_score();
 				last_ = fmt("Map #%d: %d/%d Window Done (Pass %.1f%% < %.0f%% [%dP/%dH/%dF]) -> speed kept at %.2f m/s, window reset!",
 					total_maps_, win_max, win_max, sr_pct, need_sr_pct, p_cnt, h_cnt, f_cnt, v_);
 				std::snprintf(log_buf, sizeof log_buf, "#%03d [WIN %d KEEP] %.2fm/s (P:%.0f%% H:%d F:%d) Reset",
@@ -1064,6 +1174,10 @@ public:
 			total_passes_, total_healed_, total_fails_));
 		v.push_back(fmt("Active Gains: kp=%.3f kd=%.0f lat=%.2f brk=%.2fm shf=%.2f crv=%.2f",
 			best_.kp, best_.kd / dt, best_.lat, best_.brake_margin, best_.target_shift, best_.target_curve_gain));
+		if (prev_passed_.valid) {
+			v.push_back(fmt("A/B Match: Speed-Up (%.2fm/s) [%dW] vs Prev-Passed (%.2fm/s, lat=%.1f) [%dW] (Ties: %d)",
+				v_, ab_score_.speed_up_wins, prev_passed_.speed, prev_passed_.set.lat, ab_score_.prev_passed_wins, ab_score_.ties));
+		}
 		if (!heal_note.empty())
 			v.push_back(heal_note);
 		else if (!last_.empty())
@@ -1102,6 +1216,9 @@ private:
 	bool just_verified_ = false;
 	bool just_recovered_ = false;
 	bool just_healed_ = false;
+	bool just_ab_selected_ = false;
+	PassedWindow prev_passed_;
+	ABScore ab_score_;
 	std::vector<int> window_;
 	std::string last_;
 	std::vector<std::string> log_;
@@ -2820,6 +2937,21 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 	auto prev_sig = std::signal(SIGINT, [](int) {
 		g_stop_requested = 1;
 	});
+	std::signal(SIGTERM, [](int) {
+		g_stop_requested = 1;
+	});
+#ifdef _WIN32
+	std::signal(SIGBREAK, [](int) {
+		g_stop_requested = 1;
+	});
+	SetConsoleCtrlHandler([](DWORD ctrl) -> BOOL {
+		if (ctrl == CTRL_C_EVENT || ctrl == CTRL_BREAK_EVENT || ctrl == CTRL_CLOSE_EVENT) {
+			g_stop_requested = 1;
+			return TRUE;
+		}
+		return FALSE;
+	}, TRUE);
+#endif
 
 	sim->start([&]() {
 		robot->place(start);
@@ -3029,19 +3161,38 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 				// Clean up EndlessTuner [E] if stopped or switched to [A]
 				if (endless_tuner.active && (!session.auto_tune || session.tune_mode != 2)) {
 					endless_tuner.active = false;
-					const TuneSet& b = endless_tuner.best();
-					apply_tuneset(endless_tuner.speed(), b);
+
+					// ★ 종료 직전에 더 많이 이긴 값으로 덮어씌움!
+					double final_v = 0.0;
+					TuneSet final_set;
+					std::string win_reason;
+					endless_tuner.get_final_winning_params(&final_v, &final_set, &win_reason);
+					apply_tuneset(final_v, final_set);
+
 					char line[260];
 					std::snprintf(line, sizeof line,
-						"endless [E] stopped: base_mps %.2f m/s (verified <=%.0f%%: %.2f m/s), kp %.3f, kd %.0f, fail rate %.1f%%",
-						endless_tuner.speed(), endless_tuner.max_fail_rate_pct(),
-						endless_tuner.has_verified() ? endless_tuner.verified_v() : endless_tuner.speed(),
-						b.kp, b.kd / dt, endless_tuner.fail_rate_pct());
+						"endless [E] stopped: base_mps %.2f m/s (lat=%.2f) | %s",
+						final_v, final_set.lat, win_reason.c_str());
 					std::string saved_path;
 					if (save_drive_params_to_firmware_file(session.params, &saved_path)) {
-						session.message = "endless [E] ended: speed & healed gains saved to drive.c!";
-						std::printf("%s%s[AUTO-SAVED]%s Endless speed & gains saved to %s%s%s\n",
-							col::Bold, col::Grn, col::Rst, col::Cyn, saved_path.c_str(), col::Rst);
+						session.message = "endless [E] ended: winning parameters saved to drive.c!";
+						if (!opt.quiet) {
+							std::printf("\n%s%s================================================================================%s\n", col::Bold, col::Cyn, col::Rst);
+							std::printf("%s%s=== [ENDLESS RESULT] MORE-WINS PARAMETERS SAVED TO DRIVE.C ===%s\n", col::Bold, col::Grn, col::Rst);
+							std::printf("%s%s================================================================================%s\n", col::Bold, col::Cyn, col::Rst);
+							std::printf("  Selection Reason: %s%s%s\n", col::Yel, win_reason.c_str(), col::Rst);
+							std::printf("  Base Speed      : %s%s%.2f m/s%s\n", col::Bold, col::Yel, session.params.base_mps, col::Rst);
+							std::printf("  Grip Limit (lat): %s%s%.2ff%s\n", col::Bold, col::Mag, session.params.lat_acc_max, col::Rst);
+							std::printf("  Steer Gains     : kp=%.3f, kd=%.1f (derivative=%.4fs)\n",
+								session.params.steer_kp, session.params.steer_kd, final_set.kd);
+							std::printf("  Brake Margin    : %.2fm, Target Shift: %.2f\n",
+								session.params.brake_margin_m, session.params.target_shift);
+							if (!saved_path.empty()) {
+								std::printf("  -> Saved File   : %s%s%s\n", col::Wht, saved_path.c_str(), col::Rst);
+							}
+							std::printf("%s%s================================================================================%s\n\n", col::Bold, col::Cyn, col::Rst);
+							std::fflush(stdout);
+						}
 					} else {
 						session.message = "endless [E] ended (drive 1-4 to try it)";
 					}
@@ -3049,7 +3200,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 					if (!session.auto_tune) {
 						session.busy = false;
 						session.tune_lines.clear();
-						if (!opt.view || g_stop_requested)
+						if (!opt.view || g_stop_requested || opt.tune_trials > 0)
 							break;
 					}
 				}
@@ -3412,10 +3563,10 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 						return d.max_v;
 					};
 
-					auto run_map_trial = [&](const TuneSet& cand_set, const std::string& tag_prefix,
+					auto run_map_trial = [&](double trial_speed, const TuneSet& cand_set, const std::string& tag_prefix,
 						bool* out_pass, EndlessTuner::FailMetrics* out_fm,
 						double* out_pace, double* out_lap4_s, double* out_dist_diff, std::string* out_detail) -> bool {
-						apply_tuneset(endless_tuner.speed(), cand_set);
+						apply_tuneset(trial_speed, cand_set);
 						auto drive = [&](int n) {
 							lap_tag = tag_prefix + "-d" + std::to_string(n);
 							run_one(n);
@@ -3436,7 +3587,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 						lap_label = cur_map_info();
 
 						const DriveResult d1 = drive(1);
-						if (!session.auto_tune || session.tune_mode != 2) {
+						if (!session.auto_tune || session.tune_mode != 2 || g_stop_requested) {
 							lap_key.clear();
 							lap_label.clear();
 							return false;   // user interrupted
@@ -3458,7 +3609,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 							std::snprintf(buf, sizeof buf, "1st: %s", reason);
 						} else {
 							const DriveResult d4 = drive(3);
-							if (!session.auto_tune || session.tune_mode != 2) {
+							if (!session.auto_tune || session.tune_mode != 2 || g_stop_requested) {
 								lap_key.clear();
 								lap_label.clear();
 								return false;   // user interrupted
@@ -3500,13 +3651,24 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 						return true;
 					};
 
+					if (opt.tune_trials > 0 && map_no > static_cast<size_t>(opt.tune_trials)) {
+						if (!opt.quiet) {
+							std::printf("\n%s%s[COMPLETED]%s Reached %d maps limit! Finalizing winning parameters...\n",
+								col::Bold, col::Grn, col::Rst, opt.tune_trials);
+							std::fflush(stdout);
+						}
+						session.auto_tune = false;
+						session.tune_mode = 0;
+						continue;
+					}
+
 					session.tune_lines = endless_tuner.status(dt, cur_map_info());
 
 					bool pass = false;
 					EndlessTuner::FailMetrics fm;
 					double pace = 0.0, lap4_s = 0.0, dist_diff = 0.0;
 					std::string detail;
-					if (!run_map_trial(endless_tuner.best(), "#" + std::to_string(map_no),
+					if (!run_map_trial(endless_tuner.speed(), endless_tuner.best(), "#" + std::to_string(map_no),
 						&pass, &fm, &pace, &lap4_s, &dist_diff, &detail)) {
 						continue;
 					}
@@ -3545,17 +3707,20 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 							else if (rpath.empty()) rpath = "robots/default.json";
 
 							std::vector<WorkerProcess> wp(heal_cands.size());
+							size_t spawned = 0;
 							for (size_t h = 0; h < heal_cands.size(); h++) {
+								if (g_stop_requested) break;
 								const std::string h_tag = "#" + std::to_string(map_no) + "h" + std::to_string(h + 1);
 								spawn_eval_worker(exe, res.track_path_used, rpath,
 									endless_tuner.speed(), heal_cands[h].set, opt,
 									h_tag, heal_cands[h].role, &wp[h]);
+								spawned++;
 							}
-							for (size_t h = 0; h < heal_cands.size(); h++) {
+							for (size_t h = 0; h < spawned; h++) {
 								read_worker_result(&wp[h]);
 							}
 
-							for (size_t h = 0; h < heal_cands.size(); h++) {
+							for (size_t h = 0; h < spawned; h++) {
 								if (wp[h].result.pass) {
 									pass = true;
 									was_healed = true;
@@ -3610,7 +3775,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 								double h_pace = 0.0, h_lap4 = 0.0, h_dd = 0.0;
 								std::string h_det;
 								const std::string h_tag = "#" + std::to_string(map_no) + "h" + std::to_string(h + 1);
-								if (!run_map_trial(heal_cands[h].set, h_tag, &h_pass, &h_fm, &h_pace, &h_lap4, &h_dd, &h_det)) {
+								if (!run_map_trial(endless_tuner.speed(), heal_cands[h].set, h_tag, &h_pass, &h_fm, &h_pace, &h_lap4, &h_dd, &h_det)) {
 									aborted = true;
 									break;
 								}
@@ -3634,17 +3799,63 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 						}
 					}
 
+					// ====================================================================
+					// A/B SPEED TOURNAMENT: 속도 올린 버전 vs 이전 window 통과한 버전 비교
+					// 이전 window 통과 버전은 AI Heal 없이 순수 주행하여 랩타임 비교
+					// ====================================================================
+					if (endless_tuner.has_prev_passed() && !g_stop_requested) {
+						bool pass_prev = false;
+						EndlessTuner::FailMetrics fm_prev;
+						double pace_prev = 0.0, lap4_prev = 0.0, dist_diff_prev = 0.0;
+						std::string detail_prev;
+
+						const double curr_v = endless_tuner.speed();
+						const TuneSet curr_set = endless_tuner.best();
+						const double prev_win_v = endless_tuner.prev_passed().speed;
+						const TuneSet prev_win_set = endless_tuner.prev_passed().set;
+
+						const std::string b_tag = "#" + std::to_string(map_no) + "-prev";
+						// 이전 window 통과 버전은 ai heal 없이 순수 1회 주행
+						if (run_map_trial(prev_win_v, prev_win_set, b_tag,
+							&pass_prev, &fm_prev, &pace_prev, &lap4_prev, &dist_diff_prev, &detail_prev)) {
+							endless_tuner.record_ab_comparison(pass, lap4_s, pass_prev, lap4_prev);
+
+							if (!opt.quiet) {
+								const auto& ab = endless_tuner.ab_score();
+								const char* winner = (pass && pass_prev)
+									? (lap4_s < lap4_prev - 0.005 ? "Speed-Up FASTER" : (lap4_prev < lap4_s - 0.005 ? "Prev-Passed FASTER" : "Tie"))
+									: (pass ? "Speed-Up WON (Prev failed)" : (pass_prev ? "Prev-Passed WON (Speed-Up failed)" : "Both Failed"));
+								std::printf("%s[%8.3f s]%s %s[A/B MATCH #%zu]%s Speed-Up(%.2fm/s): %s%.2fs%s vs Prev-Passed(%.2fm/s, lat=%.1f): %s%.2fs%s -> %s%s%s | Score: Speed-Up(%d) vs Prev(%d)\n",
+									col::Dim, sim->t(), col::Rst,
+									col::Bold, map_no, col::Rst,
+									curr_v,
+									pass ? col::Grn : col::Red, lap4_s, col::Rst,
+									prev_win_v, prev_win_set.lat,
+									pass_prev ? col::Grn : col::Red, lap4_prev, col::Rst,
+									col::Yel, winner, col::Rst,
+									ab.speed_up_wins, ab.prev_passed_wins);
+								std::fflush(stdout);
+							}
+						}
+						// 복원: Candidate A 설정 복원
+						apply_tuneset(curr_v, curr_set);
+					}
+
 					const double prev_v = endless_tuner.speed();
 					endless_tuner.record_map(pass, was_healed, healed_role, pace, lap4_s, dist_diff, detail);
 
-					bool verified = false, recovered = false, healed = false;
-					if (endless_tuner.consume_state_changed(&verified, &recovered, &healed)) {
+					bool verified = false, recovered = false, healed = false, ab_selected = false;
+					if (endless_tuner.consume_state_changed(&verified, &recovered, &healed, &ab_selected)) {
 						apply_tuneset(endless_tuner.speed(), endless_tuner.best());
 						std::string path_out;
-						const bool should_save_to_disk = verified || healed || (session.params.base_mps >= endless_tuner.start_v());
+						const bool should_save_to_disk = verified || healed || ab_selected || (session.params.base_mps >= endless_tuner.start_v());
 						if (should_save_to_disk && save_drive_params_to_firmware_file(session.params, &path_out)) {
 							char save_msg[220];
-							if (verified) {
+							if (ab_selected) {
+								std::snprintf(save_msg, sizeof save_msg,
+									"[SAVED A/B WINNER] Prev window proved faster! Gains changed: %.2f m/s, kp=%.3f kd=%.0f lat=%.2f",
+									session.params.base_mps, session.params.steer_kp, session.params.steer_kd, session.params.lat_acc_max);
+							} else if (verified) {
 								std::snprintf(save_msg, sizeof save_msg,
 									"[SAVED >=%.0f%% PASS VERIFIED] %d maps evaluated at %.2f m/s -> base_mps up to %.2f m/s",
 									endless_tuner.min_pass_rate_pct(), endless_tuner.target_window(), prev_v, session.params.base_mps);
