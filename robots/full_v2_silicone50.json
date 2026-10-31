@@ -14,12 +14,12 @@
   "wheel_width": 0.013,
   "track": 0.16,
   "wheel_mass": 0.0068,
-  "tire_mu": 1.531,
+  "tire_mu": 1.65,
   "tire": {
     "model": "brush",
-    "mu": 1.531,
-    "slip_stiffness": 3.0,
-    "relaxation_length": 0.002,
+    "mu": 1.65,
+    "slip_stiffness": 11.0,
+    "relaxation_length": 0.0032,
     "damping_ratio": 0.55
   },
   "skid_radius": 0.0025,

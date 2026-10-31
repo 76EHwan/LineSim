@@ -18,8 +18,8 @@
   "tire": {
     "model": "brush",
     "mu": 1.531,
-    "slip_stiffness": 3.0,
-    "relaxation_length": 0.002,
+    "slip_stiffness": 7.0,
+    "relaxation_length": 0.0055,
     "damping_ratio": 0.85
   },
   "skid_radius": 0.0025,
