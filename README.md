@@ -295,6 +295,6 @@ python tools/course.py tracks/figure8.json
 
 ## 알려진 사항 (펌웨어)
 
-- SD 카드에 `Drive_Data` 폴더가 없으면 `Delete_All_Marker_Logs()`가 `FR_NO_PATH`를 받아 "Del Fail"을 띄우고 500 ms씩 10번 대기합니다(부팅 5초 지연). 시뮬레이터는 폴더를 미리 만들어 둡니다.
+- 부팅 시 `Delete_All_Marker_Logs()`가 비캐시(`SDFatFS_NC`) 버퍼로 마운트하여 이전 `save_slot_1..10.txt` 로그를 조용히 정리하며, SD 카드가 없더라도 부팅이 멈추지 않고 `SD:SKIP` 후 정상 진행됩니다.
 - `figure8` 코스를 1.0 m/s로 달리면 펌웨어가 기록하는 마커 순서가 규정상 정답과 정확히 같습니다. 1.8 m/s에서는 R 25 cm 커브의 원심가속도가 1.3 g라서, 기본 타이어 μ=1.3이면 차체가 미끄러지며 횡오차가 50 mm 안팎까지 커지고, 곡선 끝 턴마크를 일부 놓칩니다. 실제 타이어 마찰을 측정해 `tire_mu`를 맞춰야 판단할 수 있습니다.
 - 대회 규정은 흡착 팬을 금지합니다. 펌웨어의 `fan_en`은 기본 0입니다.
