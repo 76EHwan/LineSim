@@ -36,7 +36,7 @@
   "fan_force": 0.0,
   "vbat": 16.8,
   "gyro_noise_dps": 1.409,
-  "gyro_bias_dps": 79.4387,
+  "gyro_bias_dps": 0.3553,
   "timestep": 0.0001,
   "motor": {
     "kt": 0.00646,

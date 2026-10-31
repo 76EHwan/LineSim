@@ -139,7 +139,8 @@ def parse_sensor_sysid(path: str) -> Dict[str, Any]:
     ch_stds = [_std(col) for col in ir_cols[:16] if len(col) >= 2]
     ir_noise = round(_mean(ch_stds), 2) if ch_stds else meta.get("IR_NOISE_AVG_LSB", 6.0)
     gyro_noise_dps = round(_std(gyro_z_samples), 4) if len(gyro_z_samples) >= 2 else meta.get("GYRO_Z_STD_DPS", 0.08)
-    gyro_bias_dps = round(abs(meta.get("GYRO_Z_OFFSET_DPS", _mean(gyro_z_samples))), 4)
+    # Use actual stationary samples for sensor bias; fallback to header offset only if samples missing
+    gyro_bias_dps = round(abs(_mean(gyro_z_samples)), 4) if len(gyro_z_samples) >= 2 else round(abs(meta.get("GYRO_Z_OFFSET_DPS", 0.4)), 4)
 
     result: Dict[str, Any] = {
         "source": path,
