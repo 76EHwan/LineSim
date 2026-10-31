@@ -331,12 +331,22 @@ def parse_drive_sysid(
       - vbat (from vbus column)
     """
     rows: List[Dict[str, float]] = []
+    lat_acc_meta: Optional[float] = None
 
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
         reader = csv.reader(f)
         header: Optional[List[str]] = None
         for row in reader:
-            if not row or row[0].strip().startswith("#"):
+            if not row:
+                continue
+            first = row[0].strip()
+            if first.startswith("#"):
+                line = ",".join(row)
+                if "lat_acc_max" in line and "=" in line:
+                    try:
+                        lat_acc_meta = float(line.split("=", 1)[1].strip().split()[0])
+                    except ValueError:
+                        pass
                 continue
             if header is None:
                 header = [c.strip() for c in row]
@@ -367,6 +377,10 @@ def parse_drive_sysid(
     if len(rows) < 20:
         return {"source": path, "samples": len(rows), "error": "Not enough drive samples"}
 
+    # Exclude post-crash divergence frames at end of log (line-lost spinning)
+    while len(rows) > 30 and abs(rows[-1]["line_pos"]) >= 0.98:
+        rows.pop()
+
     dts = [
         (rows[i]["t_ms"] - rows[i - 1]["t_ms"]) * 1e-3
         for i in range(1, len(rows))
@@ -388,10 +402,12 @@ def parse_drive_sysid(
         w_enc = (r["mps_R"] - r["mps_L"]) / max(0.05, track_width)
         w_gyro = r["gyro_z_dps"] * DEG2RAD
         ay = abs(v * w_gyro)
-        if i >= 3:
-            dt_w = max(1e-3, (rows[i]["t_ms"] - rows[i - 3]["t_ms"]) * 1e-3)
-            v_prev = 0.5 * (rows[i - 3]["mps_L"] + rows[i - 3]["mps_R"])
+        # Smoothed longitudinal acceleration over 20ms window (clamped to physical vehicle limits)
+        if i >= 10:
+            dt_w = max(1e-3, (rows[i]["t_ms"] - rows[i - 10]["t_ms"]) * 1e-3)
+            v_prev = 0.5 * (rows[i - 10]["mps_L"] + rows[i - 10]["mps_R"])
             ax = (v - v_prev) / dt_w
+            ax = max(-10.0, min(10.0, ax))
         else:
             ax = 0.0
 
@@ -409,13 +425,25 @@ def parse_drive_sysid(
             if -0.1 <= slip_ratio <= 0.6:
                 yaw_slip_ratios.append(slip_ratio)
 
+    ay_p90 = _percentile(ay_list, 90.0)
+    ay_p95 = _percentile(ay_list, 95.0)
     ay_p98 = _percentile(ay_list, 98.0)
     ay_max = max(ay_list) if ay_list else 0.0
     ax_p98 = _percentile([abs(x) for x in ax_list], 98.0)
+    atot_p95 = _percentile(atot_list, 95.0)
     atot_p98 = _percentile(atot_list, 98.0)
 
-    mu_from_accel = (atot_p98 / G_ACCEL) * 1.12
-    tire_mu = round(max(0.75, min(2.2, mu_from_accel if mu_from_accel > 0.6 else 1.3)), 3)
+    # Detect if test suffered severe steering oscillation (e.g. gyro std > 250 dps while base speed <= 2.5 m/s)
+    gyro_std = _std([r["gyro_z_dps"] for r in rows])
+    is_oscillating = (gyro_std > 250.0 and _mean(v_list) < 2.5)
+
+    if is_oscillating and lat_acc_meta is not None:
+        # During violent steering limit cycles, raw instantaneous ay is inflated by wheel slamming.
+        # Anchor to configured lat_acc_max and steady cornering p90.
+        mu_from_accel = min(lat_acc_meta * 1.08, ay_p90 * 1.05) / G_ACCEL
+    else:
+        mu_from_accel = atot_p95 / G_ACCEL
+    tire_mu = round(max(0.75, min(2.0, mu_from_accel if mu_from_accel > 0.6 else 1.35)), 3)
 
     if len(yaw_slip_ratios) >= 10:
         mean_slip = max(0.015, _mean(yaw_slip_ratios))
