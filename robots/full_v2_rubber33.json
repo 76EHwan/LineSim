@@ -44,8 +44,8 @@
     "j_rotor": 8.12e-08,
     "gear": 3.5454545,
     "efficiency": 0.9,
-    "friction": 0.00025,
-    "viscous": 2e-08,
+    "friction": 9.79e-05,
+    "viscous": 1.0179e-06,
     "current_tau": 0.00013,
     "voltage_ratio": 0.9,
     "drive_lag": 0.0
