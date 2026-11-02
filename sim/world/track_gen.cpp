@@ -557,21 +557,33 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 			return mirror({{true, 0, 90}, {false, d, 0}, {true, 0, -90}, {false, w, 0}, {true, 0, -90}, {false, d, 0},
 				{true, 0, 90}}, s);
 		}
-		if (kind == 6) {   // chicane (45 deg slalom)
-			double a = len_q(0.2, 0.8), b = len_q(0.2, 1.2);
-			return mirror({{true, 0, 45}, {false, a, 0}, {true, 0, -45}, {false, b, 0}, {true, 0, -45}, {false, a, 0},
-				{true, 0, 45}}, s);
+		if (kind == 6) {   // continuous 45 deg S-turn slalom (4 or 8 continuous 45 deg turns)
+			int pairs = (opt.complex_mode && uni(0, 1) < 0.65) ? 2 : 1;
+			double b = len_q(0.20, 0.35);
+			Pieces m;
+			for (int k = 0; k < pairs; k++) {
+				m.push_back({true, 0, 45});
+				m.push_back({true, 0, -45});
+			}
+			m.push_back({false, b, 0});
+			for (int k = 0; k < pairs; k++) {
+				m.push_back({true, 0, -45});
+				m.push_back({true, 0, 45});
+			}
+			return mirror(m, s);
 		}
 		if (kind == 7 || kind == 8) {   // 45 deg hump (compact span, good diagonal straight)
 			double a = len_q(0.25, 1.2);
 			return mirror({{true, 0, 45}, {false, a, 0}, {true, 0, -90}, {false, a, 0}, {true, 0, 45}}, s);
 		}
-		if (kind == 9 && opt.complex_mode) {   // Quad chicane / slalom cascade: 4 alternating 45 deg bends
-			double a = len_q(0.2, 0.45), b = len_q(0.2, 0.55), c = len_q(0.2, 0.4);
+		if ((kind == 9 || kind == 12 || kind == 13) && opt.complex_mode) {   // Continuous 45 deg slalom cascade: 8 alternating 45 deg bends
+			double b = len_q(0.20, 0.35);
 			return mirror({
-				{true, 0, 45}, {false, a, 0}, {true, 0, -45}, {false, b, 0}, {true, 0, -45}, {false, a, 0}, {true, 0, 45},
-				{false, c, 0},
-				{true, 0, -45}, {false, a, 0}, {true, 0, 45}, {false, b, 0}, {true, 0, 45}, {false, a, 0}, {true, 0, -45}
+				{true, 0, 45}, {true, 0, -45},
+				{false, b, 0},
+				{true, 0, -45}, {true, 0, 45}, {true, 0, -45}, {true, 0, 45},
+				{false, b, 0},
+				{true, 0, 45}, {true, 0, -45}
 			}, s);
 		}
 		if (kind == 10 && opt.complex_mode) {  // Omega hairpin bulb (135 -> -270 -> 135)
@@ -628,25 +640,68 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 		return c;
 	};
 
+	auto c45_detour = [&]() -> Pieces {
+		const int s = sgn();
+		if (uni(0, 1) < 0.5) {
+			int pairs = (opt.complex_mode && uni(0, 1) < 0.7) ? 2 : 1;
+			double b = len_q(0.20, 0.35);
+			Pieces m;
+			for (int k = 0; k < pairs; k++) {
+				m.push_back({true, 0, 45});
+				m.push_back({true, 0, -45});
+			}
+			m.push_back({false, b, 0});
+			for (int k = 0; k < pairs; k++) {
+				m.push_back({true, 0, -45});
+				m.push_back({true, 0, 45});
+			}
+			return mirror(m, s);
+		}
+		double b = len_q(0.20, 0.35);
+		return mirror({
+			{true, 0, 45}, {true, 0, -45},
+			{false, b, 0},
+			{true, 0, -45}, {true, 0, 45}, {true, 0, -45}, {true, 0, 45},
+			{false, b, 0},
+			{true, 0, 45}, {true, 0, -45}
+		}, s);
+	};
+
+	auto count_c45 = [](const Pieces& ps) -> int {
+		int cnt = 0;
+		const size_t n = ps.size();
+		for (size_t i = 0; i < n; i++) {
+			if (!ps[i].arc || std::abs(ps[i].deg) != 45)
+				continue;
+			bool prev_45 = (i > 0 && ps[i - 1].arc && std::abs(ps[i - 1].deg) == 45);
+			bool next_45 = (i + 1 < n && ps[i + 1].arc && std::abs(ps[i + 1].deg) == 45);
+			if (prev_45 || next_45)
+				cnt++;
+		}
+		return cnt;
+	};
+
 	// ---- base loops; piece 0 is the end-mark straight and is never touched
 	auto base = [&]() -> Pieces {
 		double W = opt.complex_mode ? round_to(uni(0.88, 0.93) * bw, 0.05) : round_to(uni(0.85, 0.92) * bw, 0.05);
 		double H = opt.complex_mode ? round_to(uni(0.74, 0.82) * bh, 0.05) : round_to(uni(0.68, 0.80) * bh, 0.05);
 		const double top_total = W - 2 * R;
 		if (opt.complex_mode) {
-			// Championship Infield Serpentine Base with 2 Guaranteed Crossing-Protected Long Straights:
-			// - Piece 0: short start straight (1.2m, not main_straight). No launch at start!
-			// - Sector 1 technical warmup turns away from start into infield.
-			// - Long Straight 1 (6.6m, East, Y=1.80) is in the middle of the lap, marked main_straight = true.
-			//   Crossed at 90 deg by Vertical Corridor 1 (X=3.00)!
-			// - Sector 2 central/east infield connects to Long Straight 2.
-			// - Long Straight 2 (6.85m, West, Y=4.20) is in the middle of the lap, marked main_straight = true.
-			//   Crossed at 90 deg by Vertical Corridor 2 (X=2.00)!
-			// - Sector 3 technical infield connects back to Start line with outside perimeter return.
-			// Both long straights have guaranteed 90 deg crossings and remain unbroken.
+			// Championship Infield Serpentine Base with 3 Long Straights:
+			// - Long Straight 1 (6.6m, East, Y=1.80): unbroken, crossed at 90 deg by Vertical Corridor 1 (X=3.00).
+			// - Long Straight 2 (6.85m, West, Y=4.20): unbroken, crossed at 90 deg by Vertical Corridor 2 (X=2.00).
+			// - Long Straight 3 (~6.2m total, East, Y=6.40): cut in the middle with a continuous 45 deg S-turn!
 			double dw = round_to(uni(-0.25, 0.25), 0.05);
 			double str1_len = 6.60 + dw;
 			double str2_len = 6.85 + dw;
+			double str3_h1 = 2.75 + 0.5 * dw;
+			double str3_h2 = 2.75 + 0.5 * dw;
+			const int s3_lobes = 2; // 4 consecutive alternating 45 deg arcs in the middle of Long Straight 3
+			const double dx_s3 = 2.0 * s3_lobes * R * std::sin(kPi / 4.0);
+			const double dy_s3 = -2.0 * s3_lobes * R * (1.0 - std::cos(kPi / 4.0));
+			const double east_end_x = -0.30 + str3_h1 + dx_s3 + str3_h2;
+			const double west_run = east_end_x - 2.25;
+			const double vert2_len = (5.35 + dy_s3) - 2.60;
 			return {
 				{false, 1.20, 0, false},     // 0: start straight
 				{true,  0,    90, false},    // 1
@@ -668,19 +723,28 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 				{true,  0,    90, false},    // 17
 				{false, 3.35, 0, false},     // 18
 				{true,  0,    90, false},    // 19
-				{false, str2_len, 0, true},  // 20: LONG STRAIGHT 2 (protected, crossed at 90 deg by #26)
+				{false, str2_len, 0, true},  // 20: LONG STRAIGHT 2 (protected, crossed at 90 deg by #35)
 				{true,  0,   -90, false},    // 21
-				{false, 0.90, 0, false},     // 22
+				{false, 1.70, 0, false},     // 22: climb to top corridor (Y=6.40)
 				{true,  0,   -90, false},    // 23
-				{false, 2.05, 0, false},     // 24
-				{true,  0,   -90, false},    // 25
-				{false, 2.75, 0, false},     // 26: VERTICAL CORRIDOR 2 (crosses #20 at 90 deg)
-				{true,  0,   -90, false},    // 27
-				{false, 2.35, 0, false},     // 28: extended to outside corridor
-				{true,  0,    90, false},    // 29
-				{false, 1.85, 0, false},     // 30: outside return
-				{true,  0,    90, false},    // 31
-				{false, 0.60, 0, false}      // 32: finish straight connector
+				{false, str3_h1, 0, true},   // 24: LONG STRAIGHT 3 - Part 1 (protected)
+				{true,  0,   -45, false},    // 25: 45 deg continuous turn in the middle of Long Straight 3
+				{true,  0,    45, false},    // 26
+				{true,  0,   -45, false},    // 27
+				{true,  0,    45, false},    // 28
+				{false, str3_h2, 0, true},   // 29: LONG STRAIGHT 3 - Part 2 (protected)
+				{true,  0,   -90, false},    // 30
+				{false, 0.30, 0, false},     // 31
+				{true,  0,   -90, false},    // 32
+				{false, west_run, 0, false}, // 33: upper infield return to X=2.25
+				{true,  0,    90, false},    // 34
+				{false, vert2_len, 0, false},// 35: VERTICAL CORRIDOR 2 (crosses #20 at 90 deg)
+				{true,  0,   -90, false},    // 36
+				{false, 2.35, 0, false},     // 37: extended to outside corridor
+				{true,  0,    90, false},    // 38
+				{false, 1.85, 0, false},     // 39: outside return
+				{true,  0,    90, false},    // 40
+				{false, 0.60, 0, false}      // 41: finish straight connector
 			};
 		}
 		const double main_len = std::min(1.4, top_total * 0.35);
@@ -689,6 +753,7 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 			{true, 0, 90}, {false, H - 2 * R, 0}, {true, 0, 90}};
 	};
 
+	const int want_c45 = opt.complex_mode ? 12 : 0;
 	int checks = 0;
 	const int max_attempts = opt.complex_mode ? 250 : 60;
 	for (int attempt = 1; attempt <= max_attempts; attempt++) {
@@ -697,13 +762,14 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 			continue;
 		double cur_len = 0;
 		int crossings = 0, fails = 0;
+		int c45_count = count_c45(ps);
 		checks++;
 		if (!fast_check_course(ps, bw, bh, opt.max_length, &cur_len, &crossings))
 			continue;
 		if (opt.crossings >= 0 && crossings > opt.crossings)
 			continue;
 		const int max_fails = opt.complex_mode ? 2500 : 800;
-		while ((cur_len < target || crossings < want_cross) && fails < max_fails) {
+		while ((cur_len < target || crossings < want_cross || c45_count < want_c45) && fails < max_fails) {
 			std::vector<int> hd(ps.size() + 1, 0);
 			for (size_t i = 0; i < ps.size(); i++)
 				hd[i + 1] = hd[i] + (ps[i].arc ? ps[i].deg : 0);
@@ -711,9 +777,10 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 			const double r = uni(0, 1);
 			// Place crossings early while base straights are still long and uncut
 			const bool force_cross = (crossings < want_cross) && (fails < 120 || uni(0, 1) < 0.75);
-			if (force_cross || r < 0.65) {
+			const bool force_c45 = !force_cross && (c45_count < want_c45) && (uni(0, 1) < 0.65);
+			if (force_cross || force_c45 || r < 0.65) {
 				bool need_cross = force_cross || (crossings < want_cross && (opt.crossings >= 0 || uni(0, 1) < 0.5));
-				Pieces m_base = need_cross ? cross_loop() : detour();
+				Pieces m_base = need_cross ? cross_loop() : (force_c45 ? c45_detour() : detour());
 				double span;
 				if (m_base.empty() || !module_span(m_base, &span) || span < 0.25 || (!need_cross && !module_clear(m_base, span))) {
 					fails++;
@@ -728,7 +795,7 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 				if (cand.empty()) {
 					if (need_cross) {
 						need_cross = false;
-						m_base = detour();
+						m_base = (c45_count < want_c45 && uni(0, 1) < 0.65) ? c45_detour() : detour();
 						if (m_base.empty() || !module_span(m_base, &span) || span < 0.25 || !module_clear(m_base, span)) {
 							fails++;
 							continue;
@@ -774,12 +841,14 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 					int nc = 0;
 					checks++;
 					if (fast_check_course(next, bw, bh, opt.max_length, &nlen, &nc)) {
-						if ((opt.crossings >= 0 && nc > opt.crossings) || nc < crossings)
+						int nc45 = count_c45(next);
+						if ((opt.crossings >= 0 && nc > opt.crossings) || nc < crossings || nc45 < c45_count)
 							continue;
-						fails = nlen > cur_len + 0.05 || nc > crossings ? 0 : fails + 1;
+						fails = (nlen > cur_len + 0.05 || nc > crossings || nc45 > c45_count) ? 0 : fails + 1;
 						ps = std::move(next);
 						cur_len = nlen;
 						crossings = nc;
+						c45_count = nc45;
 						accepted = true;
 						break;
 					}
@@ -838,22 +907,24 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 			int nc = 0;
 			checks++;
 			if (fast_check_course(next, bw, bh, opt.max_length, &nlen, &nc)) {
-				if ((opt.crossings >= 0 && nc > opt.crossings) || nc < crossings) {
+				int nc45 = count_c45(next);
+				if ((opt.crossings >= 0 && nc > opt.crossings) || nc < crossings || nc45 < c45_count) {
 					fails++;
 					continue;
 				}
-				fails = nlen > cur_len + 0.05 || nc > crossings ? 0 : fails + 1;
+				fails = (nlen > cur_len + 0.05 || nc > crossings || nc45 > c45_count) ? 0 : fails + 1;
 				ps = std::move(next);
 				cur_len = nlen;
 				crossings = nc;
+				c45_count = nc45;
 			} else {
 				fails++;
 			}
 		}
 		if (std::getenv("LINESIM_GEN_DEBUG"))
-			std::fprintf(stderr, "attempt %d: %.1f m (target %.1f), %d/%d crossings, %zu pieces, %d checks\n", attempt,
-				cur_len, target, crossings, want_cross, ps.size(), checks);
-		if (cur_len < opt.min_length || crossings < (opt.crossings >= 0 ? opt.crossings : opt.min_crossings))
+			std::fprintf(stderr, "attempt %d: %.1f m (target %.1f), %d/%d crossings, %d c45, %zu pieces, %d checks\n", attempt,
+				cur_len, target, crossings, want_cross, c45_count, ps.size(), checks);
+		if (cur_len < opt.min_length || crossings < (opt.crossings >= 0 ? opt.crossings : opt.min_crossings) || c45_count < (opt.complex_mode ? 10 : 0))
 			continue;
 		Track t;
 		if (!full_check(ps, &t))

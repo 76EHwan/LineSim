@@ -32,7 +32,7 @@
   "ir_black": 308,
   "ir_noise": 2.23,
   "ir_spread": 0.09,
-  "sensor_delay": 0.002,
+  "sensor_delay": 0.007,
   "fan_force": 0.0,
   "vbat": 15.0,
   "gyro_noise_dps": 0.9936,

@@ -58,6 +58,58 @@ void SCB_InvalidateDCache_by_Addr(volatile void *addr, int32_t dsize);
 void SCB_CleanDCache_by_Addr(volatile void *addr, int32_t dsize);
 void NVIC_SystemReset(void);
 
+/* ---------------- NVIC / Exceptions ---------------- */
+typedef enum IRQn {
+	NonMaskableInt_IRQn     = -14,
+	HardFault_IRQn          = -13,
+	MemoryManagement_IRQn   = -12,
+	BusFault_IRQn           = -11,
+	UsageFault_IRQn         = -10,
+	SVCall_IRQn             = -5,
+	DebugMonitor_IRQn       = -4,
+	PendSV_IRQn             = -2,
+	SysTick_IRQn            = -1,
+	WWDG_IRQn               = 0,
+	PVD_AVD_IRQn            = 1,
+	TAMP_STAMP_IRQn         = 2,
+	RTC_WKUP_IRQn           = 3,
+	FLASH_IRQn              = 4,
+	RCC_IRQn                = 5,
+	EXTI0_IRQn              = 6,
+	EXTI1_IRQn              = 7,
+	EXTI2_IRQn              = 8,
+	EXTI3_IRQn              = 9,
+	EXTI4_IRQn              = 10,
+	DMA1_Stream0_IRQn       = 11,
+	DMA1_Stream1_IRQn       = 12,
+	DMA1_Stream2_IRQn       = 13,
+	DMA1_Stream3_IRQn       = 14,
+	DMA1_Stream4_IRQn       = 15,
+	DMA1_Stream5_IRQn       = 16,
+	DMA1_Stream6_IRQn       = 17,
+	ADC_IRQn                = 18,
+	I2C1_EV_IRQn            = 31,
+	I2C1_ER_IRQn            = 32,
+	SPI1_IRQn               = 35,
+	SPI2_IRQn               = 36,
+	TIM8_UP_TIM13_IRQn      = 44,
+	TIM8_TRG_COM_TIM14_IRQn = 45,
+	SDMMC1_IRQn             = 49,
+	TIM6_DAC_IRQn           = 54,
+	TIM7_IRQn               = 55,
+	SPI4_IRQn               = 84,
+	LPTIM1_IRQn             = 93,
+	LPTIM2_IRQn             = 94,
+	LPTIM3_IRQn             = 95,
+	ADC3_IRQn               = 127,
+	BDMA_Channel0_IRQn      = 129,
+} IRQn_Type;
+
+void HAL_NVIC_SetPriority(IRQn_Type IRQn, uint32_t PreemptPriority, uint32_t SubPriority);
+void HAL_NVIC_EnableIRQ(IRQn_Type IRQn);
+void HAL_NVIC_DisableIRQ(IRQn_Type IRQn);
+void HAL_NVIC_ClearPendingIRQ(IRQn_Type IRQn);
+
 /* ---------------- HAL common ---------------- */
 typedef enum { HAL_OK = 0x00, HAL_ERROR = 0x01, HAL_BUSY = 0x02, HAL_TIMEOUT = 0x03 } HAL_StatusTypeDef;
 typedef enum { HAL_UNLOCKED = 0x00, HAL_LOCKED = 0x01 } HAL_LockTypeDef;
@@ -108,6 +160,9 @@ extern GPIO_TypeDef sim_gpio[11];
 void          HAL_GPIO_WritePin(GPIO_TypeDef *GPIOx, uint16_t GPIO_Pin, GPIO_PinState PinState);
 GPIO_PinState HAL_GPIO_ReadPin(GPIO_TypeDef *GPIOx, uint16_t GPIO_Pin);
 void          HAL_GPIO_TogglePin(GPIO_TypeDef *GPIOx, uint16_t GPIO_Pin);
+#define __HAL_GPIO_EXTI_CLEAR_IT(pin)   ((void)(pin))
+#define __HAL_GPIO_EXTI_GET_IT(pin)     (RESET)
+#define HAL_GPIO_EXTI_IRQHandler(pin)   ((void)(pin))
 
 /* ---------------- DMA ---------------- */
 typedef struct { void *Instance; } DMA_HandleTypeDef;
@@ -287,6 +342,8 @@ typedef struct { void *Instance; } RTC_HandleTypeDef;
 typedef struct { void *Instance; } SD_HandleTypeDef;
 typedef struct { void *Instance; } UART_HandleTypeDef;
 typedef struct { void *Instance; } PCD_HandleTypeDef;
+
+HAL_StatusTypeDef HAL_RNG_GenerateRandomNumber(RNG_HandleTypeDef *hrng, uint32_t *random32bit);
 
 /* ---------------- Internal flash ---------------- */
 typedef struct { uint32_t TypeErase, Banks, Sector, NbSectors, VoltageRange; } FLASH_EraseInitTypeDef;

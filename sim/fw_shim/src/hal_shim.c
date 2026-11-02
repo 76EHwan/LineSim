@@ -85,6 +85,12 @@ void SCB_InvalidateDCache_by_Addr(volatile void *addr, int32_t dsize) { (void) a
 void SCB_CleanDCache_by_Addr(volatile void *addr, int32_t dsize) { (void) addr; (void) dsize; }
 void NVIC_SystemReset(void) { sim_fw_halt("NVIC_SystemReset"); }
 void HAL_NVIC_SystemReset(void) { sim_fw_halt("HAL_NVIC_SystemReset"); }
+void HAL_NVIC_SetPriority(IRQn_Type IRQn, uint32_t PreemptPriority, uint32_t SubPriority) {
+	(void) IRQn; (void) PreemptPriority; (void) SubPriority;
+}
+void HAL_NVIC_EnableIRQ(IRQn_Type IRQn) { (void) IRQn; }
+void HAL_NVIC_DisableIRQ(IRQn_Type IRQn) { (void) IRQn; }
+void HAL_NVIC_ClearPendingIRQ(IRQn_Type IRQn) { (void) IRQn; }
 
 /* ---------------- GPIO ---------------- */
 void HAL_GPIO_WritePin(GPIO_TypeDef *GPIOx, uint16_t GPIO_Pin, GPIO_PinState PinState) {
@@ -327,4 +333,13 @@ void HAL_RTCEx_BKUPWrite(RTC_HandleTypeDef *hrtc, uint32_t BackupRegister, uint3
 uint32_t HAL_RTCEx_BKUPRead(RTC_HandleTypeDef *hrtc, uint32_t BackupRegister) {
 	(void) hrtc;
 	return BackupRegister < 32 ? sim_mcu.bkp_reg[BackupRegister] : 0;
+}
+
+/* ---------------- RNG ---------------- */
+HAL_StatusTypeDef HAL_RNG_GenerateRandomNumber(RNG_HandleTypeDef *hrng, uint32_t *random32bit) {
+	(void) hrng;
+	if (!random32bit)
+		return HAL_ERROR;
+	*random32bit = ((uint32_t) rand() << 16) ^ (uint32_t) rand();
+	return HAL_OK;
 }
