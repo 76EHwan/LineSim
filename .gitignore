@@ -20,3 +20,4 @@ linesim_*.bmp
 powershell.cmd
 /scratch/
 /build-linux/
+nul
