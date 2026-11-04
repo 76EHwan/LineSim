@@ -6,7 +6,7 @@
 void IrBar::init(const RobotParams& p, uint32_t seed) {
 	p_ = p;
 	rng_.seed(seed);
-	// sensor.c line_sensor_pos[]: sensor 0 = -1.0 ... sensor 15 = +1.0, and a positive
+	// sensor.c line_sensor_pos[]: sensor 0 = -1.5 ... sensor 15 = +1.5, and a positive
 	// position steers right (motor.c), so sensor 0 sits on the robot's left (+y).
 	for (int i = 0; i < 16; i++) {
 		if (p.ir_sensors.size() >= 16) {   // measured positions from the CAD model (curved bar)

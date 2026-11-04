@@ -38,13 +38,13 @@ const ParamRow kRows[] = {
 	{"steer kp", &FwDriveParams::steer_kp, 0.001f, 0.0f, 200.0f, "%.3f"},
 	{"steer kd", &FwDriveParams::steer_kd, 0.01f, 0.0f, 2.0f, "%.3f s", true},
 	{"pos atten gain", &FwDriveParams::pos_atten_gain, 0.05f, 0.0f, 2.0f, "%.2f"},
-	{"target shift", &FwDriveParams::target_shift, 0.05f, 0.0f, 3.0f, "%.2f"},
+	{"target shift", &FwDriveParams::target_shift, 0.05f, 0.0f, 1.50f, "%.2f"},
 	{"tgt curve gain", &FwDriveParams::target_curve_gain, 0.1f, 0.0f, 5.0f, "x%.2f"},   // drive 3/4, in curves
 	{"slalom ratio", &FwDriveParams::slalom_ratio, 0.05f, 0.0f, 1.0f, "%.2f"},          // drive 4, 45 deg segments
 	{"brake margin", &FwDriveParams::brake_margin_m, 0.01f, 0.0f, 1.0f, "%.2f m"},       // straight braking margin
 	{"pit-in dist", &FwDriveParams::pit_in_m, 0.01f, 0.0f, 1.0f, "%.2f m"},
-	{"yaw kp", &FwDriveParams::yaw_kp, 0.1f, 0.0f, 20.0f, "%.2f"},          // cascade (0 / 0 = plain PD)
-	{"yaw ki", &FwDriveParams::yaw_ki, 1.0f, 0.0f, 500.0f, "%.1f /s"},
+	{"yaw kp", &FwDriveParams::yaw_kp, 0.01f, 0.0f, 20.0f, "%.2f"},          // cascade (0 / 0 = plain PD)
+	{"yaw ki", &FwDriveParams::yaw_ki, 0.01f, 0.0f, 500.0f, "%.2f /s"},
 	{"lat acc max", &FwDriveParams::lat_acc_max, 0.5f, 0.0f, 40.0f, "%.1f m/s2"},
 };
 constexpr int kRowCount = sizeof kRows / sizeof kRows[0];
@@ -1057,7 +1057,7 @@ void LiveView::update_gain_recommendation() {
 	gain_rec_.max_beta_deg = max_beta;
 	gain_rec_.weave_dps = weave;
 
-	const float ideal_kd = std::max(120.0f, cur_kp * 22.0f);
+	const float ideal_kd = std::max(80.0f, cur_kp * 28.0f);
 	float rec_kp = cur_kp;
 	float rec_kd = cur_kd;
 	float rec_lat = cur_lat;
@@ -1083,10 +1083,10 @@ void LiveView::update_gain_recommendation() {
 			rec_kd = std::max(cur_kd + 25.0f * (float)slip_sev, ideal_kd * 1.05f);
 		}
 
-		if (cur_kp > 24.0f) {
-			rec_kp = std::max(20.0f, cur_kp - 1.5f * (float)slip_sev);
-		} else if (cur_kp < 18.0f) {
-			rec_kp = 20.0f;
+		if (cur_kp > 16.0f) {
+			rec_kp = std::max(13.3f, cur_kp - 1.0f * (float)slip_sev);
+		} else if (cur_kp < 12.0f) {
+			rec_kp = 13.3f;
 		}
 
 		if (cur_lat > 10.5f) {
@@ -1108,9 +1108,9 @@ void LiveView::update_gain_recommendation() {
 		std::snprintf(b1, sizeof b1, "Line deviation: Max %.1f mm, RMS %.1f mm (>25mm threshold)", max_lat, rms_lat);
 		gain_rec_.diag_cause = b1;
 
-		const float dkp = std::clamp(2.5f * (float)under_sev, 1.0f, 5.0f);
-		rec_kp = std::clamp(cur_kp + dkp, 18.0f, 32.0f);
-		rec_kd = std::max(cur_kd, rec_kp * 22.0f);
+		const float dkp = std::clamp(1.67f * (float)under_sev, 0.67f, 3.33f);
+		rec_kp = std::clamp(cur_kp + dkp, 12.0f, 21.33f);
+		rec_kd = std::max(cur_kd, rec_kp * 28.0f);
 		std::snprintf(b2, sizeof b2, "Increase KP for faster turn-in; align KD to %.0f", rec_kd);
 		gain_rec_.diag_action = b2;
 	} else if (is_weaving) {
@@ -1123,8 +1123,8 @@ void LiveView::update_gain_recommendation() {
 			rec_kd = ideal_kd;
 			std::snprintf(b2, sizeof b2, "Raise KD to ideal damping (%.0f) to quench weave", ideal_kd);
 		} else {
-			rec_kp = std::max(16.0f, cur_kp - 1.5f);
-			rec_kd = rec_kp * 21.0f;
+			rec_kp = std::max(10.67f, cur_kp - 1.0f);
+			rec_kd = rec_kp * 28.0f;
 			std::snprintf(b2, sizeof b2, "Lower KP slightly (%.1f) and re-balance KD (%.0f)", rec_kp, rec_kd);
 		}
 		gain_rec_.diag_action = b2;

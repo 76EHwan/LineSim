@@ -231,7 +231,7 @@ bool check_oversteer(const DriveResult& d, double max_beta_deg = 0.0, double min
 constexpr int kTuneCourses = 3;
 
 struct TuneSet {
-	double kp = 16.64, kd = 0.101;     // steering PD, kd in seconds (202 * 0.0005s)
+	double kp = 15.04, kd = 0.215;     // steering PD, kd in seconds (431 * 0.0005s)
 	double lat = 14.77, sl = 0.10;     // lat_acc_max [m/s2], slalom_ratio
 	double target_shift = 0.0;          // target_shift_val
 	double target_curve_gain = 1.50;    // target_curve_gain
@@ -898,8 +898,8 @@ public:
 		// - speed_sev: how much faster than base_mps the robot was moving right before failing (4th drive braking entry)
 		const double speed_sev = fm.d1_failed ? 0.0 : std::clamp((fm.fail_v - v_) / 0.75, 0.0, 1.5);
 
-		// Ideal damping ratio target: steer_kd ~= 22 * steer_kp  =>  kd_s ~= 0.011 * kp
-		const auto ideal_kd = [](double kp) { return std::max(0.0, kp * 0.0112); };
+		// Ideal damping ratio target: steer_kd ~= 28.7 * steer_kp  =>  kd_s ~= 0.0143 * kp
+		const auto ideal_kd = [](double kp) { return std::max(0.0, kp * 0.0143); };
 
 		std::vector<HealCandidate> cands;
 
@@ -1717,7 +1717,7 @@ static bool spawn_eval_worker(const std::string& exe_path, const std::string& tr
 		" --set base_mps=%.3f --set steer_kp=%.4f --set steer_kd_s=%.4f "
 		"--set lat_acc_max=%.2f --set brake_margin_m=%.2f "
 		"--set target_shift=%.2f --set target_curve_gain=%.2f "
-		"--set slalom_ratio=%.2f --set yaw_kp=%.2f --set yaw_ki=%.2f",
+		"--set slalom_ratio=%.2f --set yaw_kp=%.3f --set yaw_ki=%.3f",
 		speed, ts.kp, ts.kd,
 		ts.lat, ts.brake_margin,
 		ts.target_shift, ts.target_curve_gain,

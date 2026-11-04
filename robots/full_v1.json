@@ -46,7 +46,7 @@
     "efficiency": 0.9,
     "friction": 0.00025,
     "viscous": 2e-08,
-    "current_tau": 0.00013,
+    "current_tau": 0.000187,
     "voltage_ratio": 0.9,
     "drive_lag": 0.0
   },

@@ -20,7 +20,7 @@ struct MotorParams {
 	double efficiency = 0.90;      // gearbox
 	double friction = 0.25e-3;     // Coulomb friction at the motor shaft [Nm]
 	double viscous = 2.0e-8;       // viscous friction at the motor shaft [Nm/(rad/s)]
-	double current_tau = 1.3e-4;   // closed current-loop time constant [s] (25 kHz / 20 bandwidth)
+	double current_tau = 1.87e-4;  // closed current-loop + inverter lag time constant [s] (25 kHz / 20 BW: 0.127 ms + 1.5 PWM delay: 0.06 ms)
 	double voltage_ratio = 0.40;   // max |Vq| / Vbus (duty clamp 0..90 %, sinusoidal PWM)
 	// First-order lag on the wheel torque for everything the model does not resolve
 	// (real FOC current loop, gear backlash, tread wind-up ...). Calibrated against the robot:

@@ -121,7 +121,7 @@ tools\.venv\Scripts\python.exe tools\step_import.py robots\Full.step --total-mas
 
 전체 질량은 실측 400 g입니다(`--total-mass 0.4`). STEP에 재질 정보가 없어서 부품별 분배(무게중심·관성)는 일반적인 부품 질량 비율로 추정합니다(`step_import.py`의 `ASSUMED_MASS`). 균형점을 재면 `robots/full.json`의 `com`을 바꿔 주세요.
 
-펌웨어 상수와 CAD가 다른 점: `SENSOR_DIST_L` 0.13 m(CAD 0.106~0.132 m 원호), `SENSOR_HALF_WIDTH` 0.08 m(CAD 0.0764 m), `line_sensor_pos[]`는 균일 간격(CAD는 바깥으로 갈수록 좁음). 시뮬레이터의 센서는 CAD 위치를 쓰므로 이 차이가 위치 추정에 그대로 반영됩니다.
+펌웨어 상수와 CAD가 다른 점: `SENSOR_DIST_L` 0.13 m(CAD 0.106~0.132 m 원호), `SENSOR_HALF_WIDTH` 0.08 m(CAD 0.0764 m), `line_sensor_pos[]`는 0.2 등간격 [-1.5, +1.5] 좌표계(센서 간격 0.2 = 약 10 mm, 라인 폭 1개분 이동 = 0.40). 시뮬레이터의 센서는 CAD 위치를 쓰므로 이 차이가 위치 추정에 그대로 반영됩니다.
 
 ## 실제 주행 로그와 비교
 
@@ -295,7 +295,7 @@ build\Release\linesim.exe run --track tracks/finals_1_5x_championship.json --dri
 | 차체 | Full.step 형상, 질량·관성은 추정값 | 무게·균형점 실측 |
 | 바퀴·노면 | 바퀴 4개(같은 쪽 기어 연동). 타이어는 쇼어 A30 우레탄 브러시 모델(접지면 변형·이완·마찰 한계): μ 1.3(실제 로그 46조합 중 41개 재현), 슬립 강성 8, 이완 거리 4 mm | 타이어 기울기 시험으로 μ 실측 |
 | 조향 지연 | `sensor_delay` 7 ms: 센서가 7 ms 전의 바닥을 봄(모델에 없는 조향 경로 지연을 한 덩어리로 넣은 값). 2.0 m/s, kd 0에서 kp 33은 직선에서 계속 흔들리고(Vibe Test 자이로 로그, 약 10 Hz) kp 16.4는 흔들리지 않는 실제 결과를 재현(`tools/oscillation.py`). 바퀴 토크 지연(`motor.drive_lag`)으로는 펌웨어 속도 루프가 kp와 상관없이 흔들려서 쓰지 않음(0) | 다른 속도·kp의 Vibe Test 로그 |
-| 모터 | 전류 루프는 이상화(1차 지연 0.13 ms, 역기전력에 따른 전압 한계 0.4·Vbus), Kt·R·J·기어비는 `foc.h`, `motor.h` 값 | 무부하 전류(마찰), 기어 효율 측정 |
+| 모터 | 전류 루프는 이상화(1차 실효 지연 0.187 ms = 제어기 1/BW 0.127 ms + 인버터 PWM 1.5스텝 지연 0.060 ms, 역기전력에 따른 전압 한계), Kt·R·J·기어비는 `foc.h`, `motor.h` 값 | 무부하 전류(마찰), 기어 효율 측정 |
 | 속도 루프 | **펌웨어 `FOC_Speed_Loop` 그대로** (2 kHz, 엔코더 2048 CPR 양자화 포함) | — |
 | FOC 전류 루프 | 실행 안 함 (`FOC_Execute_Loop`, 25 kHz) | 다음 단계: 3상 전기 모델 + JDR 에뮬레이션 |
 | IR 센서 | CAD 위치(원호), 가우시안 스폿 σ=2.5 mm, 12비트, 센서별 게인 ±6 %, 노이즈 6 LSB, 높이 변화 무시 | 실제 raw 값 로그(`Sensor Raw` 메뉴)로 white/black/노이즈 보정 |

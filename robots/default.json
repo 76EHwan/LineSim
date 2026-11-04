@@ -56,7 +56,7 @@
     "efficiency": 0.90,
     "friction": 0.25e-3,
     "viscous": 2.0e-8,
-    "current_tau": 1.3e-4,
+    "current_tau": 1.87e-4,           // (fw) 1/BW (0.127ms) + 1.5 PWM delay (0.06ms) = 0.187ms
     "voltage_ratio": 0.90,
     "drive_lag": 0.0                  // first-order lag on the wheel torque [s] (see sensor_delay)
   }
