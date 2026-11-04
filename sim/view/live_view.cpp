@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <complex>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -37,8 +38,8 @@ const ParamRow kRows[] = {
 	{"steer kp", &FwDriveParams::steer_kp, 0.001f, 0.0f, 200.0f, "%.3f"},
 	{"steer kd", &FwDriveParams::steer_kd, 0.01f, 0.0f, 2.0f, "%.3f s", true},
 	{"pos atten gain", &FwDriveParams::pos_atten_gain, 0.05f, 0.0f, 2.0f, "%.2f"},
-	{"target shift", &FwDriveParams::target_shift, 0.05f, 0.0f, 1.0f, "%.2f"},
-	{"tgt curve gain", &FwDriveParams::target_curve_gain, 0.1f, 0.0f, 3.0f, "x%.2f"},   // drive 3/4, in curves
+	{"target shift", &FwDriveParams::target_shift, 0.05f, 0.0f, 3.0f, "%.2f"},
+	{"tgt curve gain", &FwDriveParams::target_curve_gain, 0.1f, 0.0f, 5.0f, "x%.2f"},   // drive 3/4, in curves
 	{"slalom ratio", &FwDriveParams::slalom_ratio, 0.05f, 0.0f, 1.0f, "%.2f"},          // drive 4, 45 deg segments
 	{"brake margin", &FwDriveParams::brake_margin_m, 0.01f, 0.0f, 1.0f, "%.2f m"},       // straight braking margin
 	{"pit-in dist", &FwDriveParams::pit_in_m, 0.01f, 0.0f, 1.0f, "%.2f m"},
@@ -102,6 +103,15 @@ void LiveView::handle_keys() {
 		case 'M':
 		case 'V': v_.cycle_inset(); break;
 		case 'K': v_.jump_to_next_marker_miss(); break;
+		case 'G':
+			if (session)
+				session_key(k);
+			else
+				v_.toggle_gain_rec();
+			break;
+		case 'H':
+			v_.toggle_gain_rec();
+			break;
 		case 'P': {
 			char name[64];
 			std::snprintf(name, sizeof name, "linesim_shot_%03d.bmp", ++shot_no_);
@@ -224,6 +234,11 @@ void LiveView::session_key(int k) {
 		} else {
 			s.message = "[SAVE FAILED] Could not write to drive.c (check console)";
 		}
+		break;
+	}
+	case 'g':
+	case 'G': {  // apply recommended gains to session parameters
+		apply_recommended_gains();
 		break;
 	}
 	default: break;
@@ -420,43 +435,19 @@ std::string LiveView::session_panel() const {
 		}
 		t += col ? "\n\n" : "\n";
 	}
-	size_t from = s.history.size() > (s.tune_lines.empty() ? 6u : 3u) ? s.history.size() - (s.tune_lines.empty() ? 6 : 3) : 0;
-	for (size_t i = from; i < s.history.size(); i++) {
-		const std::string& h = s.history[i];
-		if (h.size() > 28) {
-			size_t p = 0;
-			while (p < h.size()) {
-				if (h.size() - p <= 28) {
-					t += h.substr(p) + "\n";
-					break;
-				}
-				size_t cut = h.rfind(' ', p + 27);
-				if (cut == std::string::npos || cut <= p)
-					cut = p + 27;
-				t += h.substr(p, cut - p) + "\n  ";
-				p = (h[cut] == ' ') ? cut + 1 : cut;
-			}
-		} else {
-			t += h + "\n";
+	if (!s.history.empty()) {
+		t += "\nrecent results:\n";
+		size_t from = s.history.size() > (s.tune_lines.empty() ? 2u : 1u) ? s.history.size() - (s.tune_lines.empty() ? 2u : 1u) : 0;
+		for (size_t i = from; i < s.history.size(); i++) {
+			std::string h = s.history[i];
+			if (h.size() > 44) h = h.substr(0, 41) + "...";
+			t += "  " + h + "\n";
 		}
 	}
 	if (!s.message.empty()) {
-		if (s.message.size() > 28) {
-			size_t p = 0;
-			while (p < s.message.size()) {
-				if (s.message.size() - p <= 28) {
-					t += s.message.substr(p) + "\n";
-					break;
-				}
-				size_t cut = s.message.rfind(' ', p + 27);
-				if (cut == std::string::npos || cut <= p)
-					cut = p + 27;
-				t += s.message.substr(p, cut - p) + "\n";
-				p = (s.message[cut] == ' ') ? cut + 1 : cut;
-			}
-		} else {
-			t += s.message + "\n";
-		}
+		std::string msg = s.message;
+		if (msg.size() > 44) msg = msg.substr(0, 41) + "...";
+		t += "  msg: " + msg + "\n";
 	}
 	return t;
 }
@@ -465,6 +456,14 @@ void LiveView::render(double t_sim, const std::string& phase) {
 	FwTelemetry tm;
 	fwb_telemetry(&tm);
 	ViewerHud hud;
+	update_gain_recommendation();
+	hud.gain_recommendation_hud = format_gain_recommendation_hud();
+	hud.fft_bars = live_fft_bars_;
+	hud.fft_peak_freq = static_cast<float>(live_fft_peak_freq_);
+	hud.fft_peak_amp = static_cast<float>(live_fft_peak_amp_);
+	hud.fft_weave_pct = static_cast<float>(live_fft_weave_pct_);
+	hud.fft_curve_pct = static_cast<float>(live_fft_curve_pct_);
+
 	double lat = 0, s = 0;
 	const RobotParams& rp = robot_.params();
 	track_.nearest(robot_.body_to_ground(rp.sensor_x, 0.0), &lat, &s);
@@ -479,7 +478,16 @@ void LiveView::render(double t_sim, const std::string& phase) {
 	char cut[48] = "";
 	if (tm.current_base_mps > 0.2f && tm.cmd_mps < 0.97f * tm.current_base_mps)
 		std::snprintf(cut, sizeof cut, " (-%.0f %%)", 100.0 * (1.0 - tm.cmd_mps / tm.current_base_mps));
-	char buf[600];
+	char fft_hud[96];
+	if (live_fft_peak_freq_ > 0.0) {
+		std::snprintf(fft_hud, sizeof fft_hud,
+			"fft peak  %4.1f Hz (%4.0f dps) | weave %2.0f %%",
+			live_fft_peak_freq_, live_fft_peak_amp_, live_fft_weave_pct_);
+	} else {
+		std::snprintf(fft_hud, sizeof fft_hud,
+			"fft peak  sampling... (%zu/256)", fft_buf_wz_.size());
+	}
+	char buf[700];
 	std::snprintf(buf, sizeof buf,
 		"%s\n"
 		"sim speed x%.3g%s%s%s\n"
@@ -487,6 +495,7 @@ void LiveView::render(double t_sim, const std::string& phase) {
 		"fw base   %.2f / target %.2f m/s   command %.2f m/s%s\n"
 		"line      %+.1f mm (sensor bar)   target_pos %+.2f\n"
 		"yaw (fw)  %+.1f deg   beta %4.1f deg (max %.1f)%s\n"
+		"%s\n"
 		"markers   %d%s\n"
 		"iq        L %+.2f A   R %+.2f A",
 		phase.c_str(), speed_, actual, paused_ ? ", PAUSED" : "", show_trail_ ? "" : "   (trail off)", v_body, v_wheels,
@@ -494,6 +503,7 @@ void LiveView::render(double t_sim, const std::string& phase) {
 		tm.yaw_deg, live_beta_, max_beta_seen_,
 		live_beta_ >= 25.0 ? (std::fabs(lat * 1000.0) > 70.0 ? "  [OVERSTEER - OFF LIMIT!]" : "  [DRIFT: LIMIT OK]")
 		                   : (std::fabs(lat * 1000.0) > 70.0 ? "  [LINE DEPARTED! (>70mm)]" : ""),
+		fft_hud,
 		tm.marker_count, tm.lost ? "   LINE LOST" : "", robot_.iq(0), robot_.iq(1));
 	hud.status = buf;
 	hud.live_beta = live_beta_;
@@ -507,8 +517,15 @@ void LiveView::render(double t_sim, const std::string& phase) {
 			std::snprintf(best, sizeof best, "best %-8s %6.2f s", l.best_tag.c_str(), l.best_s);
 		else
 			std::snprintf(best, sizeof best, "%-22s", "best   -");
+		const char* names[] = {
+			"1 (Search)    ",
+			"2 (Straight)  ",
+			"3 (Shift)     ",
+			"4 (Out-In-Out)"
+		};
+		const char* dname = (d >= 0 && d < 4) ? names[d] : "d?";
 		char line[240];
-		std::snprintf(line, sizeof line, "drive %d   %s    %s", d + 1, best, l.last.empty() ? "" : l.last.c_str());
+		std::snprintf(line, sizeof line, "drive %s  %s    %s", dname, best, l.last.empty() ? "" : l.last.c_str());
 		return std::string(line);
 	};
 	if (courses_.size() == 1) {
@@ -531,9 +548,11 @@ void LiveView::render(double t_sim, const std::string& phase) {
 	if (interactive_)
 		hud.help = "Arrows: U/D/L/R buttons   Enter: K button   R: robot back to start\n" + hud.help;
 	if (session) {
-		hud.help = "1-5: run drive 1-5   N: new random course   X: stop   R: robot to start   S: save to drive.c\n"
-		           "Up/Down: pick   Left/Right: change   Enter: type   A: gain auto-tune (3-course)   E: endless (1+4/map + AI heal)\n" + hud.help;
+		hud.help = "1: Search  2: Straight  3: Shift  4: Out-In-Out  G: Apply Gains  H: Toggle AI Card  S: Save  X: Stop\n"
+		           "Up/Down: pick   Left/Right: change   Enter: type   A: gain auto-tune   E: AI heal\n" + hud.help;
 		hud.panel = session_panel();
+	} else {
+		hud.help += "\n[G] / [H]: Toggle AI Gain Recommendation Card";
 	}
 
 	int last = -1;
@@ -554,6 +573,7 @@ void LiveView::render(double t_sim, const std::string& phase) {
 	static const bool prof = std::getenv("LINESIM_PROFILE") != nullptr;
 	static double acc = 0;
 	static int frames = 0;
+
 	double t0 = wall();
 	v_.render(hud);
 	last_render_ = wall() - t0;
@@ -603,11 +623,37 @@ void LiveView::tick(double t_sim, bool fast_forward, const std::string& phase) {
 		live_beta_ = beta;
 		if (robot_.forward_speed() > 0.4)
 			max_beta_seen_ = std::max(max_beta_seen_, beta);
+		double lat = 0, s = 0;
+		const RobotParams& rp = robot_.params();
+		track_.nearest(robot_.body_to_ground(rp.sensor_x, 0.0), &lat, &s);
+		const double lat_mm = lat * 1000.0;
+		if (robot_.forward_speed() > 0.1) {
+			max_lat_seen_ = std::max(max_lat_seen_, std::abs(lat_mm));
+			sum_lat_sq_ += lat_mm * lat_mm;
+			lat_samples_++;
+
+			const double wz = robot_.yaw_rate() * 180.0 / 3.14159265358979323846;
+			recent_wz_.push_back(wz);
+			if (recent_wz_.size() > 60)
+				recent_wz_.erase(recent_wz_.begin());
+			fft_buf_wz_.push_back(wz);
+			if (fft_buf_wz_.size() > 512)
+				fft_buf_wz_.erase(fft_buf_wz_.begin());
+			if (recent_wz_.size() >= 30) {
+				double mean_wz = 0;
+				for (double w : recent_wz_) mean_wz += w;
+				mean_wz /= recent_wz_.size();
+				double sq = 0;
+				for (double w : recent_wz_) {
+					double d = w - mean_wz;
+					sq += d * d;
+				}
+				const double live_weave = std::sqrt(sq / recent_wz_.size());
+				max_weave_seen_ = std::max(max_weave_seen_, live_weave);
+			}
+		}
 		if (show_trail_ && robot_.forward_speed() > 0.02) {
-			double lat = 0, s = 0;
-			const RobotParams& rp = robot_.params();
-			track_.nearest(robot_.body_to_ground(rp.sensor_x, 0.0), &lat, &s);
-			v_.add_trail(p.x, p.y, robot_.forward_speed(), beta, lat * 1000.0);
+			v_.add_trail(p.x, p.y, robot_.forward_speed(), beta, lat_mm);
 		}
 	}
 	last_t_ = t_sim;
@@ -702,4 +748,280 @@ void LiveView::hold_until_closed() {
 		render(last_t_, "run finished - close the window or press Esc");
 		Sleep(15);
 	}
+}
+
+void LiveView::on_drive_finished(double max_lat_mm, double rms_lat_mm, double max_beta_deg, double weave_dps) {
+	max_lat_seen_ = max_lat_mm;
+	rms_lat_mm_ = rms_lat_mm;
+	max_beta_seen_ = max_beta_deg;
+	max_weave_seen_ = weave_dps;
+	lat_samples_ = 100;
+	sum_lat_sq_ = rms_lat_mm * rms_lat_mm * 100.0;
+	update_gain_recommendation();
+}
+
+void LiveView::apply_recommended_gains() {
+	if (!session)
+		return;
+	SessionState& s = *session;
+	if (!gain_rec_.valid) {
+		s.message = "No gain recommendation available yet (drive robot first)";
+		return;
+	}
+	char msg[160];
+	std::snprintf(msg, sizeof msg, "[APPLIED] KP: %.2f->%.2f, KD: %.0f->%.0f, LAT: %.1f->%.1f",
+		s.params.steer_kp, gain_rec_.rec_kp,
+		s.params.steer_kd, gain_rec_.rec_kd,
+		s.params.lat_acc_max, gain_rec_.rec_lat_acc);
+	s.params.steer_kp = gain_rec_.rec_kp;
+	s.params.steer_kd = gain_rec_.rec_kd;
+	s.params.lat_acc_max = gain_rec_.rec_lat_acc;
+	if (gain_rec_.rec_yaw_kp > 0.0f)
+		s.params.yaw_kp = gain_rec_.rec_yaw_kp;
+	fwb_set_drive_params(&s.params);
+	s.message = msg;
+	std::printf("[GAIN APPLIED] %s\n", msg);
+}
+
+void LiveView::update_live_fft() {
+	size_t N = 256;
+	if (fft_buf_wz_.size() < 128)
+		return;
+	if (fft_buf_wz_.size() < 256)
+		N = 128;
+
+	std::vector<std::complex<double>> a(N);
+	double mean_wz = 0.0;
+	const size_t start_idx = fft_buf_wz_.size() - N;
+	for (size_t i = 0; i < N; i++) {
+		mean_wz += fft_buf_wz_[start_idx + i];
+	}
+	mean_wz /= N;
+
+	for (size_t i = 0; i < N; i++) {
+		const double val = fft_buf_wz_[start_idx + i] - mean_wz;
+		const double win = 0.5 * (1.0 - std::cos(2.0 * 3.14159265358979323846 * i / (N - 1)));
+		a[i] = std::complex<double>(val * win, 0.0);
+	}
+
+	for (size_t i = 1, j = 0; i < N; i++) {
+		size_t bit = N >> 1;
+		for (; j & bit; bit >>= 1) j ^= bit;
+		j ^= bit;
+		if (i < j) std::swap(a[i], a[j]);
+	}
+	for (size_t len = 2; len <= N; len <<= 1) {
+		const double ang = 2.0 * 3.14159265358979323846 / len;
+		std::complex<double> wlen(std::cos(ang), -std::sin(ang));
+		for (size_t i = 0; i < N; i += len) {
+			std::complex<double> w(1.0, 0.0);
+			for (size_t j = 0; j < len / 2; j++) {
+				std::complex<double> u = a[i + j];
+				std::complex<double> v = a[i + j + len / 2] * w;
+				a[i + j] = u + v;
+				a[i + j + len / 2] = u - v;
+				w *= wlen;
+			}
+		}
+	}
+
+	const double fs = 100.0;  // 10 ms interval between samples in tick (trail_div_ >= 10)
+	double max_amp = 0.0;
+	double best_freq = 0.0;
+	double curve_power = 0.0, weave_power = 0.0, total_power = 1e-9;
+
+	for (size_t k = 1; k < N / 2; k++) {
+		const double freq = static_cast<double>(k) * fs / static_cast<double>(N);
+		const double amp = 2.0 * std::abs(a[k]) / static_cast<double>(N);
+		const double pwr = amp * amp;
+		total_power += pwr;
+
+		if (freq >= 0.2 && freq < 2.0) {
+			curve_power += pwr;
+		} else if (freq >= 2.0 && freq <= 8.0) {
+			weave_power += pwr;
+		}
+
+		if (freq >= 0.3 && freq <= 25.0 && amp > max_amp) {
+			max_amp = amp;
+			best_freq = freq;
+		}
+	}
+
+	live_fft_peak_freq_ = best_freq;
+	live_fft_peak_amp_ = max_amp;
+	live_fft_weave_pct_ = std::clamp(100.0 * weave_power / total_power, 0.0, 100.0);
+	live_fft_curve_pct_ = std::clamp(100.0 * curve_power / total_power, 0.0, 100.0);
+
+	static const float kTargetFreqs[24] = {
+		0.5f, 0.8f, 1.2f, 1.6f, 2.0f, 2.4f, 2.8f, 3.2f,
+		3.6f, 4.0f, 4.5f, 5.0f, 5.5f, 6.0f, 6.8f, 7.6f,
+		8.5f, 9.5f, 10.5f, 12.0f, 13.5f, 15.0f, 17.0f, 20.0f
+	};
+	live_fft_bars_.clear();
+	for (int i = 0; i < 24; i++) {
+		const float tf = kTargetFreqs[i];
+		size_t best_k = 1;
+		double min_df = 1e9;
+		for (size_t k = 1; k < N / 2; k++) {
+			const double f = static_cast<double>(k) * fs / static_cast<double>(N);
+			const double df = std::abs(f - tf);
+			if (df < min_df) {
+				min_df = df;
+				best_k = k;
+			}
+		}
+		const double b_amp = 2.0 * std::abs(a[best_k]) / static_cast<double>(N);
+		live_fft_bars_.push_back({tf, static_cast<float>(b_amp)});
+	}
+}
+
+void LiveView::update_gain_recommendation() {
+	update_live_fft();
+	FwDriveParams cur_params{};
+	if (session && session->ready) {
+		cur_params = session->params;
+	} else {
+		fwb_get_drive_params(&cur_params);
+	}
+
+	const float cur_kp = cur_params.steer_kp;
+	const float cur_kd = cur_params.steer_kd;
+	const float cur_lat = cur_params.lat_acc_max;
+	const float cur_yaw = cur_params.yaw_kp;
+
+	const double max_lat = max_lat_seen_;
+	const double rms_lat = rms_lat_mm_ > 0 ? rms_lat_mm_ : (lat_samples_ > 0 ? std::sqrt(sum_lat_sq_ / lat_samples_) : 0.0);
+	const double max_beta = max_beta_seen_;
+	const double weave = max_weave_seen_;
+
+	gain_rec_.current_kp = cur_kp;
+	gain_rec_.current_kd = cur_kd;
+	gain_rec_.current_lat_acc = cur_lat;
+	gain_rec_.current_yaw_kp = cur_yaw;
+	gain_rec_.max_lat_mm = max_lat;
+	gain_rec_.rms_lat_mm = rms_lat;
+	gain_rec_.max_beta_deg = max_beta;
+	gain_rec_.weave_dps = weave;
+
+	const float ideal_kd = std::max(120.0f, cur_kp * 22.0f);
+	float rec_kp = cur_kp;
+	float rec_kd = cur_kd;
+	float rec_lat = cur_lat;
+	float rec_yaw = cur_yaw;
+
+	const bool is_oversteer = (max_beta >= 22.0);
+	const bool is_understeer = (!is_oversteer && (max_lat >= 28.0 || rms_lat >= 12.0));
+	const bool is_weaving = (weave >= 45.0);
+
+	if (is_oversteer) {
+		const double slip_sev = std::clamp((max_beta - 20.0) / 30.0, 0.1, 1.5);
+		gain_rec_.status_label = max_beta >= 32.0 ? "SEVERE OVERSTEER / DRIFT" : "OVERSTEER / TAIL SLIP";
+		
+		if (cur_kd < ideal_kd * 0.80f) {
+			char b[128];
+			std::snprintf(b, sizeof b, "Severe underdamping: KD(%.0f) << Ideal(%.0f)", cur_kd, ideal_kd);
+			gain_rec_.diag_cause = b;
+			rec_kd = std::max(cur_kd + 60.0f, ideal_kd);
+		} else {
+			char b[128];
+			std::snprintf(b, sizeof b, "Rear slip at apex: peak beta %.1f deg >= 22.0 deg", max_beta);
+			gain_rec_.diag_cause = b;
+			rec_kd = std::max(cur_kd + 25.0f * (float)slip_sev, ideal_kd * 1.05f);
+		}
+
+		if (cur_kp > 24.0f) {
+			rec_kp = std::max(20.0f, cur_kp - 1.5f * (float)slip_sev);
+		} else if (cur_kp < 18.0f) {
+			rec_kp = 20.0f;
+		}
+
+		if (cur_lat > 10.5f) {
+			rec_lat = std::clamp(cur_lat - 0.75f * (1.0f + (float)slip_sev), 9.0f, 15.0f);
+			char b[128];
+			std::snprintf(b, sizeof b, "Corner acc (%.1f) exceeds grip; lower to %.1f m/s2", cur_lat, rec_lat);
+			gain_rec_.diag_action = b;
+		} else {
+			gain_rec_.diag_action = "Boost damping KD & enable yaw_kp to suppress spin";
+		}
+
+		if (cur_yaw < 0.15f) {
+			rec_yaw = 0.25f;
+		}
+	} else if (is_understeer) {
+		const double under_sev = std::clamp((max_lat - 25.0) / 35.0, 0.2, 1.5);
+		gain_rec_.status_label = max_lat >= 50.0 ? "CRITICAL UNDERSTEER / NEAR OUT" : "UNDERSTEER (TURN-IN LAG)";
+		char b1[128], b2[128];
+		std::snprintf(b1, sizeof b1, "Line deviation: Max %.1f mm, RMS %.1f mm (>25mm threshold)", max_lat, rms_lat);
+		gain_rec_.diag_cause = b1;
+
+		const float dkp = std::clamp(2.5f * (float)under_sev, 1.0f, 5.0f);
+		rec_kp = std::clamp(cur_kp + dkp, 18.0f, 32.0f);
+		rec_kd = std::max(cur_kd, rec_kp * 22.0f);
+		std::snprintf(b2, sizeof b2, "Increase KP for faster turn-in; align KD to %.0f", rec_kd);
+		gain_rec_.diag_action = b2;
+	} else if (is_weaving) {
+		gain_rec_.status_label = "STRAIGHT WEAVE / HUNTING OSCILLATION";
+		char b1[128], b2[128];
+		std::snprintf(b1, sizeof b1, "Yaw weave %.0f dps (>45 dps limit); phase lag oscillation", weave);
+		gain_rec_.diag_cause = b1;
+
+		if (cur_kd < ideal_kd * 0.85f) {
+			rec_kd = ideal_kd;
+			std::snprintf(b2, sizeof b2, "Raise KD to ideal damping (%.0f) to quench weave", ideal_kd);
+		} else {
+			rec_kp = std::max(16.0f, cur_kp - 1.5f);
+			rec_kd = rec_kp * 21.0f;
+			std::snprintf(b2, sizeof b2, "Lower KP slightly (%.1f) and re-balance KD (%.0f)", rec_kp, rec_kd);
+		}
+		gain_rec_.diag_action = b2;
+	} else {
+		gain_rec_.status_label = "OPTIMAL / STABLE LINE TRACKING";
+		char b1[128];
+		std::snprintf(b1, sizeof b1, "Safe tracking margins: Lat %.1f mm, Beta %.1f deg", max_lat, max_beta);
+		gain_rec_.diag_cause = b1;
+		gain_rec_.diag_action = "Gains balanced; system ready for speed increase (+0.1 m/s)";
+		rec_kd = ideal_kd;
+	}
+
+	gain_rec_.rec_kp = std::round(rec_kp * 100.0f) / 100.0f;
+	gain_rec_.rec_kd = std::round(rec_kd);
+	gain_rec_.rec_lat_acc = std::round(rec_lat * 10.0f) / 10.0f;
+	gain_rec_.rec_yaw_kp = std::round(rec_yaw * 100.0f) / 100.0f;
+	gain_rec_.valid = (lat_samples_ > 30 || max_lat > 0.0);
+}
+
+std::string LiveView::format_gain_recommendation_hud() const {
+	if (!gain_rec_.valid && live_fft_peak_freq_ == 0.0)
+		return "";
+
+	char card[512];
+	const auto& g = gain_rec_;
+	char fft_str[128] = "";
+	if (live_fft_peak_freq_ > 0.0) {
+		std::snprintf(fft_str, sizeof fft_str,
+			"FFT: %4.1f Hz (%4.0f dps) | Weave %2.0f%% | Curve %2.0f%%\n",
+			live_fft_peak_freq_, live_fft_peak_amp_,
+			live_fft_weave_pct_, live_fft_curve_pct_);
+	}
+
+	std::snprintf(card, sizeof card,
+		"[AI GAINS & FFT DIAGNOSIS] (%s)\n"
+		"Status : %s\n"
+		"%s"
+		"Errors : Lat %4.1f mm (RMS %4.1f) | Beta %4.1f deg | Weave %3.0f dps\n"
+		"Action : %s\n"
+		"Gains  : KP  %5.2f -> %5.2f (%+5.2f)   KD  %4.0f -> %4.0f [Ideal %3.0f]\n"
+		"         LAT %5.2f -> %5.2f (%+5.2f)   YAW %5.2f -> %5.2f (%+5.2f)",
+		session ? "Press G to Apply" : "Auto-Analysis",
+		g.valid ? g.status_label.c_str() : "MONITORING OSCILLATIONS",
+		fft_str,
+		g.max_lat_mm, g.rms_lat_mm, g.max_beta_deg, g.weave_dps,
+		g.valid ? g.diag_action.c_str() : "Tracking active",
+		g.current_kp, g.rec_kp, (g.rec_kp - g.current_kp),
+		g.current_kd, g.rec_kd, (g.rec_kp * 22.0f),
+		g.current_lat_acc, g.rec_lat_acc, (g.rec_lat_acc - g.current_lat_acc),
+		g.current_yaw_kp, g.rec_yaw_kp, (g.rec_yaw_kp - g.current_yaw_kp));
+
+	return std::string(card);
 }

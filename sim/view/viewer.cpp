@@ -751,8 +751,9 @@ void Viewer::render(const ViewerHud& hud) {
 	mjrRect view{0, 0, width_, height_};
 	mjr_render(view, &scn, &im_->con);
 
-	if (inset_mode_ != kInsetOff && cam_mode_ != kSensor && cam_mode_ != kTop) {
-		const int iw = std::max(220, width_ * 28 / 100), ih = iw * 3 / 4;
+	const bool minimap_visible = (inset_mode_ != kInsetOff && cam_mode_ != kSensor && cam_mode_ != kTop);
+	const int iw = std::max(220, width_ * 28 / 100), ih = iw * 3 / 4;
+	if (minimap_visible) {
 		mjrRect r{width_ - iw - 12, 12, iw, ih};
 		mjr_rectangle({r.left - 3, r.bottom - 3, r.width + 6, r.height + 6}, 0.25f, 0.25f, 0.3f, 1);
 		if (inset_mode_ == kInsetMap) {
@@ -779,6 +780,99 @@ void Viewer::render(const ViewerHud& hud) {
 	}
 
 	overlay(mjGRID_TOPLEFT, view.left, view.bottom, view.width, view.height, hud.status);
+
+	// Robot vibration frequency spectrum graph under status (laps drive 1-4)
+	if (hud.show_fft_graph && (!hud.fft_bars.empty() || hud.fft_peak_freq > 0.0f)) {
+		int status_lines = 1;
+		for (char c : hud.status) {
+			if (c == '\n') status_lines++;
+		}
+		const int lh = static_cast<int>(im_->con.charHeight * 1.17 + 0.5);
+		const int status_text_h = status_lines * lh;
+		const int card_w = 440;
+		const int card_h = 135;
+		const int card_x = 12;
+		const int card_top_y = height_ - status_text_h - 12;
+		const int card_y = card_top_y - card_h;
+
+		// Only render if vertical room is sufficient above bottom overlays
+		if (card_y > 80) {
+			// Outer border & dark background
+			mjr_rectangle({card_x - 2, card_y - 2, card_w + 4, card_h + 4}, 0.22f, 0.25f, 0.30f, 0.90f);
+			mjr_rectangle({card_x, card_y, card_w, card_h}, 0.05f, 0.06f, 0.08f, 0.88f);
+
+			// Title & header text
+			char title_buf[160];
+			if (hud.fft_peak_freq > 0.0f) {
+				std::snprintf(title_buf, sizeof title_buf,
+					"VIBRATION FFT SPECTRUM | Peak: %.1f Hz (%.0f dps) | Weave: %.0f%%",
+					hud.fft_peak_freq, hud.fft_peak_amp, hud.fft_weave_pct);
+			} else {
+				std::snprintf(title_buf, sizeof title_buf,
+					"VIBRATION FFT SPECTRUM | Buffering telemetry...");
+			}
+			mjrRect title_r{card_x + 8, card_y + card_h - 22, card_w - 16, 20};
+			mjr_overlay(mjFONT_NORMAL, mjGRID_TOPLEFT, title_r, title_buf, nullptr, &im_->con);
+
+			// Baseline axis line
+			const int base_y = card_y + 24;
+			mjr_rectangle({card_x + 8, base_y - 1, card_w - 16, 2}, 0.35f, 0.38f, 0.45f, 1.0f);
+
+			// Find max amplitude among bars for auto-scaling
+			float max_bar_amp = 1.0f;
+			for (const auto& bar : hud.fft_bars) {
+				max_bar_amp = std::max(max_bar_amp, bar.amp);
+			}
+			const int max_bar_h = card_h - 52; // available height for bars
+
+			// Draw 24 frequency bars
+			const int n_bars = static_cast<int>(hud.fft_bars.size());
+			if (n_bars > 0) {
+				const int bar_w = 14;
+				const int bar_gap = 3;
+				const int total_bars_w = n_bars * bar_w + (n_bars - 1) * bar_gap;
+				int bx = card_x + (card_w - total_bars_w) / 2;
+
+				for (int i = 0; i < n_bars; i++) {
+					const auto& b = hud.fft_bars[i];
+					const float norm_h = std::clamp(b.amp / max_bar_amp, 0.0f, 1.0f);
+					const int bh = std::max(2, static_cast<int>(norm_h * max_bar_h));
+					const bool is_peak = (hud.fft_peak_freq > 0.0f && std::abs(b.freq - hud.fft_peak_freq) < 0.25f);
+
+					// Color by frequency band:
+					// 0.2 - 2.0 Hz: Track curvature (Cyan/Blue)
+					// 2.0 - 8.0 Hz: Hunting / Weave oscillation (Amber to Bright Red)
+					// > 8.0 Hz: High frequency ripple (Purple)
+					float cr = 0.2f, cg = 0.65f, cb = 1.0f;
+					if (b.freq >= 2.0f && b.freq <= 8.0f) {
+						if (is_peak || b.amp > 30.0f) {
+							cr = 1.0f; cg = 0.25f; cb = 0.15f; // Red: active hunting peak
+						} else {
+							cr = 1.0f; cg = 0.70f; cb = 0.15f; // Amber: weave band
+						}
+					} else if (b.freq > 8.0f) {
+						cr = 0.65f; cg = 0.40f; cb = 0.85f; // Purple: ripple
+					}
+
+					// Bar rectangle
+					mjr_rectangle({bx, base_y + 1, bar_w, bh}, cr, cg, cb, is_peak ? 1.0f : 0.85f);
+
+					// Peak bar glowing cap
+					if (is_peak) {
+						mjr_rectangle({bx - 1, base_y + bh, bar_w + 2, 3}, 1.0f, 1.0f, 1.0f, 1.0f);
+					}
+
+					bx += bar_w + bar_gap;
+				}
+			}
+
+			// Frequency axis tick labels
+			mjrRect axis_r{card_x + 8, card_y + 2, card_w - 16, 18};
+			mjr_overlay(mjFONT_NORMAL, mjGRID_TOPLEFT, axis_r,
+				"0.5  1.2  2.0  3.2  4.5  6.0  8.0  10  12  15  18 Hz", nullptr, &im_->con);
+		}
+	}
+
 	std::string lcd;
 	if (!hud.lcd.empty()) {
 		lcd = hud.lcd_inverted ? "LCD (inverted)\n" : "LCD\n";
@@ -822,7 +916,11 @@ void Viewer::render(const ViewerHud& hud) {
 			d.miss_gap_mm, (d.miss_gap_mm > 0.0 ? "MISSED" : "HIT"), d.sensor_name.c_str(),
 			d.reason.c_str());
 
-		overlay(mjGRID_BOTTOMRIGHT, view.left, view.bottom, view.width, view.height, card);
+		const int right_overlay_bottom = minimap_visible ? (12 + ih + 10) : 12;
+		overlay(mjGRID_BOTTOMRIGHT, view.left, right_overlay_bottom, view.width, view.height - right_overlay_bottom, card);
+	} else if (!hud.gain_recommendation_hud.empty() && show_gain_rec_) {
+		const int right_overlay_bottom = minimap_visible ? (12 + ih + 10) : 12;
+		overlay(mjGRID_BOTTOMRIGHT, view.left, right_overlay_bottom, view.width, view.height - right_overlay_bottom, hud.gain_recommendation_hud);
 	}
 
 	// IR bar: 16 line sensors left->right as mounted (sensor 0 = left), then the two mark sensors

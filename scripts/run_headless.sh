@@ -4,7 +4,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$HERE"
 
 echo "=== Running Headless Simulation Scenario ==="
-./linesim run --track tracks/all_elements.json --set base_mps=2.04 "$@"
+./linesim run --track tracks/finals_1_5x_championship.json "$@"
 
 echo ""
 echo "=== Simulation Finished ==="

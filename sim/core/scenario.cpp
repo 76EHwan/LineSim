@@ -96,6 +96,53 @@ constexpr double kStressLag[2] = {1.4, 1.85};
 // mean wheel slip [%]: how much slower the body moved than the treads (odometry reads long by that)
 // rms line error [mm] at the sensor bar over the samples on arcs only: on the straights any gains
 // keep the line, the curves are where the steering shows
+struct StraightStability {
+	double wz_rms = 0.0;
+	double lat_rms = 0.0;
+	double max_wz = 0.0;
+	double max_lat = 0.0;
+	double score = 0.0;
+};
+
+// Measures vehicle yaw rate oscillation and lateral deviation strictly on straight pieces (!piece.arc)
+StraightStability calc_straight_stability(const std::vector<Sample>& smp, const Track& track) {
+	const std::vector<PathPiece>& ps = track.pieces();
+	if (ps.empty() || smp.empty()) return {};
+
+	double sq_wz = 0, sq_lat = 0;
+	double peak_wz = 0, peak_lat = 0;
+	int count = 0;
+
+	for (const Sample& sp : smp) {
+		if (sp.v <= 0.3f) continue;
+		auto it = std::upper_bound(ps.begin(), ps.end(), static_cast<double>(sp.s),
+			[](double v, const PathPiece& p) { return v < p.s0; });
+		if (it == ps.begin() || std::prev(it)->arc)
+			continue; // skip curves/arcs, only consider straights
+
+		const double wz = std::abs(static_cast<double>(sp.wz_dps));
+		const double lat = std::abs(static_cast<double>(sp.lat_mm));
+		sq_wz += wz * wz;
+		sq_lat += lat * lat;
+		if (wz > peak_wz) peak_wz = wz;
+		if (lat > peak_lat) peak_lat = lat;
+		count++;
+	}
+
+	if (count == 0) return {};
+
+	StraightStability res;
+	res.wz_rms = std::sqrt(sq_wz / count);
+	res.lat_rms = std::sqrt(sq_lat / count);
+	res.max_wz = peak_wz;
+	res.max_lat = peak_lat;
+	// Combined Straight Oscillation Penalty:
+	// wz_rms [dps] + 10.0 * lat_rms [mm]
+	// (Directly quantifies straight-line shaking / weaving)
+	res.score = res.wz_rms + 10.0 * res.lat_rms;
+	return res;
+}
+
 double curve_rms_lat(const std::vector<Sample>& smp, const Track& track) {
 	const std::vector<PathPiece>& ps = track.pieces();
 	double sq = 0;
@@ -186,7 +233,7 @@ constexpr int kTuneCourses = 3;
 struct TuneSet {
 	double kp = 16.64, kd = 0.101;     // steering PD, kd in seconds (202 * 0.0005s)
 	double lat = 14.77, sl = 0.10;     // lat_acc_max [m/s2], slalom_ratio
-	double target_shift = 0.40;         // target_shift_val
+	double target_shift = 0.0;          // target_shift_val
 	double target_curve_gain = 1.50;    // target_curve_gain
 	double brake_margin = 0.10;         // brake_margin_m [m]
 	double pos_atten = 0.0;             // pos_atten_gain (fixed 0.0)
@@ -236,7 +283,7 @@ public:
 		best_ = from;
 		best_.pos_atten = 0.0;
 		if (best_.lat <= 0 || best_.lat > 13.0) best_.lat = 11.5;
-		if (best_.target_shift < 0.20) best_.target_shift = 0.40;
+		if (best_.target_shift > 0.001 && best_.target_shift < 0.20) best_.target_shift = 0.40;
 		if (best_.target_curve_gain < 1.10) best_.target_curve_gain = 1.50;
 		if (best_.brake_margin <= 0) best_.brake_margin = 0.14;
 		if (best_.accel <= 0) best_.accel = 10.0;
@@ -273,7 +320,7 @@ public:
 		return true;
 	}
 
-	const Set& best() const { return best_; }	const std::string& last_status() const { return last_; }
+	const Set& best() const { return best_; }
 	const Set& next() const { return cells_[done_].set; }
 	bool round_complete() const { return done_ == cells_.size(); }
 	bool just_found_best() {
@@ -482,7 +529,7 @@ public:
 			s.kd = std::max(0.0, best_.kd + norm(rng) * 0.012);
 			s.lat = std::clamp(best_.lat + norm(rng) * 0.4, 7.5, 12.8);
 			s.sl = std::clamp(best_.sl + norm(rng) * 0.015, 0.01, 0.25);
-			s.target_shift = std::clamp(best_.target_shift + norm(rng) * 0.03, 0.20, 0.65);
+			s.target_shift = (best_.target_shift <= 0.001) ? 0.0 : std::clamp(best_.target_shift + norm(rng) * 0.03, 0.0, 0.65);
 			s.target_curve_gain = std::clamp(best_.target_curve_gain + norm(rng) * 0.06, 1.15, 2.10);
 			s.brake_margin = std::clamp(best_.brake_margin + norm(rng) * 0.015, 0.05, 0.28);
 			s.yaw_kp = std::clamp(best_.yaw_kp + norm(rng) * 0.03, 0.10, 0.70);
@@ -498,7 +545,7 @@ public:
 			s.kd = std::max(0.0, best_.kd + (-0.005 + unif(rng) * 0.030));
 			s.lat = std::clamp(best_.lat + (-1.0 + unif(rng) * 1.5), 7.5, 12.8);
 			s.brake_margin = std::clamp(best_.brake_margin + unif(rng) * 0.06, 0.08, 0.28);
-			s.target_shift = std::clamp(best_.target_shift + sym(rng) * 0.06, 0.25, 0.60);
+			s.target_shift = (best_.target_shift <= 0.001) ? 0.0 : std::clamp(best_.target_shift + sym(rng) * 0.06, 0.0, 0.60);
 			s.target_curve_gain = std::clamp(best_.target_curve_gain + sym(rng) * 0.12, 1.20, 2.00);
 			s.sl = std::clamp(best_.sl + sym(rng) * 0.03, 0.02, 0.20);
 			s.yaw_kp = std::clamp(best_.yaw_kp + sym(rng) * 0.06, 0.15, 0.60);
@@ -514,7 +561,7 @@ public:
 			s.kd = std::max(0.0, best_.kd + sym(rng) * 0.035);
 			s.lat = std::clamp(best_.lat + sym(rng) * 1.5, 7.5, 12.8);
 			s.sl = std::clamp(best_.sl + sym(rng) * 0.05, 0.02, 0.22);
-			s.target_shift = std::clamp(best_.target_shift + sym(rng) * 0.10, 0.22, 0.62);
+			s.target_shift = (best_.target_shift <= 0.001) ? 0.0 : std::clamp(best_.target_shift + sym(rng) * 0.10, 0.0, 0.62);
 			s.target_curve_gain = std::clamp(best_.target_curve_gain + sym(rng) * 0.20, 1.15, 2.05);
 			s.brake_margin = std::clamp(best_.brake_margin + sym(rng) * 0.05, 0.06, 0.26);
 			s.yaw_kp = std::clamp(best_.yaw_kp + sym(rng) * 0.10, 0.12, 0.65);
@@ -643,6 +690,9 @@ public:
 		double max_beta_deg = 0.0;   // Peak slip angle (deg)
 		double max_lat_mm = 0.0;     // Peak lateral track deviation (mm)
 		double weave_dps = 0.0;      // Yaw rate oscillation energy (deg/s)
+		double str_wz_rms = 0.0;     // Straight yaw rate oscillation RMS (dps)
+		double str_lat_rms = 0.0;    // Straight lateral error RMS (mm)
+		double str_osc = 0.0;        // Straight oscillation penalty
 		double fail_v = 0.0;         // Robot speed right before failure / peak error (m/s)
 	};
 
@@ -741,18 +791,25 @@ public:
 	size_t current_map_no() const { return static_cast<size_t>(total_maps_ + 1); }
 	bool has_verified() const { return verified_v_ > 0.0; }
 	double verified_v() const { return verified_v_; }
-	const Set& best() const { return best_; }	const std::string& last_status() const { return last_; }
+	const Set& best() const { return best_; }
+	const std::string& last_status() const { return last_; }
 	const PassedWindow& prev_passed() const { return prev_passed_; }
 	bool has_prev_passed() const { return prev_passed_.valid; }
 	const ABScore& ab_score() const { return ab_score_; }
 
-	void record_ab_comparison(bool pass_curr, double lap_curr, bool pass_prev, double lap_prev) {
+	void record_ab_comparison(bool pass_curr, double lap_curr, double str_osc_curr,
+	                          bool pass_prev, double lap_prev, double str_osc_prev) {
 		if (!prev_passed_.valid) return;
 		ab_score_.total_compared++;
 		if (pass_curr && pass_prev) {
-			if (lap_curr < lap_prev - 0.005) {
+			// Effective competitive time including straight stability penalty:
+			// 10 units of str_osc (e.g. 10 dps or 1mm lat) corresponds to ~0.02s lap time
+			constexpr double w_str = 0.002;
+			const double eff_curr = lap_curr + w_str * str_osc_curr;
+			const double eff_prev = lap_prev + w_str * str_osc_prev;
+			if (eff_curr < eff_prev - 0.008) {
 				ab_score_.speed_up_wins++;
-			} else if (lap_prev < lap_curr - 0.005) {
+			} else if (eff_prev < eff_curr - 0.008) {
 				ab_score_.prev_passed_wins++;
 			} else {
 				ab_score_.ties++;
@@ -834,8 +891,10 @@ public:
 		// - under_sev: line loss with low beta (< 26 deg) or large lateral excursion -> insufficient turn-in!
 		const double under_sev = fm.was_oversteer ? 0.0
 			: std::clamp((26.0 - fm.max_beta_deg) / 16.0 + (fm.max_lat_mm - 75.0) / 75.0, 0.25, 1.5);
-		// - osc_sev: high yaw-rate oscillation energy (weave_dps > 165 deg/s)
-		const double osc_sev = std::clamp((fm.weave_dps - 165.0) / 135.0, 0.0, 1.5);
+		// - osc_sev: high yaw-rate oscillation energy (overall weave > 165 deg/s or straight weave > 65 dps)
+		const double all_osc = std::clamp((fm.weave_dps - 165.0) / 135.0, 0.0, 1.5);
+		const double str_osc = std::clamp((fm.str_wz_rms - 65.0) / 75.0, 0.0, 1.5);
+		const double osc_sev = std::max(all_osc, str_osc);
 		// - speed_sev: how much faster than base_mps the robot was moving right before failing (4th drive braking entry)
 		const double speed_sev = fm.d1_failed ? 0.0 : std::clamp((fm.fail_v - v_) / 0.75, 0.0, 1.5);
 
@@ -859,7 +918,7 @@ public:
 					const double dkd = 0.007 * slip_sev + 0.010 * osc_sev;
 					s.kd = std::max(0.0, base.kd + dkd);
 				}
-				s.yaw_kp = std::clamp(base.yaw_kp + 0.03 * slip_sev, 0.15, 0.60);
+				s.yaw_kp = (base.yaw_kp <= 0.001) ? 0.0 : std::clamp(base.yaw_kp + 0.03 * slip_sev, 0.0, 0.60);
 			} else {
 				// Understeer / line loss: increase kp proportionally to understeer severity!
 				const double dkp = 0.65 * under_sev - 0.25 * osc_sev;
@@ -917,7 +976,7 @@ public:
 			s.kd = std::max(0.0, 0.70 * base.kd + 0.30 * ideal_kd(s.kp) + sym(rng) * 0.006);
 			if (!fm.d1_failed) {
 				const double shift_dir = fm.was_oversteer ? (-0.02 * slip_sev) : (+0.035 * under_sev);
-				s.target_shift = std::clamp(base.target_shift + shift_dir + sym(rng) * 0.025, 0.26, 0.56);
+				s.target_shift = (base.target_shift <= 0.001) ? 0.0 : std::clamp(base.target_shift + shift_dir + sym(rng) * 0.025, 0.0, 0.56);
 				s.target_curve_gain = std::clamp(base.target_curve_gain + 0.05 * (under_sev - 0.5 * slip_sev) + sym(rng) * 0.05, 1.25, 2.00);
 				s.brake_margin = std::clamp(base.brake_margin + 0.015 * speed_sev, 0.06, 0.23);
 			}
@@ -934,7 +993,7 @@ public:
 			if (!fm.d1_failed) {
 				s.lat = std::clamp(base.lat + norm(rng) * (0.35 * scale), 11.0, max_lat_);
 				s.brake_margin = std::clamp(base.brake_margin + norm(rng) * (0.015 * scale), 0.06, 0.24);
-				s.target_shift = std::clamp(base.target_shift + norm(rng) * 0.025, 0.26, 0.56);
+				s.target_shift = (base.target_shift <= 0.001) ? 0.0 : std::clamp(base.target_shift + norm(rng) * 0.025, 0.0, 0.56);
 				s.target_curve_gain = std::clamp(base.target_curve_gain + norm(rng) * 0.05, 1.25, 2.00);
 			}
 			s.pos_atten = 0.0;
@@ -951,11 +1010,11 @@ public:
 		best_.kd = std::max(0.0, a * healed.kd + (1.0 - a) * best_.kd);
 		best_.lat = std::clamp(a * healed.lat + (1.0 - a) * best_.lat, 10.0, max_lat_);
 		best_.brake_margin = std::clamp(a * healed.brake_margin + (1.0 - a) * best_.brake_margin, 0.06, 0.24);
-		best_.target_shift = std::clamp(a * healed.target_shift + (1.0 - a) * best_.target_shift, 0.24, 0.58);
+		best_.target_shift = (best_.target_shift <= 0.001) ? 0.0 : std::clamp(a * healed.target_shift + (1.0 - a) * best_.target_shift, 0.0, 0.58);
 		best_.target_curve_gain = std::clamp(a * healed.target_curve_gain + (1.0 - a) * best_.target_curve_gain, 1.20, 2.05);
 		best_.sl = std::clamp(a * healed.sl + (1.0 - a) * best_.sl, 0.02, 0.22);
-		best_.yaw_kp = std::clamp(a * healed.yaw_kp + (1.0 - a) * best_.yaw_kp, 0.15, 0.65);
-		best_.yaw_ki = std::clamp(a * healed.yaw_ki + (1.0 - a) * best_.yaw_ki, 0.0, 0.20);
+		best_.yaw_kp = (best_.yaw_kp <= 0.001) ? 0.0 : std::clamp(a * healed.yaw_kp + (1.0 - a) * best_.yaw_kp, 0.0, 0.65);
+		best_.yaw_ki = (best_.yaw_kp <= 0.001) ? 0.0 : std::clamp(a * healed.yaw_ki + (1.0 - a) * best_.yaw_ki, 0.0, 0.20);
 		best_.pos_atten = 0.0;
 		total_healed_++;
 		just_healed_ = true;
@@ -1040,9 +1099,14 @@ public:
 		const size_t cur_win_cnt = window_.size();
 		const double sr_pct = pass_rate_pct();
 		const double fr_pct = fail_rate_pct();
+		const double win_err_pct = (win_max > 0)
+			? (100.0 * static_cast<double>(fails_in_window()) / static_cast<double>(win_max))
+			: 0.0;
+		const int max_allowed_fails = static_cast<int>(std::floor((max_fail_pct_ / 100.0) * static_cast<double>(win_max) + 1e-6));
+		const int target_streak = std::max(1, (win_max * 2 + 2) / 3);
 		const double need_sr_pct = min_pass_rate_pct();
 		const double ref_v = std::max(start_v_, verified_v_);
-		const bool recovering = (v_ + 1e-4 < ref_v);
+		const bool recovering = !prev_passed_.valid && (v_ + 1e-4 < ref_v);
 		const int step_need = recovering ? recover_win_ : win_max;
 
 		if (!pass) {
@@ -1061,310 +1125,190 @@ public:
 
 		char log_buf[200];
 
-		// ====================================================================
-		// ★ [A/B TOURNAMENT DECISION: 2/3 OF WINDOW COUNT]:
-		// 두 후보(Speed-Up vs Prev-Passed)를 비교할 때,
-		// 어느 한쪽이 window 개수(win_max)의 2/3 이상 승리하면 즉시 다음 스텝으로 전환!
-		// ====================================================================
-		if (prev_passed_.valid) {
-			const int target_ab_wins = (win_max * 2 + 2) / 3;
-			const bool cand_won_2_3 = (ab_score_.speed_up_wins >= target_ab_wins);
-			const bool prev_won_2_3 = (ab_score_.prev_passed_wins >= target_ab_wins);
+		// Helper to advance to the next step (Speed-Up or Lat-Up) once current step is verified
+		auto advance_to_next_step = [&](bool by_streak, int p_cnt, int h_cnt, int f_cnt) {
+			const double old_v = v_;
+			const double old_lat = best_.lat;
+			verified_v_ = std::max(verified_v_, old_v);
 
-			if (cand_won_2_3 || prev_won_2_3) {
-				if (cand_won_2_3) {
-					if (probe_mode_ == ProbeMode::LAT) {
-						// Lat-Up 버전이 window의 2/3 이상 승리! -> lat_acc_max 상향 갱신 및 검증 완료!
-						const double old_lat = prev_passed_.set.lat;
-						const double new_lat = best_.lat;
+			prev_passed_.valid = true;
+			prev_passed_.speed = old_v;
+			prev_passed_.set = best_;
+			reset_ab_score();
 
-						prev_passed_.valid = true;
-						prev_passed_.speed = v_;
-						prev_passed_.set = best_;
+			window_.clear();
+			streak_ = 0;
+			consecutive_fails_ = 0;
 
-						window_.clear();
-						streak_ = 0;
-						consecutive_fails_ = 0;
-
-						speed_changed_ = true;
-						just_verified_ = true;
-						just_ab_lat_verified_ = true;
-						last_ = fmt("Map #%d: A/B MATCH DONE! Lat-Up (lat=%.2f) WON >=2/3 OF WINDOW (%dW >= %d/%d) at %.2f m/s -> lat_acc_max UP %.2f -> %.2f m/s2!",
-							total_maps_, new_lat, ab_score_.speed_up_wins, target_ab_wins, win_max, v_, old_lat, new_lat);
-						std::snprintf(log_buf, sizeof log_buf, "#%03d [A/B LAT-UP WON >=2/3: %dW/%d] lat: %.2f->%.2f m/s2",
-							total_maps_, ab_score_.speed_up_wins, win_max, old_lat, new_lat);
-						reset_ab_score();
-						log_.push_back(log_buf);
-						if (log_.size() > 6)
-							log_.erase(log_.begin());
-
-						// "lat_acc_max 올려가면서 비교": 한계에 도달할 때까지 추가 상향 탐색
-						if (best_.lat + d_lat_ <= max_lat_ + 1e-4) {
-							best_.lat = std::clamp(best_.lat + d_lat_, 10.0, max_lat_);
-							probe_mode_ = ProbeMode::LAT;
-						} else {
-							// Lat 상한 도달 -> 다시 속도 탐색 모드로 전환
-							probe_mode_ = ProbeMode::SPEED;
-							v_ = v_ + dv_up();
-						}
-						return;
-					} else {
-						// Speed-Up 버전이 window의 2/3 이상 승리! -> 속도 올린 버전 통과 검증 및 다음 속도 스텝으로 상승!
-						const double old_v = v_;
-						verified_v_ = std::max(verified_v_, old_v);
-
-						prev_passed_.valid = true;
-						prev_passed_.speed = old_v;
-						prev_passed_.set = best_;
-
-						window_.clear();
-						streak_ = 0;
-						consecutive_fails_ = 0;
-
-						reset_dv_on_success();
-
-						v_ = old_v + dv_up();
-						speed_changed_ = true;
-						just_verified_ = true;
-						just_ab_verified_ = true;
-						last_ = fmt("Map #%d: A/B MATCH DONE! Speed-Up (%.2fm/s) WON >=2/3 OF WINDOW (%dW >= %d/%d) -> speed UP %.2f -> %.2f m/s (step: %.3f m/s)!",
-							total_maps_, old_v, ab_score_.speed_up_wins, target_ab_wins, win_max, old_v, v_, dv_);
-						std::snprintf(log_buf, sizeof log_buf, "#%03d [A/B SPEED UP WON >=2/3: %dW/%d] %.2f->%.2fm/s (dv:%.3f)",
-							total_maps_, ab_score_.speed_up_wins, win_max, old_v, v_, dv_);
-						reset_ab_score();
-						log_.push_back(log_buf);
-						if (log_.size() > 6)
-							log_.erase(log_.begin());
-						return;
-					}
-				} else if (prev_won_2_3) {
-					const int p_wins = ab_score_.prev_passed_wins;
-					const int s_wins = ab_score_.speed_up_wins;
-					const int ties = ab_score_.ties;
-
-					if (probe_mode_ == ProbeMode::LAT) {
-						// Lat-Up 버전 기각! 이전 안전한 lat_acc_max로 복원하고 다시 속도 탐색으로 전환
-						const double rejected_lat = best_.lat;
-						v_ = prev_passed_.speed;
-						best_ = prev_passed_.set;
-						prev_passed_ = PassedWindow{};
-						reset_ab_score();
-
-						window_.clear();
-						streak_ = 0;
-						consecutive_fails_ = 0;
-
-						speed_changed_ = true;
-						just_ab_selected_ = true;
-
-						// Lat 탐색 한계 도달 -> 다시 속도 탐색(감소된 dv)으로 복귀
-						probe_mode_ = ProbeMode::SPEED;
-
-						last_ = fmt("Map #%d: A/B MATCH DONE! Prev Passed (lat=%.2f) WON >=2/3 OF WINDOW (%dW >= %d/%d) -> REVERTED! lat %.2f rejected, next: speed probe (dv: %.3f)",
-							total_maps_, best_.lat, p_wins, target_ab_wins, win_max, rejected_lat, dv_);
-						std::snprintf(log_buf, sizeof log_buf, "#%03d [A/B LAT REJECTED %dW/%d] lat: %.2f->%.2f | next speed dv:%.3f",
-							total_maps_, p_wins, win_max, rejected_lat, best_.lat, dv_);
-						log_.push_back(log_buf);
-						if (log_.size() > 6)
-							log_.erase(log_.begin());
-						return;
-					} else {
-						// 속도 올린 버전 기각하고 이전 버전 복원!
-						const double rejected_v = v_;
-						v_ = prev_passed_.speed;
-						best_ = prev_passed_.set;
-						prev_passed_ = PassedWindow{}; // 동일 설정 중복 비교 방지 위해 리셋
-						reset_ab_score();
-
-						window_.clear();
-						streak_ = 0;
-						consecutive_fails_ = 0;
-
-						const double prev_dv = decay_dv();
-
-						speed_changed_ = true;
-						just_ab_selected_ = true;
-
-						// "갱신 안되면 lat_acc_max 올려가면서 비교하는것도 넣어줘"
-						if (best_.lat + d_lat_ <= max_lat_ + 1e-4) {
-							probe_mode_ = ProbeMode::LAT;
-							last_ = fmt("Map #%d: A/B MATCH DONE! Prev Passed (%.2fm/s) WON >=2/3 OF WINDOW (%dW >= %d/%d) -> REVERTED! dv: %.3f->%.3f, NEXT: Lat-Up (+%.2f m/s2)",
-								total_maps_, v_, p_wins, target_ab_wins, win_max, prev_dv, dv_, d_lat_);
-							std::snprintf(log_buf, sizeof log_buf, "#%03d [A/B SPEED REVERT %dW/%d] %.2fm/s | dv:%.3f->%.3f -> LAT PROBE",
-								total_maps_, p_wins, win_max, v_, prev_dv, dv_);
-						} else {
-							probe_mode_ = ProbeMode::SPEED;
-							last_ = fmt("Map #%d: A/B MATCH DONE! Prev Passed (%.2fm/s, lat=%.1f) WON >=2/3 OF WINDOW (%dW >= %d/%d) -> REVERTED! dv: %.3f -> %.3f m/s",
-								total_maps_, v_, best_.lat, p_wins, target_ab_wins, win_max, prev_dv, dv_);
-							std::snprintf(log_buf, sizeof log_buf, "#%03d [A/B PREV WON >=2/3: %dW/%d] %.2f->%.2fm/s | dv: %.3f->%.3f",
-								total_maps_, p_wins, win_max, rejected_v, v_, prev_dv, dv_);
-						}
-						log_.push_back(log_buf);
-						if (log_.size() > 6)
-							log_.erase(log_.begin());
-						return;
-					}
-				}
+			speed_changed_ = true;
+			just_verified_ = true;
+			if (by_streak) {
+				just_streak_verified_ = true;
 			}
-		}
 
-		// ====================================================================
-		// ★ [SINGLE/ROLLED-BACK VERIFICATION: 2/3 CONSECUTIVE PASS CHECK]:
-		// 이전 검증 버전으로 롤백되었거나 단독 검증 중인 상태에서,
-		// window 개수(win_max)의 2/3 이상 연속 통과 시 즉시 다음 스텝(속도/lat 상승)으로 전환!
-		// ====================================================================
-		if (!prev_passed_.valid && pass && !was_healed) {
-			const int target_streak = (win_max * 2 + 2) / 3;
-			if (streak_ >= target_streak) {
-				const double old_v = v_;
-				const double old_lat = best_.lat;
-				verified_v_ = std::max(verified_v_, old_v);
-
-				prev_passed_.valid = true;
-				prev_passed_.speed = old_v;
-				prev_passed_.set = best_;
-				reset_ab_score();
-
-				window_.clear();
-				streak_ = 0;
-				consecutive_fails_ = 0;
-
-				if (probe_mode_ == ProbeMode::LAT && best_.lat + d_lat_ <= max_lat_ + 1e-4) {
+			if (probe_mode_ == ProbeMode::LAT) {
+				just_ab_lat_verified_ = true;
+				if (best_.lat + d_lat_ <= max_lat_ + 1e-4) {
 					best_.lat = std::clamp(best_.lat + d_lat_, 10.0, max_lat_);
-					speed_changed_ = true;
-					just_verified_ = true;
-					just_streak_verified_ = true;
-					last_ = fmt("Map #%d: STREAK PASS! Consecutive %d/%d at %.2f m/s -> Launching LAT-UP probe (lat: %.2f -> %.2f m/s2)!",
-						total_maps_, target_streak, win_max, old_v, old_lat, best_.lat);
-					std::snprintf(log_buf, sizeof log_buf, "#%03d [STREAK >=2/3: %d/%d] LAT-UP: %.2f->%.2f m/s2",
-						total_maps_, target_streak, win_max, old_lat, best_.lat);
+					probe_mode_ = ProbeMode::LAT;
+					if (by_streak) {
+						last_ = fmt("Map #%d: STREAK PASS! Consecutive %d/%d (>=2/3 of Window) at %.2f m/s (lat=%.2f) -> NEXT STEP: lat_acc_max UP %.2f -> %.2f m/s2!",
+							total_maps_, target_streak, win_max, old_v, old_lat, old_lat, best_.lat);
+						std::snprintf(log_buf, sizeof log_buf, "#%03d [STREAK >=2/3: %d/%d] lat: %.2f->%.2f m/s2",
+							total_maps_, target_streak, win_max, old_lat, best_.lat);
+					} else {
+						last_ = fmt("Map #%d: %d/%d Window PASS (Err %.1f%% <= %.0f%% [%dP/%dH/%dF]) at %.2f m/s (lat=%.2f) -> NEXT STEP: lat_acc_max UP %.2f -> %.2f m/s2!",
+							total_maps_, win_max, win_max, fr_pct, max_fail_pct_, p_cnt, h_cnt, f_cnt, old_v, old_lat, old_lat, best_.lat);
+						std::snprintf(log_buf, sizeof log_buf, "#%03d [WIN %d: Err %.0f%%<=%.0f%%] lat: %.2f->%.2f m/s2",
+							total_maps_, win_max, fr_pct, max_fail_pct_, old_lat, best_.lat);
+					}
 				} else {
 					probe_mode_ = ProbeMode::SPEED;
+					reset_dv_on_success();
 					v_ = old_v + dv_up();
-					speed_changed_ = true;
-					just_verified_ = true;
-					just_streak_verified_ = true;
-					last_ = fmt("Map #%d: STREAK PASS! Consecutive %d/%d (>=2/3 of Window) at %.2f m/s -> speed UP %.2f -> %.2f m/s (step: %.3f m/s)!",
+					if (by_streak) {
+						last_ = fmt("Map #%d: STREAK PASS! Consecutive %d/%d (>=2/3) at lat=%.2f (max) -> NEXT STEP: speed UP %.2f -> %.2f m/s (step: %.3f)!",
+							total_maps_, target_streak, win_max, old_lat, old_v, v_, dv_);
+						std::snprintf(log_buf, sizeof log_buf, "#%03d [STREAK >=2/3: %d/%d] %.2f->%.2fm/s (dv:%.3f)",
+							total_maps_, target_streak, win_max, old_v, v_, dv_);
+					} else {
+						last_ = fmt("Map #%d: %d/%d Window PASS (Err %.1f%% <= %.0f%% [%dP/%dH/%dF]) at lat=%.2f -> NEXT STEP: speed UP %.2f -> %.2f m/s (step: %.3f)!",
+							total_maps_, win_max, win_max, fr_pct, max_fail_pct_, p_cnt, h_cnt, f_cnt, old_lat, old_v, v_, dv_);
+						std::snprintf(log_buf, sizeof log_buf, "#%03d [WIN %d: Err %.0f%%<=%.0f%%] %.2f->%.2fm/s (dv:%.3f)",
+							total_maps_, win_max, fr_pct, max_fail_pct_, old_v, v_, dv_);
+					}
+				}
+			} else {
+				probe_mode_ = ProbeMode::SPEED;
+				reset_dv_on_success();
+				v_ = old_v + dv_up();
+				if (by_streak) {
+					last_ = fmt("Map #%d: STREAK PASS! Consecutive %d/%d (>=2/3 of Window) at %.2f m/s -> NEXT STEP: speed UP %.2f -> %.2f m/s (step: %.3f m/s)!",
 						total_maps_, target_streak, win_max, old_v, old_v, v_, dv_);
 					std::snprintf(log_buf, sizeof log_buf, "#%03d [STREAK >=2/3: %d/%d] %.2f->%.2fm/s (dv:%.3f)",
 						total_maps_, target_streak, win_max, old_v, v_, dv_);
+				} else {
+					last_ = fmt("Map #%d: %d/%d Window PASS (Err %.1f%% <= %.0f%% [%dP/%dH/%dF]) -> NEXT STEP: speed UP %.2f -> %.2f m/s (step: %.3f m/s)!",
+						total_maps_, win_max, win_max, fr_pct, max_fail_pct_, p_cnt, h_cnt, f_cnt, old_v, v_, dv_);
+					std::snprintf(log_buf, sizeof log_buf, "#%03d [WIN %d: Err %.0f%%<=%.0f%%] %.2f->%.2fm/s (dv:%.3f)",
+						total_maps_, win_max, fr_pct, max_fail_pct_, old_v, v_, dv_);
 				}
-				log_.push_back(log_buf);
-				if (log_.size() > 6)
-					log_.erase(log_.begin());
-				return;
 			}
+			log_.push_back(log_buf);
+			if (log_.size() > 6)
+				log_.erase(log_.begin());
+		};
+
+		// Helper to handle window failure when error rate exceeds max_fail_pct_
+		auto handle_window_failure = [&](int f_cnt) {
+			const double old_v = v_;
+			const double old_lat = best_.lat;
+			window_.clear();
+			streak_ = 0;
+			consecutive_fails_ = 0;
+			reset_ab_score();
+
+			if (prev_passed_.valid) {
+				if (probe_mode_ == ProbeMode::LAT) {
+					// Lat-Up probe exceeded allowed error rate -> revert lat to prev_passed_ and try Speed-Up with decayed dv_
+					v_ = prev_passed_.speed;
+					best_ = prev_passed_.set;
+					probe_mode_ = ProbeMode::SPEED;
+					v_ = v_ + dv_up();
+					speed_changed_ = true;
+					just_ab_selected_ = true;
+					last_ = fmt("Map #%d: Window Err %.1f%% > %.0f%% (%dF/%d) -> lat %.2f reverted to %.2f, NEXT STEP: speed probe %.2f m/s (dv: %.3f)",
+						total_maps_, win_err_pct, max_fail_pct_, f_cnt, win_max, old_lat, best_.lat, v_, dv_);
+					std::snprintf(log_buf, sizeof log_buf, "#%03d [ERR %.0f%%>%.0f%% LAT REVERT] lat:%.2f->%.2f | v:%.2f",
+						total_maps_, win_err_pct, max_fail_pct_, old_lat, best_.lat, v_);
+				} else {
+					// Speed-Up probe exceeded allowed error rate -> revert to prev_passed_, decay dv_, and probe LAT (or smaller dv_)
+					v_ = prev_passed_.speed;
+					best_ = prev_passed_.set;
+					const double prev_dv = decay_dv();
+					speed_changed_ = true;
+					just_ab_selected_ = true;
+					if (best_.lat + d_lat_ <= max_lat_ + 1e-4) {
+						const double base_lat = best_.lat;
+						best_.lat = std::clamp(best_.lat + d_lat_, 10.0, max_lat_);
+						probe_mode_ = ProbeMode::LAT;
+						last_ = fmt("Map #%d: Window Err %.1f%% > %.0f%% (%dF/%d) at %.2f m/s -> reverted to %.2f m/s (dv: %.3f->%.3f), NEXT STEP: Lat-Up %.2f -> %.2f m/s2",
+							total_maps_, win_err_pct, max_fail_pct_, f_cnt, win_max, old_v, v_, prev_dv, dv_, base_lat, best_.lat);
+						std::snprintf(log_buf, sizeof log_buf, "#%03d [ERR %.0f%%>%.0f%% REVERT] %.2fm/s dv:%.3f->%.3f | LAT %.2f->%.2f",
+							total_maps_, win_err_pct, max_fail_pct_, v_, prev_dv, dv_, base_lat, best_.lat);
+					} else {
+						const double base_v = v_;
+						probe_mode_ = ProbeMode::SPEED;
+						v_ = base_v + dv_up();
+						last_ = fmt("Map #%d: Window Err %.1f%% > %.0f%% (%dF/%d) at %.2f m/s -> reverted to %.2f m/s (dv: %.3f->%.3f), NEXT STEP: Speed-Up %.2f m/s",
+							total_maps_, win_err_pct, max_fail_pct_, f_cnt, win_max, old_v, base_v, prev_dv, dv_, v_);
+						std::snprintf(log_buf, sizeof log_buf, "#%03d [ERR %.0f%%>%.0f%% REVERT] %.2fm/s dv:%.3f->%.3f | v:%.2f",
+							total_maps_, win_err_pct, max_fail_pct_, base_v, prev_dv, dv_, v_);
+					}
+				}
+			} else {
+				const double prev_dv = decay_dv();
+				if (old_v > min_v_ + 1e-4) {
+					v_ = std::max(min_v_, old_v - dv_down());
+					speed_changed_ = true;
+					last_ = fmt("Map #%d: Window Err %.1f%% > %.0f%% (%dF/%d) at %.2f m/s -> speed DOWN %.2f -> %.2f m/s (dv: %.3f -> %.3f)",
+						total_maps_, win_err_pct, max_fail_pct_, f_cnt, win_max, old_v, old_v, v_, prev_dv, dv_);
+					std::snprintf(log_buf, sizeof log_buf, "#%03d [ERR %.0f%%>%.0f%%:SLOW] %.2f->%.2fm/s | dv: %.3f->%.3f | %s",
+						total_maps_, win_err_pct, max_fail_pct_, old_v, v_, prev_dv, dv_, detail.c_str());
+				} else {
+					last_ = fmt("Map #%d: Window Err %.1f%% > %.0f%% (%dF/%d) at floor %.2f m/s -> window reset (dv: %.3f -> %.3f)",
+						total_maps_, win_err_pct, max_fail_pct_, f_cnt, win_max, min_v_, prev_dv, dv_);
+					std::snprintf(log_buf, sizeof log_buf, "#%03d [FLOOR:%.2f RESET] Err:%.0f%% (dv: %.3f->%.3f) | %s",
+						total_maps_, min_v_, win_err_pct, prev_dv, dv_, detail.c_str());
+				}
+			}
+			log_.push_back(log_buf);
+			if (log_.size() > 6)
+				log_.erase(log_.begin());
+		};
+
+		// ====================================================================
+		// ★ [CONDITION 1: 2/3 OF WINDOW CONSECUTIVE PASSES]:
+		// window 개수(win_max)의 2/3 이상 연속으로 통과하면 즉시 다음 스텝으로 전환!
+		// ====================================================================
+		if (!recovering && pass && !was_healed && streak_ >= target_streak) {
+			advance_to_next_step(true, passes_in_window(), heals_in_window(), fails_in_window());
+			return;
 		}
 
-		// 1. Check if full 50-map window (win_max) has been reached -> evaluate & ALWAYS reset window!
+		// ====================================================================
+		// ★ [CONDITION 2: FULL WINDOW COUNT REACHED -> CHECK ERROR RATE <= THRESHOLD]:
+		// window 개수(win_max) 도달 시, error rate(fr_pct)가 기준(max_fail_pct_) 이하이면 다음 스텝으로 전환!
+		// ====================================================================
 		if (!recovering && static_cast<int>(cur_win_cnt) >= win_max) {
 			const int p_cnt = passes_in_window();
 			const int h_cnt = heals_in_window();
 			const int f_cnt = fails_in_window();
-			window_.clear();   // Always reset 50-map window back to 0/50!
-			streak_ = 0;
-			consecutive_fails_ = 0;
-
-			// A/B 매치 진행 중 윈도우(win_max)가 끝났으나 둘 다 2/3에 도달하지 못한 경우:
-			if (prev_passed_.valid) {
-				const int target_ab_wins = (win_max * 2 + 2) / 3;
-				const int p_wins = ab_score_.prev_passed_wins;
-				const int s_wins = ab_score_.speed_up_wins;
-				reset_ab_score();
-				if (probe_mode_ == ProbeMode::LAT) {
-					probe_mode_ = ProbeMode::SPEED;
-					last_ = fmt("Map #%d: %d/%d Window Done (A/B Lat-Up inconclusive: %dW vs Prev %dW < %d) -> lat kept %.2f, next: speed probe (dv: %.3f)",
-						total_maps_, win_max, win_max, s_wins, p_wins, target_ab_wins, best_.lat, dv_);
-					std::snprintf(log_buf, sizeof log_buf, "#%03d [A/B LAT INCONCLUSIVE %dW vs %dW] lat:%.2f",
-						total_maps_, s_wins, p_wins, best_.lat);
-				} else {
-					const double prev_dv = decay_dv();
-					if (best_.lat + d_lat_ <= max_lat_ + 1e-4) {
-						probe_mode_ = ProbeMode::LAT;
-					}
-					last_ = fmt("Map #%d: %d/%d Window Done (A/B inconclusive: Speed-Up %dW vs Prev %dW < %d needed) -> speed kept at %.2f m/s, dv: %.3f -> %.3f m/s, next: %s!",
-						total_maps_, win_max, win_max, s_wins, p_wins, target_ab_wins, v_, prev_dv, dv_,
-						(probe_mode_ == ProbeMode::LAT ? "LAT PROBE" : "SPEED PROBE"));
-					std::snprintf(log_buf, sizeof log_buf, "#%03d [A/B INCONCLUSIVE %dW vs %dW (<%d/%d)] %.2fm/s | dv: %.3f->%.3f",
-						total_maps_, s_wins, p_wins, target_ab_wins, win_max, v_, prev_dv, dv_);
-				}
-			} else if (sr_pct >= need_sr_pct) {
-				// Success Rate >= target (e.g. >= 80% pure Pass)
-				// 그리고 속도 올린 버전이 이전 통과 버전보다 빠르거나 대등함!
-				const double old_v = v_;
-				verified_v_ = std::max(verified_v_, old_v);
-
-				// 이번에 윈도우를 통과한 값(속도 + 게인)을 다음 윈도우의 비교 기준으로 저장!
-				prev_passed_.valid = true;
-				prev_passed_.speed = old_v;
-				prev_passed_.set = best_;
-				reset_ab_score();
-
-				reset_dv_on_success();
-
-				v_ = old_v + dv_up();
-				speed_changed_ = true;
-				just_verified_ = true;
-				last_ = fmt("Map #%d: %d/%d Window Done (Pass %.1f%% >= %.0f%% [%dP/%dH/%dF]) -> speed UP %.2f -> %.2f m/s (step: %.3f m/s)!",
-					total_maps_, win_max, win_max, sr_pct, need_sr_pct, p_cnt, h_cnt, f_cnt, old_v, v_, dv_);
-				std::snprintf(log_buf, sizeof log_buf, "#%03d [WIN %d: P%.0f%%>=%.0f%%] %.2f->%.2fm/s (dv:%.3f)",
-					total_maps_, win_max, sr_pct, need_sr_pct, old_v, v_, dv_);
-			} else if (fr_pct > max_fail_pct_) {
-				// Fail Rate > allowed -> step DOWN speed!
-				const double old_v = v_;
-				reset_ab_score();
-				const double prev_dv = decay_dv();
-				if (old_v > min_v_ + 1e-4) {
-					v_ = std::max(min_v_, old_v - dv_down());
-					speed_changed_ = true;
-					last_ = fmt("Map #%d: %d/%d Window Done (Pass %.1f%% < %.0f%%, Fail %.1f%%) -> speed DOWN %.2f -> %.2f m/s (dv: %.3f -> %.3f)",
-						total_maps_, win_max, win_max, sr_pct, need_sr_pct, fr_pct, old_v, v_, prev_dv, dv_);
-					std::snprintf(log_buf, sizeof log_buf, "#%03d [WIN %d: F%.0f%%>%.0f%%] %.2f->%.2fm/s | dv: %.3f->%.3f",
-					total_maps_, win_max, fr_pct, max_fail_pct_, old_v, v_, prev_dv, dv_);
-				} else {
-					last_ = fmt("Map #%d: %d/%d Window Done at floor %.2f m/s (Pass %.1f%%) -> window reset (dv: %.3f -> %.3f)",
-						total_maps_, win_max, win_max, min_v_, sr_pct, prev_dv, dv_);
-					std::snprintf(log_buf, sizeof log_buf, "#%03d [WIN %d RESET] %.2fm/s (P:%.0f%%) | dv: %.3f->%.3f",
-						total_maps_, win_max, min_v_, sr_pct, prev_dv, dv_);
-				}
+			if (fr_pct <= max_fail_pct_ + 1e-6) {
+				advance_to_next_step(false, p_cnt, h_cnt, f_cnt);
 			} else {
-				// Pass Rate < target due to Healed maps, but Fail Rate <= max_fail_pct_ -> keep speed & reset window!
-				reset_ab_score();
-				last_ = fmt("Map #%d: %d/%d Window Done (Pass %.1f%% < %.0f%% [%dP/%dH/%dF]) -> speed kept at %.2f m/s (dv: %.3f), window reset!",
-					total_maps_, win_max, win_max, sr_pct, need_sr_pct, p_cnt, h_cnt, f_cnt, v_, dv_);
-				std::snprintf(log_buf, sizeof log_buf, "#%03d [WIN %d KEEP] %.2fm/s (P:%.0f%% H:%d F:%d) dv:%.3f",
-					total_maps_, win_max, v_, sr_pct, h_cnt, f_cnt, dv_);
+				handle_window_failure(f_cnt);
 			}
-		} else if (!pass) {
-			// 2. Mid-window Failure check: lower speed early only if >= 10 maps & Fail Rate > max_fail_pct_, or 2 consecutive fails
-			const bool should_lower = (static_cast<int>(cur_win_cnt) >= 10 && fr_pct > max_fail_pct_) || consecutive_fails_ >= 2;
-			if (should_lower) {
-				const double old_v = v_;
-				window_.clear();   // Reset window for the new lower speed tier!
-				streak_ = 0;
-				consecutive_fails_ = 0;
-				const double prev_dv = decay_dv();
-				if (old_v > min_v_ + 1e-4) {
-					v_ = std::max(min_v_, old_v - dv_down());
-					speed_changed_ = true;
-					last_ = fmt("Map #%d FAIL (Pass %.0f%% | Fail %.1f%%) at %.2f m/s -> speed down to %.2f m/s (dv: %.3f -> %.3f)",
-						total_maps_, sr_pct, fr_pct, old_v, v_, prev_dv, dv_);
-					std::snprintf(log_buf, sizeof log_buf, "#%03d [FAIL:SLOW] %.2f->%.2fm/s | dv: %.3f->%.3f | %s",
-						total_maps_, old_v, v_, prev_dv, dv_, detail.c_str());
-				} else {
-					last_ = fmt("Map #%d FAIL at min speed floor %.2f m/s (Speed locked at floor, dv: %.3f -> %.3f)",
-						total_maps_, min_v_, prev_dv, dv_);
-					std::snprintf(log_buf, sizeof log_buf, "#%03d [FLOOR:%.2f] P:%.0f%% F:%.0f%% (dv: %.3f->%.3f) | %s",
-						total_maps_, min_v_, sr_pct, fr_pct, prev_dv, dv_, detail.c_str());
-				}
-			} else {
-				last_ = fmt("Map #%d FAIL (Window %zu/%d: Pass %.0f%% | Fail %.1f%% <= %.0f%%, speed kept) at %.2f m/s",
-					total_maps_, cur_win_cnt, step_need, sr_pct, fr_pct, max_fail_pct_, v_);
-				std::snprintf(log_buf, sizeof log_buf, "#%03d [FAIL:KEEP %zu/%d] %.2fm/s (P:%.0f%% F:%.0f%%) | %s",
-					total_maps_, cur_win_cnt, step_need, v_, sr_pct, fr_pct, detail.c_str());
+			return;
+		}
+
+		// ====================================================================
+		// 3. Mid-window Error Rate Exceeded Check:
+		// 현재 윈도우 내 실패 횟수가 전체 윈도우(win_max) 기준 허용 에러율(max_fail_pct_)을 초과하면 즉시 롤백/감속!
+		// (허용 에러율 이내라면 속도를 유지하며 2/3 연속 통과 또는 윈도우 완주를 계속 시도)
+		// ====================================================================
+		if (!pass) {
+			const int f_cnt = fails_in_window();
+			if (win_err_pct > max_fail_pct_ + 1e-6) {
+				handle_window_failure(f_cnt);
+				return;
 			}
+			last_ = fmt("Map #%d FAIL (Window %zu/%d: Err %.1f%% <= %.0f%% [%d/%dF], Streak 0/%d, speed kept) at %.2f m/s",
+				total_maps_, cur_win_cnt, step_need, win_err_pct, max_fail_pct_, f_cnt, max_allowed_fails, target_streak, v_);
+			std::snprintf(log_buf, sizeof log_buf, "#%03d [FAIL:KEEP %zu/%d] %.2fm/s (Err:%.1f%%<=%.0f%% %d/%dF) | %s",
+				total_maps_, cur_win_cnt, step_need, v_, win_err_pct, max_fail_pct_, f_cnt, max_allowed_fails, detail.c_str());
 		} else if (recovering && !was_healed && streak_ >= step_need) {
-			// 3. Fast recovery back toward start_v_ / verified_v_ after recover_win_ pure passes!
+			// 4. Fast recovery back toward start_v_ / verified_v_ after recover_win_ pure passes!
 			const double old_v = v_;
 			v_ = std::min(ref_v, old_v + dv_up());
 			streak_ = 0;
@@ -1376,15 +1320,15 @@ public:
 			std::snprintf(log_buf, sizeof log_buf, "#%03d [RECOVER %d/%d] %.2f->%.2fm/s | 3:%.2fs",
 				total_maps_, step_need, step_need, old_v, v_, lap4_s);
 		} else if (was_healed) {
-			last_ = fmt("Map #%d HEALED [%s] (Window %zu/%d: Pass %.0f%%, Heal %d, Fail %.0f%%) at %.2f m/s | kp=%.3f kd=%.0f lat=%.1f | 3rd: %.2fs",
-				total_maps_, heal_role.c_str(), cur_win_cnt, step_need, sr_pct, heals_in_window(), fr_pct, v_, best_.kp, best_.kd / 0.0005, best_.lat, lap4_s);
-			std::snprintf(log_buf, sizeof log_buf, "#%03d [HEALED:%s %zu/%d] %.2fm/s (P:%.0f%% F:%.0f%%) | 3:%.2fs",
-				total_maps_, heal_role.c_str(), cur_win_cnt, step_need, v_, sr_pct, fr_pct, lap4_s);
+			last_ = fmt("Map #%d HEALED [%s] (Window %zu/%d: Err %.1f%% <= %.0f%% [%d/%dF] | Heal %d | Streak 0/%d) at %.2f m/s | kp=%.3f kd=%.0f lat=%.1f | 3rd: %.2fs",
+				total_maps_, heal_role.c_str(), cur_win_cnt, step_need, win_err_pct, max_fail_pct_, fails_in_window(), max_allowed_fails, heals_in_window(), target_streak, v_, best_.kp, best_.kd / 0.0005, best_.lat, lap4_s);
+			std::snprintf(log_buf, sizeof log_buf, "#%03d [HEALED:%s %zu/%d] %.2fm/s (Err:%.1f%%<=%.0f%%) | 3:%.2fs",
+				total_maps_, heal_role.c_str(), cur_win_cnt, step_need, v_, win_err_pct, max_fail_pct_, lap4_s);
 		} else {
-			last_ = fmt("Map #%d PASS (Window %zu/%d: Pass %.0f%% [>=%.0f%%], Fail %.0f%%) at %.2f m/s | 3rd: %.2fs (%+.2fm)",
-				total_maps_, cur_win_cnt, step_need, sr_pct, need_sr_pct, fr_pct, v_, lap4_s, dist_diff);
-			std::snprintf(log_buf, sizeof log_buf, "#%03d [PASS %zu/%d (P:%.0f%%)] %.2fm/s | 3:%.2fs",
-				total_maps_, cur_win_cnt, step_need, sr_pct, v_, lap4_s);
+			last_ = fmt("Map #%d PASS (Window %zu/%d: Err %.1f%% <= %.0f%% [%d/%dF] | Streak %d/%d [2/3]) at %.2f m/s (lat=%.2f) | 3rd: %.2fs (%+.2fm)",
+				total_maps_, cur_win_cnt, step_need, win_err_pct, max_fail_pct_, fails_in_window(), max_allowed_fails, streak_, target_streak, v_, best_.lat, lap4_s, dist_diff);
+			std::snprintf(log_buf, sizeof log_buf, "#%03d [PASS %zu/%d (S:%d/%d Err:%.1f%%)] %.2fm/s | 3:%.2fs",
+				total_maps_, cur_win_cnt, step_need, streak_, target_streak, win_err_pct, v_, lap4_s);
 		}
 		log_.push_back(log_buf);
 		if (log_.size() > 6)
@@ -1394,43 +1338,48 @@ public:
 	std::vector<std::string> status(double dt, const std::string& cur_map_info, const std::string& heal_note = "") const {
 		const int step_need = current_step_up_target();
 		const double ref_v = std::max(start_v_, verified_v_);
-		const bool recovering = (v_ + 1e-4 < ref_v);
+		const bool recovering = !prev_passed_.valid && (v_ + 1e-4 < ref_v);
 		const double need_sr_pct = min_pass_rate_pct();
+		const int target_streak = std::max(1, (target_win_ * 2 + 2) / 3);
+		const double win_err_pct = (target_win_ > 0)
+			? (100.0 * static_cast<double>(fails_in_window()) / static_cast<double>(target_win_))
+			: 0.0;
+		const int max_allowed_fails = static_cast<int>(std::floor((max_fail_pct_ / 100.0) * static_cast<double>(target_win_) + 1e-6));
 		std::vector<std::string> v;
 		v.push_back(fmt("ENDLESS %d-MAP + AI HEAL [E]  Map #%d  (E: stop | A: 3-course)", target_win_, total_maps_ + 1));
 		v.push_back("Mode: Drive 1 + Drive 3/Map + AI Gain Auto-Heal on Fail");
 		v.push_back("Map:  " + cur_map_info);
 		if (verified_v_ > 0.0)
-			v.push_back(fmt("Base Speed: %.2f m/s  (Start: %.2f | Floor: %.2f | lat: %.2f m/s2 | Step dv: %.3f | Verified >=%.0f%% Pass: %.2f m/s)",
-				v_, start_v_, min_v_, best_.lat, dv_, need_sr_pct, verified_v_));
+			v.push_back(fmt("Base Speed: %.2f m/s  (Start: %.2f | Floor: %.2f | lat: %.2f m/s2 | Step dv: %.3f | Verified: %.2f m/s)",
+				v_, start_v_, min_v_, best_.lat, dv_, verified_v_));
 		else
-			v.push_back(fmt("Base Speed: %.2f m/s  (Start: %.2f | Floor: %.2f | lat: %.2f m/s2 | Step dv: %.3f | Up: >=%.0f%% Pass in %d maps)",
-				v_, start_v_, min_v_, best_.lat, dv_, need_sr_pct, target_win_));
+			v.push_back(fmt("Base Speed: %.2f m/s  (Start: %.2f | Floor: %.2f | lat: %.2f m/s2 | Step dv: %.3f | Up: Err <=%.0f%% or %d/%d Streak)",
+				v_, start_v_, min_v_, best_.lat, dv_, max_fail_pct_, target_streak, target_win_));
 		v.push_back(fmt("Progress at %.2f m/s: %zu / %d maps (%s)",
-			v_, window_.size(), step_need, recovering ? fmt("Fast-Recovery streak %d/%d", streak_, step_need).c_str() : fmt("Need >=%.0f%% pure Pass", need_sr_pct).c_str()));
-		v.push_back(fmt("Window (%zu/%d): Pass %.1f%% (%dP, >=%.0f%%) | Heal %.1f%% (%dH) | Fail %.1f%% (%dF, <=%.0f%%) | Total: %dP/%dH/%dF",
+			v_, window_.size(), step_need,
+			recovering ? fmt("Fast-Recovery streak %d/%d", streak_, step_need).c_str()
+			           : fmt("Next Step: Window Err %.1f%% <= %.0f%% (%d/%dF) OR Streak %d/%d [2/3]", win_err_pct, max_fail_pct_, fails_in_window(), max_allowed_fails, streak_, target_streak).c_str()));
+		v.push_back(fmt("Window (%zu/%d): Pass %.1f%% (%dP, >=%.0f%%) | Heal %.1f%% (%dH) | Err %.1f%% (%d/%dF, <=%.0f%%) | Total: %dP/%dH/%dF",
 			window_.size(), target_win_, pass_rate_pct(), passes_in_window(), need_sr_pct,
-			heal_rate_pct(), heals_in_window(), fail_rate_pct(), fails_in_window(), max_fail_pct_,
+			heal_rate_pct(), heals_in_window(), win_err_pct, fails_in_window(), max_allowed_fails, max_fail_pct_,
 			total_passes_, total_healed_, total_fails_));
 		v.push_back(fmt("Active Gains: kp=%.3f kd=%.0f lat=%.2f brk=%.2fm shf=%.2f crv=%.2f",
 			best_.kp, best_.kd / dt, best_.lat, best_.brake_margin, best_.target_shift, best_.target_curve_gain));
 		if (prev_passed_.valid) {
-			const int target_ab_wins = (target_win_ * 2 + 2) / 3;
 			if (probe_mode_ == ProbeMode::LAT) {
-				v.push_back(fmt("A/B Match [LAT-UP]: Lat-Up (%.2fm/s, lat=%.2f) [%dW] vs Prev-Passed (%.2fm/s, lat=%.2f) [%dW] (Ties: %d | Need >=%d/%d wins [2/3])",
-					v_, best_.lat, ab_score_.speed_up_wins, prev_passed_.speed, prev_passed_.set.lat, ab_score_.prev_passed_wins, ab_score_.ties, target_ab_wins, target_win_));
+				v.push_back(fmt("Step Probe [LAT-UP]: Lat-Up (%.2fm/s, lat=%.2f) vs Prev (%.2fm/s, lat=%.2f) [%dW:%dW] | Streak %d/%d [2/3] | Err %.1f%%<=%.0f%%",
+					v_, best_.lat, prev_passed_.speed, prev_passed_.set.lat, ab_score_.speed_up_wins, ab_score_.prev_passed_wins, streak_, target_streak, win_err_pct, max_fail_pct_));
 			} else {
-				v.push_back(fmt("A/B Match [SPEED-UP]: Speed-Up (%.2fm/s, lat=%.2f) [%dW] vs Prev-Passed (%.2fm/s, lat=%.2f) [%dW] (Ties: %d | Need >=%d/%d wins [2/3] | dv: %.3f)",
-					v_, best_.lat, ab_score_.speed_up_wins, prev_passed_.speed, prev_passed_.set.lat, ab_score_.prev_passed_wins, ab_score_.ties, target_ab_wins, target_win_, dv_));
+				v.push_back(fmt("Step Probe [SPEED-UP]: Speed-Up (%.2fm/s, lat=%.2f) vs Prev (%.2fm/s, lat=%.2f) [%dW:%dW] | Streak %d/%d [2/3] | Err %.1f%%<=%.0f%%",
+					v_, best_.lat, prev_passed_.speed, prev_passed_.set.lat, ab_score_.speed_up_wins, ab_score_.prev_passed_wins, streak_, target_streak, win_err_pct, max_fail_pct_));
 			}
 		} else {
-			const int target_streak = (target_win_ * 2 + 2) / 3;
 			if (probe_mode_ == ProbeMode::LAT) {
-				v.push_back(fmt("Progress at %.2f m/s (lat=%.2f): streak %d/%d (Need >=%d consecutive passes -> Next: Lat-Up +%.2f m/s2)",
-					v_, best_.lat, streak_, step_need, target_streak, d_lat_));
+				v.push_back(fmt("Step Probe [LAT-UP] at %.2f m/s (lat=%.2f): Streak %d/%d [2/3] OR Window Err %.1f%% <= %.0f%% (Next: Lat-Up +%.2f m/s2)",
+					v_, best_.lat, streak_, target_streak, win_err_pct, max_fail_pct_, d_lat_));
 			} else {
-				v.push_back(fmt("Progress at %.2f m/s (lat=%.2f): streak %d/%d (Need >=%d consecutive passes [2/3 of Window] | dv: %.3f)",
-					v_, best_.lat, streak_, step_need, target_streak, dv_));
+				v.push_back(fmt("Step Probe [SPEED-UP] at %.2f m/s (lat=%.2f): Streak %d/%d [2/3] OR Window Err %.1f%% <= %.0f%% (Step dv: %.3f)",
+					v_, best_.lat, streak_, target_streak, win_err_pct, max_fail_pct_, dv_));
 			}
 		}
 		if (!heal_note.empty())
@@ -1828,8 +1777,11 @@ static bool read_worker_result(WorkerProcess* wp) {
 	wp->result = TrialResult{};
 	if (line.rfind("PASS", 0) == 0) {
 		wp->result.pass = true;
-		std::sscanf(line.c_str(), "PASS lap4=%lf pace=%lf dist_diff=%lf max_beta=%lf weave=%lf",
-			&wp->result.lap4_s, &wp->result.pace, &wp->result.dist_diff, &wp->result.max_beta_deg, &wp->result.weave_dps);
+		std::sscanf(line.c_str(), "PASS lap4=%lf pace=%lf dist_diff=%lf max_beta=%lf weave=%lf str_wz=%lf str_lat=%lf",
+			&wp->result.lap4_s, &wp->result.pace, &wp->result.dist_diff,
+			&wp->result.max_beta_deg, &wp->result.weave_dps,
+			&wp->result.str_wz_rms, &wp->result.str_lat_rms);
+		wp->result.str_osc = wp->result.str_wz_rms + 10.0 * wp->result.str_lat_rms;
 		size_t dpos = line.find("detail=");
 		if (dpos != std::string::npos) {
 			wp->result.detail = line.substr(dpos + 7);
@@ -1839,10 +1791,12 @@ static bool read_worker_result(WorkerProcess* wp) {
 	} else if (line.rfind("FAIL", 0) == 0) {
 		wp->result.pass = false;
 		int d1 = 0, ov = 0;
-		std::sscanf(line.c_str(), "FAIL d1=%d ov=%d beta=%lf lat=%lf weave=%lf fail_v=%lf",
-			&d1, &ov, &wp->result.max_beta_deg, &wp->result.max_lat_mm, &wp->result.weave_dps, &wp->result.fail_v);
+		std::sscanf(line.c_str(), "FAIL d1=%d ov=%d beta=%lf lat=%lf weave=%lf str_wz=%lf str_lat=%lf fail_v=%lf",
+			&d1, &ov, &wp->result.max_beta_deg, &wp->result.max_lat_mm, &wp->result.weave_dps,
+			&wp->result.str_wz_rms, &wp->result.str_lat_rms, &wp->result.fail_v);
 		wp->result.d1_failed = (d1 != 0);
 		wp->result.was_oversteer = (ov != 0);
+		wp->result.str_osc = wp->result.str_wz_rms + 10.0 * wp->result.str_lat_rms;
 		size_t dpos = line.find("detail=");
 		if (dpos != std::string::npos) {
 			wp->result.detail = line.substr(dpos + 7);
@@ -2906,6 +2860,8 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 		auto marker_diags = build_marker_visual_diags(*cur, track, rp);
 		if (viewer)
 			viewer->set_marker_diags(marker_diags);
+		if (live)
+			live->on_drive_finished(cur->max_lat_mm, cur->rms_lat_mm, cur->max_beta_deg, weave_dps(cur->samples));
 
 		char buf[256];
 		if (!miss_diag.valid) {
@@ -2981,7 +2937,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 
 			if (miss_diag.valid) {
 				if (miss_diag.is_skipped) {
-					std::printf("%s[%8.3f s]%s %s[MARKER DIAGNOSIS]%s Missed #%zu '%c' at s=%.2fm (UNREAD / 못보고 지나침):\n",
+					std::printf("%s[%8.3f s]%s %s[MARKER DIAGNOSIS]%s Missed #%zu '%c' at s=%.2fm (UNREAD / MISSED):\n",
 						col::Dim, sim->t(), col::Rst,
 						col::Yel, col::Rst,
 						miss_diag.k, miss_diag.want, miss_diag.marker_s);
@@ -3830,6 +3786,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 					auto run_map_trial = [&](double trial_speed, const TuneSet& cand_set, const std::string& tag_prefix,
 						bool* out_pass, EndlessTuner::FailMetrics* out_fm,
 						double* out_pace, double* out_lap4_s, double* out_dist_diff, std::string* out_detail,
+						double* out_str_osc = nullptr, double* out_str_wz = nullptr, double* out_str_lat = nullptr,
 						bool only_drive3 = false) -> bool {
 						apply_tuneset(trial_speed, cand_set);
 						auto drive = [&](int n) {
@@ -3858,6 +3815,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 								lap_label.clear();
 								return false;   // user interrupted
 							}
+							const StraightStability str1 = calc_straight_stability(d1.samples, track);
 							if (lost_line(d1) || d1.marker_check != "OK" || oversteered(d1)) {
 								const bool ov = oversteered(d1);
 								*out_pass = false;
@@ -3867,6 +3825,9 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 									out_fm->max_beta_deg = d1.max_beta_deg;
 									out_fm->max_lat_mm = d1.max_lat_mm;
 									out_fm->weave_dps = weave_dps(d1.samples);
+									out_fm->str_wz_rms = str1.wz_rms;
+									out_fm->str_lat_rms = str1.lat_rms;
+									out_fm->str_osc = str1.score;
 									out_fm->fail_v = extract_fail_v(d1);
 								}
 								const char* reason = ov ? "oversteer"
@@ -3885,6 +3846,10 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 								lap_label.clear();
 								return false;   // user interrupted
 							}
+							const StraightStability str4 = calc_straight_stability(d4.samples, track);
+							if (out_str_osc) *out_str_osc = str4.score;
+							if (out_str_wz) *out_str_wz = str4.wz_rms;
+							if (out_str_lat) *out_str_lat = str4.lat_rms;
 							if (lost_line(d4) || d4.marker_check != "OK" || d4.lap_time_fw <= 0 || oversteered(d4)) {
 								const bool ov = oversteered(d4) || check_oversteer(d4, 22.0);
 								*out_pass = false;
@@ -3894,6 +3859,9 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 									out_fm->max_beta_deg = d4.max_beta_deg;
 									out_fm->max_lat_mm = d4.max_lat_mm;
 									out_fm->weave_dps = weave_dps(d4.samples);
+									out_fm->str_wz_rms = str4.wz_rms;
+									out_fm->str_lat_rms = str4.lat_rms;
+									out_fm->str_osc = str4.score;
 									out_fm->fail_v = extract_fail_v(d4);
 								}
 								const char* reason = ov ? "oversteer"
@@ -3904,14 +3872,18 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 								*out_lap4_s = d4.lap_time_fw;
 								*out_pace = (track.length() > 0) ? (10.0 * d4.lap_time_fw / track.length()) : 0.0;
 								*out_dist_diff = d4.dist_m - track.length();
-								std::snprintf(buf, sizeof buf, "%s3rd: %.2fs (%.2fs/10m, %+.2fm)",
-									only_drive3 ? "" : "1st: OK | ", *out_lap4_s, *out_pace, *out_dist_diff);
+								std::snprintf(buf, sizeof buf, "%s3rd: %.2fs (%.2fs/10m, %+.2fm | str: %.0fdps/%.1fmm)",
+									only_drive3 ? "" : "1st: OK | ", *out_lap4_s, *out_pace, *out_dist_diff,
+									str4.wz_rms, str4.lat_rms);
 								if (out_fm) {
 									out_fm->d1_failed = false;
 									out_fm->was_oversteer = check_oversteer(d4, 18.0);
 									out_fm->max_beta_deg = d4.max_beta_deg;
 									out_fm->max_lat_mm = d4.max_lat_mm;
 									out_fm->weave_dps = weave_dps(d4.samples);
+									out_fm->str_wz_rms = str4.wz_rms;
+									out_fm->str_lat_rms = str4.lat_rms;
+									out_fm->str_osc = str4.score;
 									out_fm->fail_v = extract_fail_v(d4);
 								}
 							}
@@ -3938,8 +3910,10 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 					EndlessTuner::FailMetrics fm;
 					double pace = 0.0, lap4_s = 0.0, dist_diff = 0.0;
 					std::string detail;
+					double curr_str_osc = 0.0, curr_str_wz = 0.0, curr_str_lat = 0.0;
 					if (!run_map_trial(endless_tuner.speed(), endless_tuner.best(), "#" + std::to_string(map_no),
-						&pass, &fm, &pace, &lap4_s, &dist_diff, &detail)) {
+						&pass, &fm, &pace, &lap4_s, &dist_diff, &detail,
+						&curr_str_osc, &curr_str_wz, &curr_str_lat)) {
 						continue;
 					}
 
@@ -3990,25 +3964,37 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 								read_worker_result(&wp[h]);
 							}
 
+							size_t best_h = (size_t)-1;
+							double best_cost = 1e9;
 							for (size_t h = 0; h < spawned; h++) {
 								if (wp[h].result.pass) {
-									pass = true;
-									was_healed = true;
-									healed_role = wp[h].role;
-									pace = wp[h].result.pace;
-									lap4_s = wp[h].result.lap4_s;
-									dist_diff = wp[h].result.dist_diff;
-									detail = wp[h].result.detail;
-									endless_tuner.adopt_healed_gains(heal_cands[h].set);
-									apply_tuneset(endless_tuner.speed(), endless_tuner.best());
-									if (!opt.quiet) {
-										std::printf("%s[%8.3f s]%s %s%sAI AUTO-HEAL (%zu/%zu) [%s] PASSED!%s lap=%.2fs (%.2fs/10m, %+.2fm)\n",
-											col::Dim, sim->t(), col::Rst,
-											col::Bold, col::Grn, h + 1, heal_cands.size(), healed_role.c_str(), col::Rst,
-											lap4_s, pace, dist_diff);
-										std::fflush(stdout);
+									// Candidate cost: lap time + straight stability penalty (less shaking = lower cost)
+									const double cost = wp[h].result.lap4_s + 0.003 * wp[h].result.str_osc;
+									if (cost < best_cost) {
+										best_cost = cost;
+										best_h = h;
 									}
-									break;
+								}
+							}
+							if (best_h != (size_t)-1) {
+								pass = true;
+								was_healed = true;
+								healed_role = wp[best_h].role;
+								pace = wp[best_h].result.pace;
+								lap4_s = wp[best_h].result.lap4_s;
+								dist_diff = wp[best_h].result.dist_diff;
+								detail = wp[best_h].result.detail;
+								curr_str_osc = wp[best_h].result.str_osc;
+								curr_str_wz = wp[best_h].result.str_wz_rms;
+								curr_str_lat = wp[best_h].result.str_lat_rms;
+								endless_tuner.adopt_healed_gains(heal_cands[best_h].set);
+								apply_tuneset(endless_tuner.speed(), endless_tuner.best());
+								if (!opt.quiet) {
+									std::printf("%s[%8.3f s]%s %s%sAI AUTO-HEAL (%zu/%zu) [%s] PASSED!%s lap=%.2fs (%.2fs/10m, %+.2fm | str: %.0fdps/%.1fmm)\n",
+										col::Dim, sim->t(), col::Rst,
+										col::Bold, col::Grn, best_h + 1, heal_cands.size(), healed_role.c_str(), col::Rst,
+										lap4_s, pace, dist_diff, wp[best_h].result.str_wz_rms, wp[best_h].result.str_lat_rms);
+									std::fflush(stdout);
 								}
 							}
 							if (!was_healed)
@@ -4043,10 +4029,12 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 								bool h_pass = false;
 								EndlessTuner::FailMetrics h_fm;
 								double h_pace = 0.0, h_lap4 = 0.0, h_dd = 0.0;
+								double h_str_osc = 0.0, h_str_wz = 0.0, h_str_lat = 0.0;
 								std::string h_det;
 								const std::string h_tag = "#" + std::to_string(map_no) + "h" + std::to_string(h + 1);
 								const bool skip_heal_d1 = !fm.d1_failed;
-								if (!run_map_trial(endless_tuner.speed(), heal_cands[h].set, h_tag, &h_pass, &h_fm, &h_pace, &h_lap4, &h_dd, &h_det, skip_heal_d1)) {
+								if (!run_map_trial(endless_tuner.speed(), heal_cands[h].set, h_tag, &h_pass, &h_fm, &h_pace, &h_lap4, &h_dd, &h_det,
+									&h_str_osc, &h_str_wz, &h_str_lat, skip_heal_d1)) {
 									aborted = true;
 									break;
 								}
@@ -4058,6 +4046,9 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 									lap4_s = h_lap4;
 									dist_diff = h_dd;
 									detail = h_det;
+									curr_str_osc = h_str_osc;
+									curr_str_wz = h_str_wz;
+									curr_str_lat = h_str_lat;
 									endless_tuner.adopt_healed_gains(heal_cands[h].set);
 									apply_tuneset(endless_tuner.speed(), endless_tuner.best());
 									break;
@@ -4086,41 +4077,45 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 						const TuneSet prev_win_set = endless_tuner.prev_passed().set;
 
 						const std::string b_tag = "#" + std::to_string(map_no) + "-prev";
-						// 1차 주행은 기존 1차 주행(맵 정보)을 그대로 재사용하고, 3차 주행만 [속도 올린 버전 vs 이전 버전] 비교하여 시간 단축
 						const bool skip_prev_d1 = !fm.d1_failed;
+						double str_osc_prev = 0.0, str_wz_prev = 0.0, str_lat_prev = 0.0;
 						if (run_map_trial(prev_win_v, prev_win_set, b_tag,
-							&pass_prev, &fm_prev, &pace_prev, &lap4_prev, &dist_diff_prev, &detail_prev, skip_prev_d1)) {
-							endless_tuner.record_ab_comparison(pass, lap4_s, pass_prev, lap4_prev);
+							&pass_prev, &fm_prev, &pace_prev, &lap4_prev, &dist_diff_prev, &detail_prev,
+							&str_osc_prev, &str_wz_prev, &str_lat_prev, skip_prev_d1)) {
+							endless_tuner.record_ab_comparison(pass, lap4_s, curr_str_osc, pass_prev, lap4_prev, str_osc_prev);
 
 							if (!opt.quiet) {
 								const auto& ab = endless_tuner.ab_score();
 								const bool is_lat = (endless_tuner.probe_mode() == EndlessTuner::ProbeMode::LAT);
 								const char* cand_name = is_lat ? "Lat-Up" : "Speed-Up";
+								constexpr double w_str = 0.002;
+								const double eff_curr = lap4_s + w_str * curr_str_osc;
+								const double eff_prev = lap4_prev + w_str * str_osc_prev;
 								const char* winner = (pass && pass_prev)
-									? (lap4_s < lap4_prev - 0.005 ? (is_lat ? "Lat-Up FASTER" : "Speed-Up FASTER")
-									                               : (lap4_prev < lap4_s - 0.005 ? "Prev-Passed FASTER" : "Tie"))
+									? (eff_curr < eff_prev - 0.008 ? (is_lat ? "Lat-Up FASTER/SMOOTHER" : "Speed-Up FASTER/SMOOTHER")
+									                               : (eff_prev < eff_curr - 0.008 ? "Prev-Passed FASTER/SMOOTHER" : "Tie"))
 									: (pass ? (is_lat ? "Lat-Up WON (Prev failed)" : "Speed-Up WON (Prev failed)")
 									        : (pass_prev ? (is_lat ? "Prev-Passed WON (Lat-Up failed)" : "Prev-Passed WON (Speed-Up failed)")
 									                     : "Both Failed"));
 								const int target_ab_w = (endless_tuner.target_window() * 2 + 2) / 3;
 								if (is_lat) {
-									std::printf("%s[%8.3f s]%s %s[A/B MATCH #%zu/%d]%s Lat-Up(%.2fm/s, %slat=%.2f%s): %s%.2fs%s vs Prev-Passed(%.2fm/s, %slat=%.2f%s): %s%.2fs%s -> %s%s%s | Score: Lat-Up(%d) vs Prev(%d) (Need >=%d wins for 2/3)\n",
+									std::printf("%s[%8.3f s]%s %s[A/B MATCH #%zu/%d]%s Lat-Up(%.2fm/s, %slat=%.2f%s): %s%.2fs%s (str: %.0fdps/%.1fmm) vs Prev-Passed(%.2fm/s, %slat=%.2f%s): %s%.2fs%s (str: %.0fdps/%.1fmm) -> %s%s%s | Score: Lat-Up(%d) vs Prev(%d) (Need >=%d wins for 2/3)\n",
 										col::Dim, sim->t(), col::Rst,
 										col::Bold, map_no, endless_tuner.target_window(), col::Rst,
 										curr_v, col::Mag, curr_set.lat, col::Rst,
-										pass ? col::Grn : col::Red, lap4_s, col::Rst,
+										pass ? col::Grn : col::Red, lap4_s, col::Rst, curr_str_wz, curr_str_lat,
 										prev_win_v, col::Mag, prev_win_set.lat, col::Rst,
-										pass_prev ? col::Grn : col::Red, lap4_prev, col::Rst,
+										pass_prev ? col::Grn : col::Red, lap4_prev, col::Rst, str_wz_prev, str_lat_prev,
 										col::Yel, winner, col::Rst,
 										ab.speed_up_wins, ab.prev_passed_wins, target_ab_w);
 								} else {
-									std::printf("%s[%8.3f s]%s %s[A/B MATCH #%zu/%d]%s Speed-Up(%s%.2fm/s%s): %s%.2fs%s vs Prev-Passed(%s%.2fm/s%s, lat=%.2f): %s%.2fs%s -> %s%s%s | Score: Speed-Up(%d) vs Prev(%d) (Need >=%d wins for 2/3)\n",
+									std::printf("%s[%8.3f s]%s %s[A/B MATCH #%zu/%d]%s Speed-Up(%s%.2fm/s%s): %s%.2fs%s (str: %.0fdps/%.1fmm) vs Prev-Passed(%s%.2fm/s%s, lat=%.2f): %s%.2fs%s (str: %.0fdps/%.1fmm) -> %s%s%s | Score: Speed-Up(%d) vs Prev(%d) (Need >=%d wins for 2/3)\n",
 										col::Dim, sim->t(), col::Rst,
 										col::Bold, map_no, endless_tuner.target_window(), col::Rst,
 										col::Yel, curr_v, col::Rst,
-										pass ? col::Grn : col::Red, lap4_s, col::Rst,
+										pass ? col::Grn : col::Red, lap4_s, col::Rst, curr_str_wz, curr_str_lat,
 										col::Yel, prev_win_v, col::Rst, prev_win_set.lat,
-										pass_prev ? col::Grn : col::Red, lap4_prev, col::Rst,
+										pass_prev ? col::Grn : col::Red, lap4_prev, col::Rst, str_wz_prev, str_lat_prev,
 										col::Yel, winner, col::Rst,
 										ab.speed_up_wins, ab.prev_passed_wins, target_ab_w);
 								}
@@ -4143,25 +4138,31 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 						if (should_save_to_disk && save_drive_params_to_firmware_file(session.params, &path_out)) {
 							char save_msg[220];
 							if (ab_lat_verified) {
-								std::snprintf(save_msg, sizeof save_msg,
-									"[SAVED A/B LAT-UP >=2/3 WINNER] Lat-Up won >=2/3 of window! lat_acc_max up to %.2f m/s2 (at %.2f m/s)",
-									session.params.lat_acc_max, session.params.base_mps);
+								if (streak_verified) {
+									std::snprintf(save_msg, sizeof save_msg,
+										"[SAVED STREAK >=2/3 LAT-UP] Passed %d/%d consecutive maps (>=2/3)! Next step: base_mps=%.2f m/s, lat_acc_max=%.2f m/s2",
+										(endless_tuner.target_window() * 2 + 2) / 3, endless_tuner.target_window(), session.params.base_mps, session.params.lat_acc_max);
+								} else {
+									std::snprintf(save_msg, sizeof save_msg,
+										"[SAVED WINDOW ERR <=%.0f%% LAT-UP] %d maps passed error rate check! Next step: base_mps=%.2f m/s, lat_acc_max=%.2f m/s2",
+										endless_tuner.max_fail_rate_pct(), endless_tuner.target_window(), session.params.base_mps, session.params.lat_acc_max);
+								}
 							} else if (ab_selected) {
 								std::snprintf(save_msg, sizeof save_msg,
-									"[SAVED A/B PREV >=2/3 WINNER] Prev window won >=2/3 of window! Reverted to %.2f m/s (lat=%.2f, step dv: %.3f), kp=%.3f kd=%.0f",
-									session.params.base_mps, session.params.lat_acc_max, endless_tuner.current_dv(), session.params.steer_kp, session.params.steer_kd);
+									"[SAVED STEP ADJUST] Error rate exceeded %.0f%% -> Reverted & probing next step: %.2f m/s (lat=%.2f, step dv: %.3f), kp=%.3f kd=%.0f",
+									endless_tuner.max_fail_rate_pct(), session.params.base_mps, session.params.lat_acc_max, endless_tuner.current_dv(), session.params.steer_kp, session.params.steer_kd);
 							} else if (ab_verified) {
 								std::snprintf(save_msg, sizeof save_msg,
 									"[SAVED A/B SPEED-UP >=2/3 WINNER] Speed-Up won >=2/3 of window! base_mps up from %.2f to %.2f m/s (lat=%.2f, step dv: %.3f)",
 									prev_v, session.params.base_mps, session.params.lat_acc_max, endless_tuner.current_dv());
 							} else if (streak_verified) {
 								std::snprintf(save_msg, sizeof save_msg,
-									"[SAVED STREAK >=2/3 WINNER] Passed %d consecutive maps (>=2/3 of %d)! base_mps up from %.2f to %.2f m/s (lat=%.2f, step dv: %.3f)",
+									"[SAVED STREAK >=2/3 PASS] Passed %d/%d consecutive maps (>=2/3 of Window)! Next step: base_mps %.2f -> %.2f m/s (lat=%.2f, step dv: %.3f)",
 									(endless_tuner.target_window() * 2 + 2) / 3, endless_tuner.target_window(), prev_v, session.params.base_mps, session.params.lat_acc_max, endless_tuner.current_dv());
 							} else if (verified) {
 								std::snprintf(save_msg, sizeof save_msg,
-									"[SAVED >=%.0f%% PASS VERIFIED] %d maps evaluated at %.2f m/s -> base_mps up to %.2f m/s",
-									endless_tuner.min_pass_rate_pct(), endless_tuner.target_window(), prev_v, session.params.base_mps);
+									"[SAVED WINDOW ERR <=%.0f%% PASS] %d maps evaluated at %.2f m/s (Err <= %.0f%%) -> Next step: base_mps up to %.2f m/s (lat=%.2f)",
+									endless_tuner.max_fail_rate_pct(), endless_tuner.target_window(), prev_v, endless_tuner.max_fail_rate_pct(), session.params.base_mps, session.params.lat_acc_max);
 							} else if (recovered) {
 								std::snprintf(save_msg, sizeof save_msg,
 									"[SAVED RECOVERED] %d maps passed at %.2f m/s -> base_mps recovered to %.2f m/s",
@@ -4221,7 +4222,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 						std::printf("%s[%8.3f s]%s %s%s%s | %s%s%s\n",
 							col::Dim, sim->t(), col::Rst,
 							col::Blu, st[0].c_str(), col::Rst,
-							res_col, st.size() > 7 ? st[7].c_str() : "", col::Rst);
+							res_col, endless_tuner.last_status().c_str(), col::Rst);
 						std::fflush(stdout);
 					}
 
@@ -4342,12 +4343,22 @@ TrialResult evaluate_trial_headless(const ScenarioOptions& opt) {
 		return d.max_v;
 	};
 
+	Track trk_geom;
+	std::string trk_err;
+	const bool trk_loaded = trk_geom.load(res.track_path_used, &trk_err);
+
 	if (lost_line(d1) || d1.marker_check != "OK" || oversteered(d1)) {
 		tr.d1_failed = true;
 		tr.was_oversteer = oversteered(d1) || check_oversteer(d1, 22.0);
 		tr.max_beta_deg = d1.max_beta_deg;
 		tr.max_lat_mm = d1.max_lat_mm;
 		tr.weave_dps = weave_dps(d1.samples);
+		if (trk_loaded) {
+			const StraightStability s_st = calc_straight_stability(d1.samples, trk_geom);
+			tr.str_wz_rms = s_st.wz_rms;
+			tr.str_lat_rms = s_st.lat_rms;
+			tr.str_osc = s_st.score;
+		}
 		tr.fail_v = extract_fail_v(d1);
 		const char* reason = tr.was_oversteer ? "oversteer"
 			: (!d1.is_finished() ? d1.outcome.c_str()
@@ -4366,6 +4377,12 @@ TrialResult evaluate_trial_headless(const ScenarioOptions& opt) {
 		tr.max_beta_deg = d4.max_beta_deg;
 		tr.max_lat_mm = d4.max_lat_mm;
 		tr.weave_dps = weave_dps(d4.samples);
+		if (trk_loaded) {
+			const StraightStability s_st = calc_straight_stability(d4.samples, trk_geom);
+			tr.str_wz_rms = s_st.wz_rms;
+			tr.str_lat_rms = s_st.lat_rms;
+			tr.str_osc = s_st.score;
+		}
 		tr.fail_v = extract_fail_v(d4);
 		const char* reason = tr.was_oversteer ? "oversteer"
 			: (!d4.is_finished() ? d4.outcome.c_str()
@@ -4378,6 +4395,12 @@ TrialResult evaluate_trial_headless(const ScenarioOptions& opt) {
 	tr.max_beta_deg = d4.max_beta_deg;
 	tr.max_lat_mm = d4.max_lat_mm;
 	tr.weave_dps = weave_dps(d4.samples);
+	if (trk_loaded) {
+		const StraightStability s_st = calc_straight_stability(d4.samples, trk_geom);
+		tr.str_wz_rms = s_st.wz_rms;
+		tr.str_lat_rms = s_st.lat_rms;
+		tr.str_osc = s_st.score;
+	}
 	Track track;
 	std::string err;
 	if (track.load(res.track_path_used, &err) && track.length() > 0) {

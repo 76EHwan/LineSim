@@ -178,12 +178,12 @@ int main(int argc_in, char** argv_in) {
 		fs::remove_all(opt.out_dir, ec);
 
 		if (tr.pass) {
-			std::printf("WORKER_RESULT: PASS lap4=%.4f pace=%.4f dist_diff=%.4f max_beta=%.2f weave=%.2f detail=%s\n",
-				tr.lap4_s, tr.pace, tr.dist_diff, tr.max_beta_deg, tr.weave_dps, tr.detail.c_str());
+			std::printf("WORKER_RESULT: PASS lap4=%.4f pace=%.4f dist_diff=%.4f max_beta=%.2f weave=%.2f str_wz=%.2f str_lat=%.2f detail=%s\n",
+				tr.lap4_s, tr.pace, tr.dist_diff, tr.max_beta_deg, tr.weave_dps, tr.str_wz_rms, tr.str_lat_rms, tr.detail.c_str());
 		} else {
-			std::printf("WORKER_RESULT: FAIL d1=%d ov=%d beta=%.2f lat=%.2f weave=%.2f fail_v=%.2f detail=%s\n",
+			std::printf("WORKER_RESULT: FAIL d1=%d ov=%d beta=%.2f lat=%.2f weave=%.2f str_wz=%.2f str_lat=%.2f fail_v=%.2f detail=%s\n",
 				tr.d1_failed ? 1 : 0, tr.was_oversteer ? 1 : 0,
-				tr.max_beta_deg, tr.max_lat_mm, tr.weave_dps, tr.fail_v, tr.detail.c_str());
+				tr.max_beta_deg, tr.max_lat_mm, tr.weave_dps, tr.str_wz_rms, tr.str_lat_rms, tr.fail_v, tr.detail.c_str());
 		}
 		std::fflush(stdout);
 		return 0;
@@ -317,13 +317,19 @@ int main(int argc_in, char** argv_in) {
 		opt.out_dir = (fs::path("runs") / stamp).string();
 	}
 	if (opt.track_path.empty()) {
-		if (opt.tune_mode == 2 || opt.session) {
+		std::string def_track = "tracks/finals_1_5x_championship.json";
+		if (!fs::exists(def_track)) {
+			if (fs::exists("../tracks/finals_1_5x_championship.json"))
+				def_track = "../tracks/finals_1_5x_championship.json";
+			else if (fs::exists("../../tracks/finals_1_5x_championship.json"))
+				def_track = "../../tracks/finals_1_5x_championship.json";
+		}
+		if (opt.tune_mode == 2) {
 			opt.track_path = "random";
-		} else if (opt.tune_mode == 1 || opt.auto_tune) {
-			if (fs::exists("tracks/practice_board.json"))
-				opt.track_path = "tracks/practice_board.json";
-			else
-				opt.track_path = "random";
+		} else if (fs::exists(def_track)) {
+			opt.track_path = def_track;
+		} else if (opt.session || opt.auto_tune) {
+			opt.track_path = "random";
 		} else {
 			std::fprintf(stderr, "no track given\n");
 			usage();

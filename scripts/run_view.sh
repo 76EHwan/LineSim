@@ -9,4 +9,4 @@ echo "=== Launching 3D Simulation Session ==="
 echo "Display target: $DISPLAY"
 echo "Open port 6080 on your iPad / browser (VS Code Ports tab) to see the 3D window!"
 
-./linesim view --session --track tracks/all_elements.json --set base_mps=2.04 "$@"
+./linesim view --session --track tracks/finals_1_5x_championship.json "$@"

@@ -69,6 +69,9 @@ struct TrialResult {
 	double max_beta_deg = 0.0;
 	double max_lat_mm = 0.0;
 	double weave_dps = 0.0;
+	double str_wz_rms = 0.0;     // Straight yaw-rate RMS [dps] (straight-line shaking metric)
+	double str_lat_rms = 0.0;    // Straight lateral error RMS [mm]
+	double str_osc = 0.0;        // Straight oscillation penalty (str_wz_rms + 10 * str_lat_rms)
 	double fail_v = 0.0;
 	double lap4_s = 0.0;
 	double pace = 0.0;

@@ -30,6 +30,25 @@ struct SessionState {
 	std::string message;
 };
 
+struct GainRecommendation {
+	bool valid = false;
+	float current_kp = 0.0f;
+	float current_kd = 0.0f;
+	float current_lat_acc = 0.0f;
+	float current_yaw_kp = 0.0f;
+	float rec_kp = 0.0f;
+	float rec_kd = 0.0f;
+	float rec_lat_acc = 0.0f;
+	float rec_yaw_kp = 0.0f;
+	double max_lat_mm = 0.0;
+	double rms_lat_mm = 0.0;
+	double max_beta_deg = 0.0;
+	double weave_dps = 0.0;
+	std::string status_label;
+	std::string diag_cause;
+	std::string diag_action;
+};
+
 class LiveView {
 public:
 	SessionState* session = nullptr;
@@ -43,11 +62,19 @@ public:
 	void hold_until_closed();
 	bool stop_requested() const { return stop_; }
 	// A drive is starting: the trail shows this drive only.
+	void on_drive_finished(double max_lat_mm, double rms_lat_mm, double max_beta_deg, double weave_dps);
+	void apply_recommended_gains();
+	const GainRecommendation& gain_recommendation() const { return gain_rec_; }
 	void drive_started() {
 		v_.clear_trail();
 		has_trail_pose_ = false;
 		live_beta_ = 0;
 		max_beta_seen_ = 0;
+		max_lat_seen_ = 0;
+		sum_lat_sq_ = 0;
+		lat_samples_ = 0;
+		max_weave_seen_ = 0;
+		recent_wz_.clear();
 	}
 	// New course: the lap records start over.
 	void clear_laps() { courses_.clear(); }
@@ -134,4 +161,22 @@ private:
 	bool has_trail_pose_ = false;
 	double live_beta_ = 0;
 	double max_beta_seen_ = 0;
+
+	void update_gain_recommendation();
+	std::string format_gain_recommendation_hud() const;
+
+	GainRecommendation gain_rec_;
+	double max_lat_seen_ = 0.0;
+	double rms_lat_mm_ = 0.0;
+	double sum_lat_sq_ = 0.0;
+	int lat_samples_ = 0;
+	double max_weave_seen_ = 0.0;
+	std::vector<double> recent_wz_;
+	std::vector<double> fft_buf_wz_;
+	double live_fft_peak_freq_ = 0.0;
+	double live_fft_peak_amp_ = 0.0;
+	double live_fft_weave_pct_ = 0.0;
+	double live_fft_curve_pct_ = 0.0;
+	std::vector<FftBar> live_fft_bars_;
+	void update_live_fft();
 };

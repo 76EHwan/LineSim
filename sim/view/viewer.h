@@ -9,6 +9,11 @@
 struct mjModel_;
 struct mjData_;
 
+struct FftBar {
+	float freq = 0.0f;
+	float amp = 0.0f;
+};
+
 struct ViewerHud {
 	std::string status;                 // top-left block (multi-line)
 	std::string help;                   // bottom-left block
@@ -19,7 +24,14 @@ struct ViewerHud {
 	bool sensor_on[18] = {};
 	double live_beta = 0.0;
 	double live_lat_mm = 0.0;
-	std::string marker_hud;             // 3D HUD 마커 분석 및 복원 정보 카드
+	std::string marker_hud;             // 3D HUD marker diagnosis card
+	std::string gain_recommendation_hud; // 3D HUD path error analysis and gain recommendation card
+	std::vector<FftBar> fft_bars;
+	float fft_peak_freq = 0.0f;
+	float fft_peak_amp = 0.0f;
+	float fft_weave_pct = 0.0f;
+	float fft_curve_pct = 0.0f;
+	bool show_fft_graph = true;
 };
 
 class Viewer {
@@ -77,6 +89,9 @@ public:
 	const std::vector<MarkerVisualInfo>& marker_diags() const { return marker_diags_; }
 	int focused_miss_idx() const { return focused_miss_idx_; }
 	void jump_to_next_marker_miss();
+	bool show_gain_rec() const { return show_gain_rec_; }
+	void toggle_gain_rec() { show_gain_rec_ = !show_gain_rec_; }
+	void set_show_gain_rec(bool b) { show_gain_rec_ = b; }
 
 private:
 	static long long __stdcall wndproc(void* hwnd, unsigned msg, unsigned long long wp, long long lp);
@@ -117,4 +132,5 @@ private:
 	bool fast_mode_ = false;
 	std::vector<MarkerVisualInfo> marker_diags_;
 	int focused_miss_idx_ = -1;
+	bool show_gain_rec_ = true;
 };

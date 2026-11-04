@@ -690,18 +690,14 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 			// Championship Infield Serpentine Base with 3 Long Straights:
 			// - Long Straight 1 (6.6m, East, Y=1.80): unbroken, crossed at 90 deg by Vertical Corridor 1 (X=3.00).
 			// - Long Straight 2 (6.85m, West, Y=4.20): unbroken, crossed at 90 deg by Vertical Corridor 2 (X=2.00).
-			// - Long Straight 3 (~6.2m total, East, Y=6.40): cut in the middle with a continuous 45 deg S-turn!
+			// - Long Straight 3 (~6.2m, East, Y=6.40): unbroken, one straight line from start to end.
 			double dw = round_to(uni(-0.25, 0.25), 0.05);
 			double str1_len = 6.60 + dw;
 			double str2_len = 6.85 + dw;
-			double str3_h1 = 2.75 + 0.5 * dw;
-			double str3_h2 = 2.75 + 0.5 * dw;
-			const int s3_lobes = 2; // 4 consecutive alternating 45 deg arcs in the middle of Long Straight 3
-			const double dx_s3 = 2.0 * s3_lobes * R * std::sin(kPi / 4.0);
-			const double dy_s3 = -2.0 * s3_lobes * R * (1.0 - std::cos(kPi / 4.0));
-			const double east_end_x = -0.30 + str3_h1 + dx_s3 + str3_h2;
+			double str3_len = 6.20 + dw;
+			const double east_end_x = -0.30 + str3_len;
 			const double west_run = east_end_x - 2.25;
-			const double vert2_len = (5.35 + dy_s3) - 2.60;
+			const double vert2_len = 5.35 - 2.60;
 			return {
 				{false, 1.20, 0, false},     // 0: start straight
 				{true,  0,    90, false},    // 1
@@ -723,28 +719,23 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 				{true,  0,    90, false},    // 17
 				{false, 3.35, 0, false},     // 18
 				{true,  0,    90, false},    // 19
-				{false, str2_len, 0, true},  // 20: LONG STRAIGHT 2 (protected, crossed at 90 deg by #35)
+				{false, str2_len, 0, true},  // 20: LONG STRAIGHT 2 (protected, crossed at 90 deg by #30)
 				{true,  0,   -90, false},    // 21
 				{false, 1.70, 0, false},     // 22: climb to top corridor (Y=6.40)
 				{true,  0,   -90, false},    // 23
-				{false, str3_h1, 0, true},   // 24: LONG STRAIGHT 3 - Part 1 (protected)
-				{true,  0,   -45, false},    // 25: 45 deg continuous turn in the middle of Long Straight 3
-				{true,  0,    45, false},    // 26
-				{true,  0,   -45, false},    // 27
-				{true,  0,    45, false},    // 28
-				{false, str3_h2, 0, true},   // 29: LONG STRAIGHT 3 - Part 2 (protected)
-				{true,  0,   -90, false},    // 30
-				{false, 0.30, 0, false},     // 31
-				{true,  0,   -90, false},    // 32
-				{false, west_run, 0, false}, // 33: upper infield return to X=2.25
-				{true,  0,    90, false},    // 34
-				{false, vert2_len, 0, false},// 35: VERTICAL CORRIDOR 2 (crosses #20 at 90 deg)
-				{true,  0,   -90, false},    // 36
-				{false, 2.35, 0, false},     // 37: extended to outside corridor
-				{true,  0,    90, false},    // 38
-				{false, 1.85, 0, false},     // 39: outside return
-				{true,  0,    90, false},    // 40
-				{false, 0.60, 0, false}      // 41: finish straight connector
+				{false, str3_len, 0, true},  // 24: LONG STRAIGHT 3 (protected, unbroken)
+				{true,  0,   -90, false},    // 25
+				{false, 0.30, 0, false},     // 26
+				{true,  0,   -90, false},    // 27
+				{false, west_run, 0, false}, // 28: upper infield return to X=2.25
+				{true,  0,    90, false},    // 29
+				{false, vert2_len, 0, false},// 30: VERTICAL CORRIDOR 2 (crosses #20 at 90 deg)
+				{true,  0,   -90, false},    // 31
+				{false, 2.35, 0, false},     // 32: extended to outside corridor
+				{true,  0,    90, false},    // 33
+				{false, 1.85, 0, false},     // 34: outside return
+				{true,  0,    90, false},    // 35
+				{false, 0.60, 0, false}      // 36: finish straight connector
 			};
 		}
 		const double main_len = std::min(1.4, top_total * 0.35);

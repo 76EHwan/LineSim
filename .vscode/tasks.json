@@ -159,31 +159,19 @@
       "type": "pickString",
       "description": "Course (random = a new ZETIN-rule course every time)",
       "options": [
-        "tracks/hyper_straight_speedway.json",
-        "tracks/zetin_finals_championship.json",
-        "tracks/complex_grand_prix.json",
-        "tracks/extreme_challenge.json",
-        "random",
-        "tracks/practice_board.json",
-        "tracks/figure8.json",
-        "tracks/oval.json"
+        "tracks/finals_1_5x_championship.json",
+        "random"
       ],
-      "default": "tracks/hyper_straight_speedway.json"
+      "default": "tracks/finals_1_5x_championship.json"
     },
     {
       "id": "scenario",
       "type": "pickString",
       "description": "Scenario",
       "options": [
-        "scenarios/hyper_straight_speedway.json",
-        "scenarios/zetin_finals_championship.json",
-        "scenarios/complex_grand_prix.json",
-        "scenarios/extreme_challenge.json",
-        "scenarios/practice_board.json",
-        "scenarios/figure8_all.json",
-        "scenarios/oval_first.json"
+        "scenarios/finals_1_5x_championship.json"
       ],
-      "default": "scenarios/hyper_straight_speedway.json"
+      "default": "scenarios/finals_1_5x_championship.json"
     },
     { "id": "baseSpeed", "type": "promptString", "description": "base speed [m/s] (driveData.base_mps)", "default": "2.20" },
     { "id": "maxSpeed", "type": "promptString", "description": "max speed on straights [m/s] (driveData.max_mps, drives 2 and 4)", "default": "10.0" },

@@ -181,7 +181,7 @@ def apply_to_drive_c(cand):
 
 def main():
     parser = argparse.ArgumentParser(description="Smart Tuner for LineSim with Oversteer Rejection")
-    parser.add_argument("--track", default=os.path.join(ROOT, "tracks", "practice_board.json"), help="Track json file")
+    parser.add_argument("--track", default=os.path.join(ROOT, "tracks", "finals_1_5x_championship.json"), help="Track json file")
     parser.add_argument("--robot", default=os.path.join(ROOT, "robots", "full.json"), help="Robot json file")
     parser.add_argument("--max-beta", type=float, default=35.0, help="Max allowed sideslip angle (deg) before oversteer DQ (default: 35.0)")
     parser.add_argument("--jobs", type=int, default=6, help="Parallel thread count (default: 6)")

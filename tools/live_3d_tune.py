@@ -107,7 +107,7 @@ def apply_to_drive_c(cand):
 
 def main():
     parser = argparse.ArgumentParser(description="Live 3D Continuous Tuner for LineSim")
-    parser.add_argument("--track", default=os.path.join(ROOT, "tracks", "practice_board.json"), help="Track json")
+    parser.add_argument("--track", default=os.path.join(ROOT, "tracks", "finals_1_5x_championship.json"), help="Track json")
     parser.add_argument("--robot", default=os.path.join(ROOT, "robots", "full.json"), help="Robot json")
     parser.add_argument("--speed", type=float, default=1.5, help="3D View playback speed multiplier (default: 1.5x)")
     parser.add_argument("--max-beta", type=float, default=35.0, help="Max allowed sideslip beta angle (default: 35.0 deg)")

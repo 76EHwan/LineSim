@@ -48,9 +48,9 @@ build.bat
 | 하고 싶은 것 | 방법 |
 |---|---|
 | 빌드 | `Ctrl+Shift+B` |
-| **백그라운드 AI 게인 튜닝 (창 없이)** | `build\Release\linesim.exe run --tune A --track tracks/practice_board.json --robot robots/full.json --set base_mps=2.1 --trials 50` |
+| **백그라운드 AI 게인 튜닝 (창 없이)** | `build\Release\linesim.exe run --tune A --track tracks/finals_1_5x_championship.json --robot robots/full.json --set base_mps=2.1 --trials 50` |
 | **백그라운드 엔드리스 속도 튜닝** | `build\Release\linesim.exe run --tune E --robot robots/full.json --set base_mps=2.05 --min-speed 1.50 --fail-rate 20` |
-| **계속 주행하며 튜닝 (3D 창)** | `F5` (무작위 코스) 또는 작업 **LineSim: 3D session** → 코스 선택(`random` / figure8 / oval) → 기본 속도, 최고 속도, 가속도, 감속도 입력 |
+| **계속 주행하며 튜닝 (3D 창)** | `F5` (무작위 코스) 또는 작업 **LineSim: 3D session** → 코스 선택(`tracks/finals_1_5x_championship.json` / `random`) → 기본 속도, 최고 속도, 가속도, 감속도 입력 |
 | 시나리오 그대로 보기 | 작업 **LineSim: 3D scenario** |
 | 펌웨어 메뉴를 키보드로 | 작업 **LineSim: 3D interactive firmware menu** |
 | 무작위 코스 파일 만들기 | 작업 **LineSim: Generate random course** (`tracks/random_<seed>.json`) |
@@ -72,6 +72,8 @@ build\Release\linesim.exe view --session --track random --robot robots/full.json
 | `1` `2` `3` `4` `5` | 해당 회차 주행 (`Drive_First` … `Drive_Fifth`). 로봇은 출발선에 자동으로 놓입니다 |
 | `↑` `↓` / `←` `→` | 파라미터 선택 / 변경 (`Shift` = 10배, 속도는 0.01 m/s 단위): 기본·최고 속도, 가·감속, steer kp/kd, pos atten, target shift, pit-in. 다음 주행부터 적용. steer kd는 초 단위로 보이고 괄호 안이 로봇 메뉴에 넣을 값(`steer_gain_d` = kd ÷ 0.0005) |
 | `Enter` → 숫자 → `Enter` | 선택한 파라미터 값을 직접 입력 (예: steer kp `18.5`). `Esc` 취소, `Backspace` 지우기. 입력 중에는 숫자·`-` 키가 주행·배속으로 쓰이지 않음 |
+| `G` | **실시간 AI 추천 게인 적용 (`G` 키)**: 세션 모드에서 현재 주행 분석을 통한 추천 게인 파라미터(`steer_kp`, `steer_kd`, `yaw_gain_p`, `lat_acc_max`)를 즉시 세션에 적용합니다 (일반 뷰어 모드에서는 게인 추천 HUD 카드 토글) |
+| `H` | **실시간 FFT 주파수 스펙트럼 HUD 토글 (`H` 키)**: 차체 요레이트/횡오차의 24-Bar 주파수 스펙트럼(0.2~18 Hz) 및 사행 진동(Weave) 대역 시각화 HUD 오버레이를 켜거나 끕니다 |
 | `A` | **3-코스 AI 게인 오토튜닝 (`A` 키)**: 3개 코스(`c1, c2, c3`)에서 1회차 → 3회차를 돌리며 최고 랩타임 및 조향/곡선 게인을 베이지안(GP)으로 탐색합니다. 다시 `A`(또는 `X`)를 누르면 종료 |
 | `E` | **Endless 한계 속도 검증 + 5단계 AI 게인 자가치유 (`E` 키)**: 매 시도마다 새로운 무작위 코스를 생성해 1회차 → 3회차를 주행합니다. 실패 시 해당 코스에서 5단계 AI 게인 자가치유 후보를 먼저 시도하고, 50개 맵 윈도우 실패율 기준(기본 10% 이하)과 최저 속도 하한선(`--min-speed`)을 적용해 기본 속도를 자동 조절합니다 |
 | `N` | 무작위 코스 새로 생성 (`runs/latest/random_<seed>.json`에 저장). 새 코스에서는 1회차부터 |
@@ -124,14 +126,44 @@ tools\.venv\Scripts\python.exe tools\step_import.py robots\Full.step --total-mas
 
 ```bash
 python tools/logs.py "real_logs/주행 로그" "real_logs/주행 로그/연습판 마커 정답.txt"
-python tools/track_from_logs.py "real_logs/주행 로그" "real_logs/주행 로그/연습판 마커 정답.txt" tracks/practice_board.json --name practice_board
-python tools/compare_logs.py "real_logs/주행 로그" "real_logs/주행 로그/연습판 마커 정답.txt" tracks/practice_board.json
+python tools/track_from_logs.py "real_logs/주행 로그" "real_logs/주행 로그/연습판 마커 정답.txt" tracks/finals_1_5x_championship.json --name practice_board
+python tools/compare_logs.py "real_logs/주행 로그" "real_logs/주행 로그/연습판 마커 정답.txt" tracks/finals_1_5x_championship.json
 ```
 
 - `logs.py`: 로그마다 파라미터, 정답과 처음 달라지는 마커. 정답과 일치한 로그의 구간별 거리 중앙값.
 - `track_from_logs.py`: 규정(턴마크 의미, R 25 cm, 45° 단위) + 거리 + "닫힌 코스, 교차로는 직각 하나" 조건으로 코스를 재구성. 결과는 후보 중 가장 잘 맞는 것이며 일부 원호 각도는 틀릴 수 있습니다(연습판 도면이 있으면 직접 입력하는 것이 정확).
 - `compare_logs.py`: 실제 로그의 파라미터 조합마다 시뮬레이터로 1회차를 돌려, 마커를 처음 틀리는 위치와 구간 거리를 비교. 로그를 남긴 시점의 펌웨어와 `firmware/` 버전이 다르면 결과도 달라집니다.
 - `oscillation.py`: 직선 구간의 흔들림(yaw 진폭·주파수). 시뮬레이터 결과나 Vibe Test 로그(`vib_log_*.csv`)를 그대로 넣으면 됩니다.
+
+## 📊 실시간 FFT 주파수 분석 & 차체 안정성 (New)
+
+시뮬레이터 3D 뷰어 및 펌웨어에 차체 진동 억제와 주파수 분석 시스템이 내장되어 있습니다.
+
+### 1. 실시간 24-Bar FFT 주파수 분석 HUD (`H` 키)
+* **실시간 롤링 버퍼 FFT**: 주행 중 요레이트($\omega_z$) 및 라인 횡오차($e_{lat}$)를 1 kHz로 샘플링하여 0.2 Hz ~ 18 Hz 대역의 진폭 스펙트럼을 실시간 계산합니다.
+* **대역별 컬러 시각화**:
+  * `0.2 ~ 2.0 Hz` (청색/하늘색): 트랙 곡률 추종 기본 대역 (정상적인 코너링)
+  * `2.0 ~ 8.0 Hz` (호박색/선명한 적색): **사행 진동(Weaving/Hunting Oscillation) 위험 대역**. 피크 발생 시 백색 하이라이트 표시
+  * `8.0 Hz 이상` (보라색): 고주파 리플 및 센서 노이즈 대역
+* **HUD 정보 요약**: 피크 주파수(Peak Freq), 진폭(Peak Amp), 사행 진동 에너지 비율(Weave %)과 정상 곡선 추종 비율(Curve %)을 실시간 출력합니다.
+* **오프라인 정밀 분석 도구**:
+  ```bash
+  python tools/fft_analysis.py runs/latest/drive1.csv
+  ```
+
+### 2. 직선 고속 사행(Hunting) 원천 억제 & 가속 극대화 (`g_is_straight`)
+* **직선 공진 억제 제어**: 직선 가속 및 고속 크루즈 구간(`g_is_straight = 1`) 진입 시, 미세한 센서 편차에 의한 3.4 Hz 좌우 사행 공진을 차단하기 위해 조향 P 게인을 0.5배로 낮추고 D 게인을 1.4배 증폭하여 차체 감쇠(Damping)를 극대화합니다.
+* **접지 한계 감속 확장**: 직선 구간에서는 접지 한계 감속(`lat_acc_max`) 임계치를 2배 확장 적용하여, 최고 속도 도달 시 불필요한 감속 없이 최대 가속을 유지합니다.
+* **캐스케이드 자이로 피드백 안정화**: 외부 PD 출력 이득이 인위적으로 증폭되던 버그를 개선하여, 목표 요레이트는 온전히 유지한 채 순수한 각속도 감쇠만 피드백하도록 최적화했습니다.
+
+### 3. 실시간 AI 게인 추천 & 즉각 적용 (`G` 키)
+* 3D 주행 중 발생하는 오차 패턴과 요레이트 진동을 분석하여 최적의 `steer_kp`, `steer_kd`, `yaw_gain_p`, `lat_acc_max`를 우측 하단 HUD 카드로 실시간 추천합니다.
+* 세션 모드에서 키보드 `G` 키를 누르면 추천된 파라미터가 즉시 세션에 반영되어 다음 주행에서 바로 검증할 수 있습니다.
+
+### 4. 직선 안정성 정량 평가 지표 (Straight-line Stability Metrics)
+* 곡선 구간을 제외한 순수 직선 구간에서의 요레이트 RMS(`wz_rms`) 및 횡오차 RMS(`lat_rms`), 통합 진동 페널티 점수(`score = wz_rms + 10 * lat_rms`)를 측정하여 오토튜닝 및 시뮬레이션 평가 지표에 반영합니다.
+
+---
 
 ## 🎯 자동 튜닝 (Auto-Tuning)
 
@@ -155,7 +187,7 @@ python tools/compare_logs.py "real_logs/주행 로그" "real_logs/주행 로그/
 build\Release\linesim.exe run --tune E --robot robots/full.json --set base_mps=2.2 --min-speed 2.0 --fail-rate 10 --window 50
 
 # AI 베이지안 게인 100회 집중 탐색 후 요약 출력 및 자동 종료 (--trials 100)
-build\Release\linesim.exe run --tune A --track tracks/practice_board.json --robot robots/full.json --set base_mps=2.1 --trials 100
+build\Release\linesim.exe run --tune A --track tracks/finals_1_5x_championship.json --robot robots/full.json --set base_mps=2.1 --trials 100
 ```
 
 #### 🚀 10개 코어 풀가동 병렬 실행 (Python, 8~10배 가속)
@@ -175,7 +207,7 @@ tools\.venv\Scripts\python.exe tools/autotune.py 1.6 --robot robots/full.json --
 ```bash
 # 3D 뷰어에서 Endless(E) 또는 AI 게인(A) 바로 시작 (주행 중 키보드 E 또는 A 키로도 토글 가능)
 build\Release\linesim.exe view --tune E --robot robots/full.json --set base_mps=2.05
-build\Release\linesim.exe view --tune A --track tracks/practice_board.json --robot robots/full.json --set base_mps=2.1
+build\Release\linesim.exe view --tune A --track tracks/finals_1_5x_championship.json --robot robots/full.json --set base_mps=2.1
 ```
 
 > [!TIP]
@@ -205,11 +237,11 @@ build\Release\linesim.exe view --tune A --track tracks/practice_board.json --rob
 ## 실행
 
 ```bash
-build\Release\linesim.exe run scenarios/figure8_all.json
+build\Release\linesim.exe run scenarios/finals_1_5x_championship.json
 ```
 
 ```bash
-build\Release\linesim.exe run --track tracks/oval.json --drives 1 --set base_mps=2.2 --set steer_kd=400
+build\Release\linesim.exe run --track tracks/finals_1_5x_championship.json --drives 1 --set base_mps=2.2 --set steer_kd=400
 ```
 
 | 옵션 | 설명 |
@@ -290,7 +322,7 @@ build\Release\linesim.exe run --track tracks/oval.json --drives 1 --set base_mps
 코스를 새로 만들 때는 닫힘, 교차각과 교차로 주변 직선 길이, 엔드마크 주변 직선 길이를 먼저 확인하세요.
 
 ```bash
-python tools/course.py tracks/figure8.json
+python tools/course.py tracks/finals_1_5x_championship.json
 ```
 
 ## 알려진 사항 (펌웨어)

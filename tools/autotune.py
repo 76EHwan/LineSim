@@ -90,7 +90,7 @@ def use_private_exe():
     for f in ("linesim.exe", "mujoco.dll"):
         shutil.copy2(os.path.join(src, f), os.path.join(dst, f))
     EXE = os.path.join(dst, "linesim.exe")
-REAL_COURSE = os.path.join(ROOT, "tracks", "practice_board.json")
+REAL_COURSE = os.path.join(ROOT, "tracks", "finals_1_5x_championship.json")
 
 KP = [8, 10, 12, 14, 16, 18, 20, 22, 25, 28, 32, 36, 40]
 KD = [0, 0.05, 0.1, 0.15, 0.225, 0.3, 0.4, 0.5]   # seconds (x 2000 = firmware steer_gain_d)
