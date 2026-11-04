@@ -94,3 +94,4 @@ TrialResult evaluate_trial_headless(const ScenarioOptions& opt);
 bool load_scenario_file(const std::string& path, ScenarioOptions* opt, std::string* err);
 bool apply_param(FwDriveParams* p, const std::string& key, double v);
 bool save_drive_params_to_firmware_file(const FwDriveParams& p, std::string* out_path = nullptr);
+bool load_drive_params_from_firmware_file(FwDriveParams* p, std::string* out_path = nullptr);

@@ -92,6 +92,9 @@ public:
 	bool show_gain_rec() const { return show_gain_rec_; }
 	void toggle_gain_rec() { show_gain_rec_ = !show_gain_rec_; }
 	void set_show_gain_rec(bool b) { show_gain_rec_ = b; }
+	bool show_fft() const { return show_fft_; }
+	void toggle_fft() { show_fft_ = !show_fft_; }
+	void set_show_fft(bool b) { show_fft_ = b; }
 
 private:
 	static long long __stdcall wndproc(void* hwnd, unsigned msg, unsigned long long wp, long long lp);
@@ -133,4 +136,5 @@ private:
 	std::vector<MarkerVisualInfo> marker_diags_;
 	int focused_miss_idx_ = -1;
 	bool show_gain_rec_ = true;
+	bool show_fft_ = true;
 };

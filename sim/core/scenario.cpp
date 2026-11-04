@@ -3190,6 +3190,8 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 		fwb_set_drive_params(&p);
 		res.params = p;
 		session.params = p;
+		session.baseline_params = p;
+		session.has_baseline = true;
 		session.ready = true;
 		booted = true;
 

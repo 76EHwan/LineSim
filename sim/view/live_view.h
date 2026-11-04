@@ -11,9 +11,18 @@
 #include "world/robot.h"
 #include "world/track.h"
 
+struct ParamSnapshot {
+	FwDriveParams params{};
+	std::string desc;
+};
+
 // Session mode: the viewer edits these, the firmware fiber acts on the requests.
 struct SessionState {
 	FwDriveParams params{};
+	FwDriveParams baseline_params{}; // initial parameters from startup / drive.c baseline
+	bool has_baseline = false;
+	std::vector<ParamSnapshot> undo_stack;
+	std::vector<ParamSnapshot> redo_stack;
 	int selected = 0;               // parameter row under the cursor
 	bool editing = false;           // typing a value for the selected row
 	std::string edit_buf;
@@ -64,6 +73,10 @@ public:
 	// A drive is starting: the trail shows this drive only.
 	void on_drive_finished(double max_lat_mm, double rms_lat_mm, double max_beta_deg, double weave_dps);
 	void apply_recommended_gains();
+	void push_undo(const std::string& desc = "");
+	void undo_gains();
+	void redo_gains();
+	void revert_to_baseline();
 	const GainRecommendation& gain_recommendation() const { return gain_rec_; }
 	void drive_started() {
 		v_.clear_trail();

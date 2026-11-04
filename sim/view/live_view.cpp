@@ -110,7 +110,13 @@ void LiveView::handle_keys() {
 				v_.toggle_gain_rec();
 			break;
 		case 'H':
-			v_.toggle_gain_rec();
+			v_.toggle_fft();
+			break;
+		case 'U':
+		case 'Z':
+		case 'Y':
+			if (session)
+				session_key(k);
 			break;
 		case 'P': {
 			char name[64];
@@ -154,6 +160,7 @@ void LiveView::session_key(int k) {
 	case VK_LEFT:
 	case VK_RIGHT: {
 		const ParamRow& r = kRows[s.selected];
+		push_undo(std::string("Before step ") + r.name);
 		float v = shown(s.params, r);
 		v += (k == VK_RIGHT ? 1 : -1) * r.step * (shift ? 10 : 1);
 		v = std::clamp(v, r.lo, r.hi);
@@ -241,6 +248,30 @@ void LiveView::session_key(int k) {
 		apply_recommended_gains();
 		break;
 	}
+	case 'u':
+	case 'U': {  // undo last gain edit or revert to startup baseline (Shift+U)
+		if (shift)
+			revert_to_baseline();
+		else
+			undo_gains();
+		break;
+	}
+	case 'z':
+	case 'Z': {  // Ctrl+Z = Undo, Ctrl+Shift+Z = Redo
+		if (v_.key_held(VK_CONTROL)) {
+			if (shift)
+				redo_gains();
+			else
+				undo_gains();
+		}
+		break;
+	}
+	case 'y':
+	case 'Y': {  // Ctrl+Y = Redo
+		if (v_.key_held(VK_CONTROL))
+			redo_gains();
+		break;
+	}
 	default: break;
 	}
 }
@@ -251,6 +282,7 @@ void LiveView::edit_key(int k) {
 		s.editing = false;
 		if (!s.edit_buf.empty() && s.edit_buf != ".") {
 			const ParamRow& r = kRows[s.selected];
+			push_undo(std::string("Before edit ") + r.name);
 			const float v = static_cast<float>(std::atof(s.edit_buf.c_str()));
 			store(s.params, r, std::clamp(v, r.lo, r.hi));
 			fwb_set_drive_params(&s.params);
@@ -283,12 +315,17 @@ void LiveView::edit_key(int k) {
 		if (s.edit_buf.empty() || s.edit_buf == ".")
 			break;
 		const ParamRow& r = kRows[s.selected];
+		push_undo(std::string("Before edit ") + r.name);
 		const float v = static_cast<float>(std::atof(s.edit_buf.c_str()));
 		store(s.params, r, std::clamp(v, r.lo, r.hi));
 		fwb_set_drive_params(&s.params);
 		if (v < r.lo || v > r.hi) {
 			char msg[96];
-			std::snprintf(msg, sizeof msg, "%s: kept within %g .. %g", r.name, r.lo, r.hi);
+			std::snprintf(msg, sizeof msg, "%s: kept within %g .. %g (U: undo)", r.name, r.lo, r.hi);
+			s.message = msg;
+		} else {
+			char msg[96];
+			std::snprintf(msg, sizeof msg, "%s = %g (U: undo)", r.name, v);
 			s.message = msg;
 		}
 		break;
@@ -446,8 +483,16 @@ std::string LiveView::session_panel() const {
 	}
 	if (!s.message.empty()) {
 		std::string msg = s.message;
-		if (msg.size() > 44) msg = msg.substr(0, 41) + "...";
-		t += "  msg: " + msg + "\n";
+		if (msg.size() > 46) {
+			size_t space = msg.rfind(' ', 46);
+			if (space != std::string::npos && space > 20) {
+				t += "  msg: " + msg.substr(0, space) + "\n       " + msg.substr(space + 1) + "\n";
+			} else {
+				t += "  msg: " + msg.substr(0, 46) + "\n       " + msg.substr(46) + "\n";
+			}
+		} else {
+			t += "  msg: " + msg + "\n";
+		}
 	}
 	return t;
 }
@@ -463,6 +508,7 @@ void LiveView::render(double t_sim, const std::string& phase) {
 	hud.fft_peak_amp = static_cast<float>(live_fft_peak_amp_);
 	hud.fft_weave_pct = static_cast<float>(live_fft_weave_pct_);
 	hud.fft_curve_pct = static_cast<float>(live_fft_curve_pct_);
+	hud.show_fft_graph = v_.show_fft();
 
 	double lat = 0, s = 0;
 	const RobotParams& rp = robot_.params();
@@ -548,11 +594,11 @@ void LiveView::render(double t_sim, const std::string& phase) {
 	if (interactive_)
 		hud.help = "Arrows: U/D/L/R buttons   Enter: K button   R: robot back to start\n" + hud.help;
 	if (session) {
-		hud.help = "1: Search  2: Straight  3: Shift  4: Out-In-Out  G: Apply Gains  H: Toggle AI Card  S: Save  X: Stop\n"
-		           "Up/Down: pick   Left/Right: change   Enter: type   A: gain auto-tune   E: AI heal\n" + hud.help;
+		hud.help = "1..5: Drive   G: Apply Gains   U: Undo Gain   Shift+U: Revert All   S: Save drive.c\n"
+		           "Arrows: Pick/Step   Enter: Type   A: Auto-tune   E: AI heal   H: FFT HUD   X: Stop\n" + hud.help;
 		hud.panel = session_panel();
 	} else {
-		hud.help += "\n[G] / [H]: Toggle AI Gain Recommendation Card";
+		hud.help += "\n[G]: Toggle AI Gain Card   [H]: Toggle FFT Spectrum HUD";
 	}
 
 	int last = -1;
@@ -768,8 +814,9 @@ void LiveView::apply_recommended_gains() {
 		s.message = "No gain recommendation available yet (drive robot first)";
 		return;
 	}
+	push_undo("AI recommended gains");
 	char msg[160];
-	std::snprintf(msg, sizeof msg, "[APPLIED] KP: %.2f->%.2f, KD: %.0f->%.0f, LAT: %.1f->%.1f",
+	std::snprintf(msg, sizeof msg, "[APPLIED] KP: %.2f->%.2f, KD: %.0f->%.0f, LAT: %.1f->%.1f (U to undo)",
 		s.params.steer_kp, gain_rec_.rec_kp,
 		s.params.steer_kd, gain_rec_.rec_kd,
 		s.params.lat_acc_max, gain_rec_.rec_lat_acc);
@@ -781,6 +828,112 @@ void LiveView::apply_recommended_gains() {
 	fwb_set_drive_params(&s.params);
 	s.message = msg;
 	std::printf("[GAIN APPLIED] %s\n", msg);
+}
+
+void LiveView::push_undo(const std::string& desc) {
+	if (!session)
+		return;
+	SessionState& s = *session;
+	if (!s.has_baseline) {
+		s.baseline_params = s.params;
+		s.has_baseline = true;
+	}
+	if (!s.undo_stack.empty()) {
+		const FwDriveParams& top = s.undo_stack.back().params;
+		if (top.base_mps == s.params.base_mps &&
+		    top.max_mps == s.params.max_mps &&
+		    top.accel == s.params.accel &&
+		    top.decel == s.params.decel &&
+		    top.steer_kp == s.params.steer_kp &&
+		    top.steer_kd == s.params.steer_kd &&
+		    top.pos_atten_gain == s.params.pos_atten_gain &&
+		    top.pit_in_m == s.params.pit_in_m &&
+		    top.target_shift == s.params.target_shift &&
+		    top.yaw_kp == s.params.yaw_kp &&
+		    top.yaw_ki == s.params.yaw_ki &&
+		    top.lat_acc_max == s.params.lat_acc_max &&
+		    top.target_curve_gain == s.params.target_curve_gain &&
+		    top.slalom_ratio == s.params.slalom_ratio &&
+		    top.brake_margin_m == s.params.brake_margin_m &&
+		    top.fan_en == s.params.fan_en) {
+			return; // already top of stack
+		}
+	}
+	s.undo_stack.push_back({s.params, desc});
+	if (s.undo_stack.size() > 50) {
+		s.undo_stack.erase(s.undo_stack.begin());
+	}
+	s.redo_stack.clear();
+}
+
+void LiveView::undo_gains() {
+	if (!session)
+		return;
+	SessionState& s = *session;
+	if (s.undo_stack.empty()) {
+		s.message = "[UNDO] No previous gains to undo";
+		return;
+	}
+	ParamSnapshot prev = s.undo_stack.back();
+	s.undo_stack.pop_back();
+
+	s.redo_stack.push_back({s.params, "Current"});
+	if (s.redo_stack.size() > 50)
+		s.redo_stack.erase(s.redo_stack.begin());
+
+	s.params = prev.params;
+	fwb_set_drive_params(&s.params);
+
+	char msg[160];
+	std::snprintf(msg, sizeof msg, "[UNDO: %s] Restored: KP=%.3f, KD=%.0f, LAT=%.1f (Undo left: %d | Shift+U: baseline)",
+		prev.desc.empty() ? "Previous" : prev.desc.c_str(),
+		s.params.steer_kp, s.params.steer_kd, s.params.lat_acc_max,
+		static_cast<int>(s.undo_stack.size()));
+	s.message = msg;
+	std::printf("%s\n", msg);
+}
+
+void LiveView::redo_gains() {
+	if (!session)
+		return;
+	SessionState& s = *session;
+	if (s.redo_stack.empty()) {
+		s.message = "[REDO] No redos available";
+		return;
+	}
+	ParamSnapshot nxt = s.redo_stack.back();
+	s.redo_stack.pop_back();
+
+	s.undo_stack.push_back({s.params, "Before redo"});
+
+	s.params = nxt.params;
+	fwb_set_drive_params(&s.params);
+
+	char msg[160];
+	std::snprintf(msg, sizeof msg, "[REDO] Restored: KP=%.3f, KD=%.0f, LAT=%.1f (Redo left: %d)",
+		s.params.steer_kp, s.params.steer_kd, s.params.lat_acc_max,
+		static_cast<int>(s.redo_stack.size()));
+	s.message = msg;
+	std::printf("%s\n", msg);
+}
+
+void LiveView::revert_to_baseline() {
+	if (!session)
+		return;
+	SessionState& s = *session;
+	if (!s.has_baseline) {
+		s.message = "[REVERT] Baseline not available";
+		return;
+	}
+	push_undo("Before revert to baseline");
+	s.params = s.baseline_params;
+	fwb_set_drive_params(&s.params);
+
+	char msg[160];
+	std::snprintf(msg, sizeof msg, "[REVERT BASELINE] Restored startup gains: KP=%.3f, KD=%.0f, v=%.2f (S: Save to drive.c)",
+		s.params.steer_kp, s.params.steer_kd, s.params.base_mps);
+	s.message = msg;
+	std::printf("%s\n", msg);
 }
 
 void LiveView::update_live_fft() {
@@ -1013,7 +1166,7 @@ std::string LiveView::format_gain_recommendation_hud() const {
 		"Action : %s\n"
 		"Gains  : KP  %5.2f -> %5.2f (%+5.2f)   KD  %4.0f -> %4.0f [Ideal %3.0f]\n"
 		"         LAT %5.2f -> %5.2f (%+5.2f)   YAW %5.2f -> %5.2f (%+5.2f)",
-		session ? "Press G to Apply" : "Auto-Analysis",
+		session ? "Press G: Apply / U: Undo" : "Auto-Analysis",
 		g.valid ? g.status_label.c_str() : "MONITORING OSCILLATIONS",
 		fft_str,
 		g.max_lat_mm, g.rms_lat_mm, g.max_beta_deg, g.weave_dps,
