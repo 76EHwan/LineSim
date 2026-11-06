@@ -1152,12 +1152,12 @@ public:
 					best_.lat = std::clamp(best_.lat + d_lat_, 10.0, max_lat_);
 					probe_mode_ = ProbeMode::LAT;
 					if (by_streak) {
-						last_ = fmt("Map #%d: STREAK PASS! Consecutive %d/%d (>=2/3 of Window) at %.2f m/s (lat=%.2f) -> NEXT STEP: lat_acc_max UP %.2f -> %.2f m/s2!",
+						last_ = fmt("Map #%d: STREAK PASS! Consecutive %d/%d (>=2/3 of Window) at %.2f m/s  -> NEXT STEP: lat_acc_max UP %.2f -> %.2f m/s2!",
 							total_maps_, target_streak, win_max, old_v, old_lat, old_lat, best_.lat);
 						std::snprintf(log_buf, sizeof log_buf, "#%03d [STREAK >=2/3: %d/%d] lat: %.2f->%.2f m/s2",
 							total_maps_, target_streak, win_max, old_lat, best_.lat);
 					} else {
-						last_ = fmt("Map #%d: %d/%d Window PASS (Err %.1f%% <= %.0f%% [%dP/%dH/%dF]) at %.2f m/s (lat=%.2f) -> NEXT STEP: lat_acc_max UP %.2f -> %.2f m/s2!",
+						last_ = fmt("Map #%d: %d/%d Window PASS (Err %.1f%% <= %.0f%% [%dP/%dH/%dF]) at %.2f m/s  -> NEXT STEP: lat_acc_max UP %.2f -> %.2f m/s2!",
 							total_maps_, win_max, win_max, fr_pct, max_fail_pct_, p_cnt, h_cnt, f_cnt, old_v, old_lat, old_lat, best_.lat);
 						std::snprintf(log_buf, sizeof log_buf, "#%03d [WIN %d: Err %.0f%%<=%.0f%%] lat: %.2f->%.2f m/s2",
 							total_maps_, win_max, fr_pct, max_fail_pct_, old_lat, best_.lat);
@@ -1167,12 +1167,12 @@ public:
 					reset_dv_on_success();
 					v_ = old_v + dv_up();
 					if (by_streak) {
-						last_ = fmt("Map #%d: STREAK PASS! Consecutive %d/%d (>=2/3) at lat=%.2f (max) -> NEXT STEP: speed UP %.2f -> %.2f m/s (step: %.3f)!",
+						last_ = fmt("Map #%d: STREAK PASS! Consecutive %d/%d (>=2/3) at (max) -> NEXT STEP: speed UP %.2f -> %.2f m/s (step: %.3f)!",
 							total_maps_, target_streak, win_max, old_lat, old_v, v_, dv_);
 						std::snprintf(log_buf, sizeof log_buf, "#%03d [STREAK >=2/3: %d/%d] %.2f->%.2fm/s (dv:%.3f)",
 							total_maps_, target_streak, win_max, old_v, v_, dv_);
 					} else {
-						last_ = fmt("Map #%d: %d/%d Window PASS (Err %.1f%% <= %.0f%% [%dP/%dH/%dF]) at lat=%.2f -> NEXT STEP: speed UP %.2f -> %.2f m/s (step: %.3f)!",
+						last_ = fmt("Map #%d: %d/%d Window PASS (Err %.1f%% <= %.0f%% [%dP/%dH/%dF]) at -> NEXT STEP: speed UP %.2f -> %.2f m/s (step: %.3f)!",
 							total_maps_, win_max, win_max, fr_pct, max_fail_pct_, p_cnt, h_cnt, f_cnt, old_lat, old_v, v_, dv_);
 						std::snprintf(log_buf, sizeof log_buf, "#%03d [WIN %d: Err %.0f%%<=%.0f%%] %.2f->%.2fm/s (dv:%.3f)",
 							total_maps_, win_max, fr_pct, max_fail_pct_, old_v, v_, dv_);
@@ -1325,7 +1325,7 @@ public:
 			std::snprintf(log_buf, sizeof log_buf, "#%03d [HEALED:%s %zu/%d] %.2fm/s (Err:%.1f%%<=%.0f%%) | 3:%.2fs",
 				total_maps_, heal_role.c_str(), cur_win_cnt, step_need, v_, win_err_pct, max_fail_pct_, lap4_s);
 		} else {
-			last_ = fmt("Map #%d PASS (Window %zu/%d: Err %.1f%% <= %.0f%% [%d/%dF] | Streak %d/%d [2/3]) at %.2f m/s (lat=%.2f) | 3rd: %.2fs (%+.2fm)",
+			last_ = fmt("Map #%d PASS (Window %zu/%d: Err %.1f%% <= %.0f%% [%d/%dF] | Streak %d/%d [2/3]) at %.2f m/s  | 3rd: %.2fs (%+.2fm)",
 				total_maps_, cur_win_cnt, step_need, win_err_pct, max_fail_pct_, fails_in_window(), max_allowed_fails, streak_, target_streak, v_, best_.lat, lap4_s, dist_diff);
 			std::snprintf(log_buf, sizeof log_buf, "#%03d [PASS %zu/%d (S:%d/%d Err:%.1f%%)] %.2fm/s | 3:%.2fs",
 				total_maps_, cur_win_cnt, step_need, streak_, target_streak, win_err_pct, v_, lap4_s);
@@ -1363,7 +1363,7 @@ public:
 			window_.size(), target_win_, pass_rate_pct(), passes_in_window(), need_sr_pct,
 			heal_rate_pct(), heals_in_window(), win_err_pct, fails_in_window(), max_allowed_fails, max_fail_pct_,
 			total_passes_, total_healed_, total_fails_));
-		v.push_back(fmt("Active Gains: kp=%.3f kd=%.0f lat=%.2f brk=%.2fm shf=%.2f crv=%.2f",
+		v.push_back(fmt("Active Gains: kp=%.3f kd=%.0f brk=%.2fm shf=%.2f crv=%.2f",
 			best_.kp, best_.kd / dt, best_.lat, best_.brake_margin, best_.target_shift, best_.target_curve_gain));
 		if (prev_passed_.valid) {
 			if (probe_mode_ == ProbeMode::LAT) {
@@ -1375,10 +1375,10 @@ public:
 			}
 		} else {
 			if (probe_mode_ == ProbeMode::LAT) {
-				v.push_back(fmt("Step Probe [LAT-UP] at %.2f m/s (lat=%.2f): Streak %d/%d [2/3] OR Window Err %.1f%% <= %.0f%% (Next: Lat-Up +%.2f m/s2)",
+				v.push_back(fmt("Step Probe [LAT-UP] at %.2f m/s : Streak %d/%d [2/3] OR Window Err %.1f%% <= %.0f%% (Next: Lat-Up +%.2f m/s2)",
 					v_, best_.lat, streak_, target_streak, win_err_pct, max_fail_pct_, d_lat_));
 			} else {
-				v.push_back(fmt("Step Probe [SPEED-UP] at %.2f m/s (lat=%.2f): Streak %d/%d [2/3] OR Window Err %.1f%% <= %.0f%% (Step dv: %.3f)",
+				v.push_back(fmt("Step Probe [SPEED-UP] at %.2f m/s : Streak %d/%d [2/3] OR Window Err %.1f%% <= %.0f%% (Step dv: %.3f)",
 					v_, best_.lat, streak_, target_streak, win_err_pct, max_fail_pct_, dv_));
 			}
 		}
@@ -1502,7 +1502,6 @@ bool save_drive_params_to_firmware_file(const FwDriveParams& p, std::string* out
 		"\n\t.target_shift_val = %.2ff,"
 		"\n\t.yaw_gain_p = %.2ff,"
 		"\n\t.yaw_gain_i = %.1ff,"
-		"\n\t.lat_acc_max = %.2ff,"
 		"\n\t.target_curve_gain = %.2ff,"
 		"\n\t.slalom_ratio = %.2ff,"
 		"\n\t.brake_margin_m = %.2ff,\n",
@@ -1512,7 +1511,6 @@ bool save_drive_params_to_firmware_file(const FwDriveParams& p, std::string* out
 		p.pit_in_m > 0 ? p.pit_in_m : 0.15f, p.fan_en,
 		p.target_shift,
 		p.yaw_kp, p.yaw_ki,
-		p.lat_acc_max,
 		p.target_curve_gain,
 		p.slalom_ratio,
 		p.brake_margin_m > 0 ? p.brake_margin_m : 0.12f
@@ -1584,7 +1582,6 @@ bool load_drive_params_from_firmware_file(FwDriveParams* p, std::string* out_pat
 			extract(".target_shift_val", &p->target_shift);
 			extract(".yaw_gain_p", &p->yaw_kp);
 			extract(".yaw_gain_i", &p->yaw_ki);
-			extract(".lat_acc_max", &p->lat_acc_max);
 			extract(".target_curve_gain", &p->target_curve_gain);
 			extract(".slalom_ratio", &p->slalom_ratio);
 			extract(".brake_margin_m", &p->brake_margin_m);
@@ -1608,7 +1605,7 @@ bool apply_param(FwDriveParams* p, const std::string& key, double v) {
 	else if (key == "fan_en") p->fan_en = (int) v;
 	else if (key == "yaw_kp") p->yaw_kp = (float) v;              // cascade steering, inner gyro loop
 	else if (key == "yaw_ki") p->yaw_ki = (float) v;
-	else if (key == "lat_acc_max") p->lat_acc_max = (float) v;
+	else if (key == "lat_acc_max") /* deprecated/ignored */ ;
 	else if (key == "target_curve_gain") p->target_curve_gain = (float) v;   // drive 3/4: target_pos x gain in curves
 	else if (key == "slalom_ratio") p->slalom_ratio = (float) v;             // drive 4: 45 deg speed ratio
 	else if (key == "brake_margin_m" || key == "brake_margin") p->brake_margin_m = (float) v;
@@ -1715,11 +1712,11 @@ static bool spawn_eval_worker(const std::string& exe_path, const std::string& tr
 	char buf[300];
 	std::snprintf(buf, sizeof buf,
 		" --set base_mps=%.3f --set steer_kp=%.4f --set steer_kd_s=%.4f "
-		"--set lat_acc_max=%.2f --set brake_margin_m=%.2f "
+		"--set brake_margin_m=%.2f "
 		"--set target_shift=%.2f --set target_curve_gain=%.2f "
 		"--set slalom_ratio=%.2f --set yaw_kp=%.3f --set yaw_ki=%.3f",
 		speed, ts.kp, ts.kd,
-		ts.lat, ts.brake_margin,
+		ts.brake_margin,
 		ts.target_shift, ts.target_curve_gain,
 		ts.sl, ts.yaw_kp, ts.yaw_ki);
 	cmd += buf;
@@ -3268,7 +3265,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 				TuneSet from;
 				from.kp = session.params.steer_kp;
 				from.kd = session.params.steer_kd * dt;
-				from.lat = session.params.lat_acc_max;
+				from.lat = 14.77;
 				from.sl = session.params.slalom_ratio;
 				from.target_shift = session.params.target_shift;
 				from.target_curve_gain = session.params.target_curve_gain;
@@ -3285,7 +3282,6 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 				session.params.base_mps = static_cast<float>(v_mps);
 				session.params.steer_kp = static_cast<float>(std::round(ts.kp * 1000.0) / 1000.0);
 				session.params.steer_kd = static_cast<float>(ts.kd / dt);
-				session.params.lat_acc_max = static_cast<float>(ts.lat);
 				session.params.slalom_ratio = static_cast<float>(ts.sl);
 				session.params.target_shift = static_cast<float>(ts.target_shift);
 				session.params.target_curve_gain = static_cast<float>(ts.target_curve_gain);
@@ -3354,7 +3350,6 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 						std::printf("    %s.base_mps%s         = %s%.2ff%s,\n", col::Cyn, col::Rst, col::Yel, session.params.base_mps, col::Rst);
 						std::printf("    %s.steer_gain_p%s     = %s%.3ff%s,\n", col::Cyn, col::Rst, col::Grn, session.params.steer_kp, col::Rst);
 						std::printf("    %s.steer_gain_d%s     = %s%.1ff%s,   %s(derivative kd_s = %.4fs)%s\n", col::Cyn, col::Rst, col::Grn, session.params.steer_kd, col::Rst, col::Dim, final_set.kd, col::Rst);
-						std::printf("    %s.lat_acc_max%s      = %s%.2ff%s,   %s(lateral grip limit)%s\n", col::Cyn, col::Rst, col::Mag, session.params.lat_acc_max, col::Rst, col::Dim, col::Rst);
 						std::printf("    %s.brake_margin_m%s   = %s%.2ff%s,\n", col::Cyn, col::Rst, col::Yel, session.params.brake_margin_m, col::Rst);
 						std::printf("    %s.target_shift_val%s = %s%.2ff%s,\n", col::Cyn, col::Rst, col::Wht, session.params.target_shift, col::Rst);
 						std::printf("    %s.target_curve_gain%s= %s%.2ff%s,\n", col::Cyn, col::Rst, col::Wht, session.params.target_curve_gain, col::Rst);
@@ -3393,8 +3388,8 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 
 					char line[260];
 					std::snprintf(line, sizeof line,
-						"endless [E] stopped: base_mps %.2f m/s (lat=%.2f) | %s",
-						final_v, final_set.lat, win_reason.c_str());
+						"endless [E] stopped: base_mps %.2f m/s | %s",
+						final_v, win_reason.c_str());
 					std::string saved_path;
 					if (save_drive_params_to_firmware_file(session.params, &saved_path)) {
 						session.message = "endless [E] ended: winning parameters saved to drive.c!";
@@ -3404,7 +3399,6 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 							std::printf("%s%s================================================================================%s\n", col::Bold, col::Cyn, col::Rst);
 							std::printf("  Selection Reason: %s%s%s\n", col::Yel, win_reason.c_str(), col::Rst);
 							std::printf("  Base Speed      : %s%s%.2f m/s%s\n", col::Bold, col::Yel, session.params.base_mps, col::Rst);
-							std::printf("  Grip Limit (lat): %s%s%.2ff%s\n", col::Bold, col::Mag, session.params.lat_acc_max, col::Rst);
 							std::printf("  Steer Gains     : kp=%.3f, kd=%.1f (derivative=%.4fs)\n",
 								session.params.steer_kp, session.params.steer_kd, final_set.kd);
 							std::printf("  Brake Margin    : %.2fm, Target Shift: %.2f\n",
@@ -3652,14 +3646,14 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 							if (save_drive_params_to_firmware_file(session.params, &path_out)) {
 								char save_msg[180];
 								std::snprintf(save_msg, sizeof save_msg,
-									"[SAVED] BEST (all renewed: %s, dist %+.2fm) v=%.2f kp=%.1f kd=%.0f lat=%.1f brk=%.2f shf=%.2f",
+									"[SAVED] BEST (all renewed: %s, dist %+.2fm) v=%.2f kp=%.1f kd=%.0f brk=%.2f shf=%.2f",
 									bayes_tuner.best_laps().c_str(), bayes_tuner.best_dist_diff(),
 									session.params.base_mps, session.params.steer_kp, session.params.steer_kd,
-									session.params.lat_acc_max, session.params.brake_margin_m, session.params.target_shift);
+									session.params.brake_margin_m, session.params.target_shift);
 								session.history.push_back(save_msg);
 								if (!opt.quiet) {
 									std::printf("%s[%8.3f s]%s %s%s[SAVED] BEST%s (all renewed: %s%s%s, dist %s%+.2fm%s) "
-										"v=%s%.2f%s kp=%s%.1f%s kd=%s%.0f%s lat=%s%.1f%s brk=%s%.2f%s shf=%s%.2f%s\n",
+										"v=%s%.2f%s kp=%s%.1f%s kd=%s%.0f%s brk=%s%.2f%s shf=%s%.2f%s\n",
 										col::Dim, sim->t(), col::Rst,
 										col::Bold, col::Grn, col::Rst,
 										col::Cyn, bayes_tuner.best_laps().c_str(), col::Rst,
@@ -3667,7 +3661,6 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 										col::Yel, session.params.base_mps, col::Rst,
 										col::Cyn, session.params.steer_kp, col::Rst,
 										col::Cyn, session.params.steer_kd, col::Rst,
-										col::Mag, session.params.lat_acc_max, col::Rst,
 										col::Grn, session.params.brake_margin_m, col::Rst,
 										col::Wht, session.params.target_shift, col::Rst);
 									std::fflush(stdout);
@@ -4142,38 +4135,38 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 							if (ab_lat_verified) {
 								if (streak_verified) {
 									std::snprintf(save_msg, sizeof save_msg,
-										"[SAVED STREAK >=2/3 LAT-UP] Passed %d/%d consecutive maps (>=2/3)! Next step: base_mps=%.2f m/s, lat_acc_max=%.2f m/s2",
-										(endless_tuner.target_window() * 2 + 2) / 3, endless_tuner.target_window(), session.params.base_mps, session.params.lat_acc_max);
+										"[SAVED STREAK >=2/3 LAT-UP] Passed %d/%d consecutive maps (>=2/3)! Next step: base_mps=%.2f m/s",
+										(endless_tuner.target_window() * 2 + 2) / 3, endless_tuner.target_window(), session.params.base_mps);
 								} else {
 									std::snprintf(save_msg, sizeof save_msg,
-										"[SAVED WINDOW ERR <=%.0f%% LAT-UP] %d maps passed error rate check! Next step: base_mps=%.2f m/s, lat_acc_max=%.2f m/s2",
-										endless_tuner.max_fail_rate_pct(), endless_tuner.target_window(), session.params.base_mps, session.params.lat_acc_max);
+										"[SAVED WINDOW ERR <=%.0f%% LAT-UP] %d maps passed error rate check! Next step: base_mps=%.2f m/s",
+										endless_tuner.max_fail_rate_pct(), endless_tuner.target_window(), session.params.base_mps);
 								}
 							} else if (ab_selected) {
 								std::snprintf(save_msg, sizeof save_msg,
-									"[SAVED STEP ADJUST] Error rate exceeded %.0f%% -> Reverted & probing next step: %.2f m/s (lat=%.2f, step dv: %.3f), kp=%.3f kd=%.0f",
-									endless_tuner.max_fail_rate_pct(), session.params.base_mps, session.params.lat_acc_max, endless_tuner.current_dv(), session.params.steer_kp, session.params.steer_kd);
+									"[SAVED STEP ADJUST] Error rate exceeded %.0f%% -> Reverted & probing next step: %.2f m/s (step dv: %.3f), kp=%.3f kd=%.0f",
+									endless_tuner.max_fail_rate_pct(), session.params.base_mps, endless_tuner.current_dv(), session.params.steer_kp, session.params.steer_kd);
 							} else if (ab_verified) {
 								std::snprintf(save_msg, sizeof save_msg,
-									"[SAVED A/B SPEED-UP >=2/3 WINNER] Speed-Up won >=2/3 of window! base_mps up from %.2f to %.2f m/s (lat=%.2f, step dv: %.3f)",
-									prev_v, session.params.base_mps, session.params.lat_acc_max, endless_tuner.current_dv());
+									"[SAVED A/B SPEED-UP >=2/3 WINNER] Speed-Up won >=2/3 of window! base_mps up from %.2f to %.2f m/s (step dv: %.3f)",
+									prev_v, session.params.base_mps, endless_tuner.current_dv());
 							} else if (streak_verified) {
 								std::snprintf(save_msg, sizeof save_msg,
-									"[SAVED STREAK >=2/3 PASS] Passed %d/%d consecutive maps (>=2/3 of Window)! Next step: base_mps %.2f -> %.2f m/s (lat=%.2f, step dv: %.3f)",
-									(endless_tuner.target_window() * 2 + 2) / 3, endless_tuner.target_window(), prev_v, session.params.base_mps, session.params.lat_acc_max, endless_tuner.current_dv());
+									"[SAVED STREAK >=2/3 PASS] Passed %d/%d consecutive maps (>=2/3 of Window)! Next step: base_mps %.2f -> %.2f m/s (step dv: %.3f)",
+									(endless_tuner.target_window() * 2 + 2) / 3, endless_tuner.target_window(), prev_v, session.params.base_mps, endless_tuner.current_dv());
 							} else if (verified) {
 								std::snprintf(save_msg, sizeof save_msg,
-									"[SAVED WINDOW ERR <=%.0f%% PASS] %d maps evaluated at %.2f m/s (Err <= %.0f%%) -> Next step: base_mps up to %.2f m/s (lat=%.2f)",
-									endless_tuner.max_fail_rate_pct(), endless_tuner.target_window(), prev_v, endless_tuner.max_fail_rate_pct(), session.params.base_mps, session.params.lat_acc_max);
+									"[SAVED WINDOW ERR <=%.0f%% PASS] %d maps evaluated at %.2f m/s (Err <= %.0f%%) -> Next step: base_mps up to %.2f m/s ",
+									endless_tuner.max_fail_rate_pct(), endless_tuner.target_window(), prev_v, endless_tuner.max_fail_rate_pct(), session.params.base_mps);
 							} else if (recovered) {
 								std::snprintf(save_msg, sizeof save_msg,
 									"[SAVED RECOVERED] %d maps passed at %.2f m/s -> base_mps recovered to %.2f m/s",
 									endless_tuner.recover_window(), prev_v, session.params.base_mps);
 							} else if (healed) {
 								std::snprintf(save_msg, sizeof save_msg,
-									"[SAVED AI-HEALED] Map #%zu healed [%s] at %.2f m/s! New gains: kp=%.3f kd=%.0f lat=%.2f brk=%.2f",
+									"[SAVED AI-HEALED] Map #%zu healed [%s] at %.2f m/s! New gains: kp=%.3f kd=%.0f brk=%.2f",
 									map_no, healed_role.c_str(), session.params.base_mps,
-									session.params.steer_kp, session.params.steer_kd, session.params.lat_acc_max, session.params.brake_margin_m);
+									session.params.steer_kp, session.params.steer_kd, session.params.brake_margin_m);
 							} else {
 								std::snprintf(save_msg, sizeof save_msg,
 									"[SAVED] Map #%zu at %.2f m/s (>= start_v) -> base_mps adjusted to %.2f m/s",
@@ -4183,14 +4176,13 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 							if (!opt.quiet) {
 								if (healed) {
 									std::printf("%s[%8.3f s]%s %s%s[SAVED AI-HEALED]%s Map #%zu healed %s[%s]%s at %s%s%.2f m/s%s! "
-										"New gains: kp=%s%.3f%s kd=%s%.0f%s lat=%s%.2f%s brk=%s%.2f%s\n",
+										"New gains: kp=%s%.3f%s kd=%s%.0f%s brk=%s%.2f%s\n",
 										col::Dim, sim->t(), col::Rst,
 										col::Bold, col::Mag, col::Rst, map_no,
 										col::Yel, healed_role.c_str(), col::Rst,
 										col::Bold, col::Yel, session.params.base_mps, col::Rst,
 										col::Cyn, session.params.steer_kp, col::Rst,
 										col::Cyn, session.params.steer_kd, col::Rst,
-										col::Mag, session.params.lat_acc_max, col::Rst,
 										col::Grn, session.params.brake_margin_m, col::Rst);
 								} else {
 									std::printf("%s[%8.3f s]%s %s%s%s\n",

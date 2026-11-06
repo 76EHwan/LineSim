@@ -8,7 +8,7 @@
 #include "motor.h"
 #include "drive.h"
 #include "sensor.h"
-#include "lsm6ds3tr-c.h"
+#include "lsm6ds.h"
 #include "sd_ui.h"
 #include "menu.h"
 #include "user_init.h"
@@ -26,7 +26,7 @@ void LPTIM3_IRQ_Handler(void);  /* buzzer.c */
 
 void fwb_systick(void) {
 	/* stm32h7xx_it.c SysTick_Handler, USER CODE SysTick_IRQn 0: IMU read every IMU_READ_DIV ms
-	   (lsm6ds3tr-c.h; firmware versions without the macro read every 10 ms) */
+	   (lsm6ds.h; firmware versions without the macro read every 10 ms) */
 #ifndef IMU_READ_DIV
 #define IMU_READ_DIV 10
 #endif
@@ -198,9 +198,8 @@ void fwb_get_drive_params(FwDriveParams *p) {
 #ifdef DRIVE_HAS_CASCADE_STEER
 	p->yaw_kp = driveData.yaw_gain_p;
 	p->yaw_ki = driveData.yaw_gain_i;
-	p->lat_acc_max = driveData.lat_acc_max;
 #else
-	p->yaw_kp = p->yaw_ki = p->lat_acc_max = 0;
+	p->yaw_kp = p->yaw_ki = 0;
 #endif
 #ifdef DRIVE_HAS_TARGET_CURVE_GAIN
 	p->target_curve_gain = driveData.target_curve_gain;
@@ -233,7 +232,6 @@ void fwb_set_drive_params(const FwDriveParams *p) {
 #ifdef DRIVE_HAS_CASCADE_STEER
 	driveData.yaw_gain_p = p->yaw_kp;
 	driveData.yaw_gain_i = p->yaw_ki;
-	driveData.lat_acc_max = p->lat_acc_max;
 #endif
 #ifdef DRIVE_HAS_TARGET_CURVE_GAIN
 	driveData.target_curve_gain = p->target_curve_gain;

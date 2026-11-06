@@ -927,41 +927,103 @@ void Viewer::render(const ViewerHud& hud) {
 	const bool show_miss_sensors = (focused_miss_idx_ >= 0 && focused_miss_idx_ < (int)marker_diags_.size());
 	const MarkerVisualInfo* miss_m = show_miss_sensors ? &marker_diags_[focused_miss_idx_] : nullptr;
 
-	const int cell = std::max(14, width_ / 60), gap = 3, h = cell * 2;
-	const int n = 18, total = n * (cell + gap) + 2 * cell;
-	int x = (width_ - total) / 2, y = height_ - h - 16;   // top center
-
-	if (miss_m) {
-		mjr_rectangle({x - 12, y - 24, total + 24, h + 34}, 0.08f, 0.04f, 0.05f, 0.88f);
-		char top_title[160];
-		std::snprintf(top_title, sizeof top_title,
-			"[MISREAD MOMENT SENSORS #%d '%c'] M_L:%d%% (%s) | M_R:%d%% (%s)",
-			miss_m->marker_idx, miss_m->want,
-			(int)(miss_m->sensors[16] * 100.0f + 0.5f), miss_m->sensor_on[16] ? "ON" : "OFF",
-			(int)(miss_m->sensors[17] * 100.0f + 0.5f), miss_m->sensor_on[17] ? "ON" : "OFF");
-		mjrRect title_r{x - 10, y - 22, total + 20, 20};
-		mjr_overlay(mjFONT_NORMAL, mjGRID_TOPLEFT, title_r, top_title, nullptr, &im_->con);
-	} else {
-		mjr_rectangle({x - 8, y - 8, total + 16, h + 16}, 0.05f, 0.05f, 0.06f, 0.75f);
+	// 18개 센서의 normalized 정수값(0~255) 및 1D Convolution 결과 계산
+	int norm_vals[18] = {};
+	for (int i = 0; i < 18; i++) {
+		float v = miss_m ? miss_m->sensors[i] : hud.sensors[i];
+		norm_vals[i] = static_cast<int>(std::clamp(v * 255.0f + 0.5f, 0.0f, 255.0f));
 	}
 
-	auto draw_cell = [&](int i, int px) {
-		float v = miss_m ? miss_m->sensors[i] : hud.sensors[i];
-		bool on = miss_m ? miss_m->sensor_on[i] : hud.sensor_on[i];
+	int conv_vals[18] = {};
+	for (int i = 0; i < 16; i++) {
+		int prev_v = (i > 0) ? norm_vals[i - 1] : norm_vals[16];
+		int curr_v = norm_vals[i];
+		int next_v = (i < 15) ? norm_vals[i + 1] : norm_vals[17];
+		conv_vals[i] = -prev_v + 2 * curr_v - next_v;
+	}
+	conv_vals[16] = 2 * norm_vals[16] - norm_vals[0];
+	conv_vals[17] = 2 * norm_vals[17] - norm_vals[15];
+
+	// 좌측 HUD(약 380px)와 우측 HUD(약 290px)를 절대 가리지 않도록 중앙 안전 영역 계산
+	const int left_hud_limit = 385;
+	const int right_hud_limit = width_ - 295;
+	const int safe_width = right_hud_limit - left_hud_limit;
+
+	// safe_width가 820px 이상이면 가로 18칸 1줄 배치, 820px 미만(1400/1280 해상도)이면 좌우 9칸 2단 배치로 절대 겹침 방지
+	const bool use_single_row = (safe_width >= 820);
+	const int cols = use_single_row ? 18 : 9;
+	const int cell = std::clamp((safe_width - 40) / cols, 38, 44);
+	const int gap = 2;
+	const int total_w = cols * cell + (cols - 1) * gap;
+	const int center_x = (width_ - total_w) / 2;
+
+	// MuJoCo mjFONT_NORMAL 높이에 맞춘 3줄 텍스트 수용 높이 (Norm, Conv, State)
+	const int lh = static_cast<int>(im_->con.charHeight * 0.9 + 0.5);
+	const int row_h = lh * 3 + 6;
+	const int total_h = use_single_row ? row_h : (row_h * 2 + 6);
+	const int start_y = height_ - total_h - 10;
+
+	// 전체 배경 패널
+	mjr_rectangle({center_x - 6, start_y - 4, total_w + 12, total_h + 8}, 0.04f, 0.04f, 0.05f, 0.92f);
+
+	auto draw_sensor_cell = [&](int idx, int px, int py, const char* label) {
+		float v = miss_m ? miss_m->sensors[idx] : hud.sensors[idx];
+		bool on = miss_m ? miss_m->sensor_on[idx] : hud.sensor_on[idx];
+		int n_val = norm_vals[idx];
+		int c_val = conv_vals[idx];
+
+		// 활성화(State=1) 시 붉은색 외곽 강조 테두리
 		if (on) {
-			if (miss_m && (i == 16 || i == 17))
-				mjr_rectangle({px - 2, y - 2, cell + 4, h + 4}, 0.2f, 1.0f, 0.3f, 1);
-			else
-				mjr_rectangle({px - 2, y - 2, cell + 4, h + 4}, 0.95f, 0.25f, 0.2f, 1);
+			mjr_rectangle({px - 1, py - 1, cell + 2, row_h + 2}, 0.95f, 0.25f, 0.2f, 1.0f);
 		}
-		mjr_rectangle({px, y, cell, h}, v, v, v, 1);
+
+		// 셀 배경 (센서 밝기 명암 반영)
+		float bg_lum = 0.08f + 0.35f * v;
+		mjr_rectangle({px, py, cell, row_h}, bg_lum * 0.85f, bg_lum, bg_lum * 1.05f, 0.92f);
+
+		// 칸 안에 3가지 데이터 텍스트 출력:
+		// 1행: Normalized 값 (0~255)
+		// 2행: Convolution 결과 (+/-)
+		// 3행: State 결과 (0 또는 1)
+		char cell_buf[48];
+		int c_clamped = (c_val > 999) ? 999 : (c_val < -99) ? -99 : c_val;
+		std::snprintf(cell_buf, sizeof cell_buf, "%3d\n%+3d\n  %d", n_val, c_clamped, on ? 1 : 0);
+
+		mjrRect r{px, py, cell + 4, row_h};
+		mjr_overlay(mjFONT_NORMAL, mjGRID_TOPLEFT, r, cell_buf, nullptr, &im_->con);
 	};
-	draw_cell(16, x);
-	x += cell + gap + cell;
-	for (int i = 0; i < 16; i++, x += cell + gap)
-		draw_cell(i, x);
-	x += cell;
-	draw_cell(17, x);
+
+	if (use_single_row) {
+		// 가로 18칸 한 줄 배치 (M_L, 0~15, M_R)
+		int cur_x = center_x;
+		draw_sensor_cell(16, cur_x, start_y, "L");
+		cur_x += cell + gap;
+		for (int i = 0; i < 16; i++) {
+			draw_sensor_cell(i, cur_x, start_y, nullptr);
+			cur_x += cell + gap;
+		}
+		draw_sensor_cell(17, cur_x, start_y, "R");
+	} else {
+		// 2단 콤팩트 배치 (좌우 텍스트 완전 보호)
+		// 윗줄: 좌측 센서들 (M_L, 0~7)
+		int cur_x = center_x;
+		int y_top = start_y + row_h + 4;
+		draw_sensor_cell(16, cur_x, y_top, "L");
+		cur_x += cell + gap;
+		for (int i = 0; i < 8; i++) {
+			draw_sensor_cell(i, cur_x, y_top, nullptr);
+			cur_x += cell + gap;
+		}
+
+		// 아랫줄: 우측 센서들 (8~15, M_R)
+		cur_x = center_x;
+		int y_bot = start_y;
+		for (int i = 8; i < 16; i++) {
+			draw_sensor_cell(i, cur_x, y_bot, nullptr);
+			cur_x += cell + gap;
+		}
+		draw_sensor_cell(17, cur_x, y_bot, "R");
+	}
 
 	if (!shot_path_.empty()) {
 		std::vector<unsigned char> rgb(static_cast<size_t>(width_) * height_ * 3);

@@ -43,11 +43,9 @@ struct GainRecommendation {
 	bool valid = false;
 	float current_kp = 0.0f;
 	float current_kd = 0.0f;
-	float current_lat_acc = 0.0f;
 	float current_yaw_kp = 0.0f;
 	float rec_kp = 0.0f;
 	float rec_kd = 0.0f;
-	float rec_lat_acc = 0.0f;
 	float rec_yaw_kp = 0.0f;
 	double max_lat_mm = 0.0;
 	double rms_lat_mm = 0.0;

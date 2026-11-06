@@ -1,0 +1,46 @@
+base mps = 1.80
+max mps = 8.00
+accel = 5.50
+decel = 5.50
+steer kp = 22.40
+steer kd = 600.00
+pos atten gain = 0.00
+===================
+IDX	TYPE	DIST
+0	U	0.126 m	-7.6 deg
+1	L	0.192 m	0.3 deg
+2	L	0.768 m	-150.4 deg
+3	L	0.273 m	-2.0 deg
+4	L	0.160 m	-28.8 deg
+5	R	0.285 m	-4.7 deg
+6	R	0.169 m	29.7 deg
+7	R	0.719 m	5.0 deg
+8	L	0.205 m	22.3 deg
+9	R	0.241 m	-21.6 deg
+10	R	0.991 m	143.5 deg
+11	L	0.479 m	-2.4 deg
+12	L	0.161 m	-17.4 deg
+13	L	0.240 m	-6.3 deg
+14	L	0.739 m	-131.8 deg
+15	R	0.424 m	-3.6 deg
+16	L	1.049 m	187.5 deg
+17	L	0.146 m	-16.3 deg
+18	C	0.774 m	-6.9 deg
+19	R	0.230 m	0.4 deg
+20	R	1.239 m	204.2 deg
+21	C	0.277 m	-3.6 deg
+22	L	0.354 m	-3.4 deg
+23	L	0.360 m	-70.4 deg
+24	L	2.033 m	-5.7 deg
+25	R	1.015 m	-161.2 deg
+26	L	1.243 m	184.1 deg
+27	L	0.707 m	-108.6 deg
+28	L	0.683 m	1.9 deg
+29	L	0.376 m	-85.1 deg
+30	L	0.338 m	8.9 deg
+31	R	0.206 m	-24.5 deg
+32	L	0.398 m	80.7 deg
+33	R	0.453 m	-72.4 deg
+34	R	0.165 m	25.9 deg
+35	L	0.329 m	16.2 deg
+36	U	0.383 m	-2.9 deg

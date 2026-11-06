@@ -30,7 +30,7 @@ set(FW_SOURCES
   Main/Src/user_init.c
   Drivers/BSP/Button/button.c
   Drivers/BSP/FUET-8540/buzzer.c
-  Drivers/BSP/LSM6DS3TR-C/lsm6ds3tr-c.c
+  Drivers/BSP/LSM6DS/lsm6ds.c
   Drivers/BSP/SDcard/SDcard.c
 )
 
@@ -103,7 +103,7 @@ set(FW_INCLUDE_DIRS
   ${FW_DIR}/Main/Inc
   ${FW_DIR}/Drivers/BSP/Button
   ${FW_DIR}/Drivers/BSP/FUET-8540
-  ${FW_DIR}/Drivers/BSP/LSM6DS3TR-C
+  ${FW_DIR}/Drivers/BSP/LSM6DS
   ${FW_DIR}/Drivers/BSP/DRV8316C
   ${FW_DIR}/Drivers/BSP/MCT8316Z
   ${FW_DIR}/Drivers/BSP/MT6701

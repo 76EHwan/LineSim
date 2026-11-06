@@ -43,7 +43,7 @@ void  fwb_install_sensor_calibration(const uint16_t white[18], const uint16_t bl
 
 typedef struct {
 	float base_mps, max_mps, accel, decel, steer_kp, steer_kd, pos_atten_gain, pit_in_m, target_shift;
-	float yaw_kp, yaw_ki, lat_acc_max;   /* cascade steering (firmware with DRIVE_HAS_CASCADE_STEER, else ignored) */
+	float yaw_kp, yaw_ki;   /* cascade steering (firmware with DRIVE_HAS_CASCADE_STEER, else ignored) */
 	float target_curve_gain;             /* drive 3/4 target_pos x gain in curves (DRIVE_HAS_TARGET_CURVE_GAIN) */
 	float slalom_ratio;                  /* drive 4: 45 deg segments at base + (max - base) x ratio (DRIVE_HAS_SLALOM_RATIO) */
 	float brake_margin_m;                /* straight braking margin before curve [m] (DRIVE_HAS_BRAKE_MARGIN) */

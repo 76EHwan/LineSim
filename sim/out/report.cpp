@@ -421,8 +421,7 @@ void write_reports(const ScenarioOptions& opt, const ScenarioResult& res, const 
 	  << ", \"decel\": " << p.decel << ", \"steer_kp\": " << p.steer_kp << ", \"steer_kd\": " << p.steer_kd
 	  << ", \"pos_atten_gain\": " << p.pos_atten_gain << ", \"pit_in_m\": " << p.pit_in_m
 	  << ", \"target_shift\": " << p.target_shift << ", \"fan_en\": " << p.fan_en << ", \"yaw_kp\": " << p.yaw_kp
-	  << ", \"yaw_ki\": " << p.yaw_ki << ", \"lat_acc_max\": " << p.lat_acc_max
-	  << ", \"target_curve_gain\": " << p.target_curve_gain << ", \"slalom_ratio\": " << p.slalom_ratio << "},\n";
+	  << ", \"yaw_ki\": " << p.yaw_ki 	  << ", \"target_curve_gain\": " << p.target_curve_gain << ", \"slalom_ratio\": " << p.slalom_ratio << "},\n";
 	j << "  \"drives\": [\n";
 	for (size_t i = 0; i < res.drives.size(); i++) {
 		const DriveResult& d = res.drives[i];

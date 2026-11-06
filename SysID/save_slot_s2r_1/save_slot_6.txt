@@ -1,56 +1,45 @@
-base mps = 1.81
-max mps = 10.00
-accel = 7.50
-decel = 7.50
-steer kp = 20.58
-steer kd = 593.00
+base mps = 1.80
+max mps = 8.00
+accel = 5.50
+decel = 5.50
+steer kp = 22.40
+steer kd = 600.00
 pos atten gain = 0.00
-yaw kp = 0.600
-yaw ki = 0.000
-lat acc max = 13.90
-target shift = 0.38
-target curve gain = 1.42
-slalom ratio = 0.03
-brake margin = 0.24
 ===================
 IDX	TYPE	DIST
-0	U	0.167 m	1.0 deg
-1	L	0.192 m	-2.3 deg
-2	L	0.728 m	-133.6 deg
-3	L	0.286 m	-7.2 deg
-4	L	0.159 m	-29.4 deg
-5	R	0.296 m	-2.9 deg
-6	R	0.170 m	33.3 deg
-7	R	0.722 m	2.7 deg
-8	L	0.186 m	31.8 deg
-9	R	0.238 m	-25.4 deg
-10	L	0.108 m	19.4 deg
-11	R	0.907 m	148.8 deg
-12	L	0.509 m	4.1 deg
-13	L	0.174 m	-27.3 deg
-14	L	0.246 m	-3.9 deg
-15	L	0.726 m	-132.4 deg
-16	R	0.442 m	-9.1 deg
-17	L	0.990 m	157.7 deg
-18	L	0.163 m	-27.0 deg
-19	C	0.781 m	6.5 deg
-20	R	0.230 m	-3.4 deg
-21	R	1.177 m	207.8 deg
-22	C	0.361 m	9.2 deg
-23	L	0.091 m	9.2 deg
-24	L	0.277 m	-18.7 deg
-25	L	0.355 m	-47.9 deg
-26	L	2.057 m	-26.1 deg
-27	L	0.119 m	-35.5 deg
-28	L	0.144 m	-37.3 deg
-29	R	0.782 m	-110.9 deg
-30	L	1.229 m	199.9 deg
-31	L	0.748 m	-102.8 deg
-32	L	0.725 m	7.9 deg
-33	L	0.406 m	-65.8 deg
-34	L	0.386 m	-7.6 deg
-35	R	0.223 m	-29.6 deg
-36	L	0.450 m	60.8 deg
-37	R	0.473 m	-65.0 deg
-38	R	0.229 m	28.4 deg
-39	U	0.688 m	1.5 deg
+0	U	0.145 m	2.2 deg
+1	L	0.192 m	-2.8 deg
+2	L	0.761 m	-110.7 deg
+3	L	0.273 m	-2.6 deg
+4	L	0.158 m	-26.5 deg
+5	R	0.278 m	-4.3 deg
+6	R	0.173 m	35.9 deg
+7	R	0.715 m	4.5 deg
+8	L	0.205 m	33.4 deg
+9	R	0.238 m	-18.8 deg
+10	R	0.999 m	159.8 deg
+11	L	0.483 m	-6.8 deg
+12	L	0.162 m	-29.3 deg
+13	L	0.243 m	-9.0 deg
+14	L	0.750 m	-126.9 deg
+15	R	0.422 m	-3.2 deg
+16	L	1.031 m	162.1 deg
+17	L	0.143 m	-20.7 deg
+18	L	0.058 m	-24.1 deg
+19	C	0.712 m	-9.9 deg
+20	R	0.230 m	0.7 deg
+21	R	1.253 m	219.7 deg
+22	C	0.272 m	-15.9 deg
+23	L	0.360 m	4.2 deg
+24	L	0.376 m	-73.9 deg
+25	L	2.034 m	5.0 deg
+26	R	1.051 m	-187.9 deg
+27	L	1.247 m	201.7 deg
+28	L	0.737 m	-115.1 deg
+29	L	0.684 m	6.7 deg
+30	L	0.401 m	-77.3 deg
+31	L	0.352 m	10.8 deg
+32	R	0.200 m	-27.4 deg
+33	L	0.401 m	74.2 deg
+34	R	0.489 m	-72.3 deg
+35	U	0.970 m	47.5 deg

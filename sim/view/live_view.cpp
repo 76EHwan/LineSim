@@ -38,14 +38,13 @@ const ParamRow kRows[] = {
 	{"steer kp", &FwDriveParams::steer_kp, 0.001f, 0.0f, 200.0f, "%.3f"},
 	{"steer kd", &FwDriveParams::steer_kd, 0.01f, 0.0f, 2.0f, "%.3f s", true},
 	{"pos atten gain", &FwDriveParams::pos_atten_gain, 0.05f, 0.0f, 2.0f, "%.2f"},
+	{"pit-in dist", &FwDriveParams::pit_in_m, 0.01f, 0.0f, 1.0f, "%.2f m"},
 	{"target shift", &FwDriveParams::target_shift, 0.05f, 0.0f, 1.50f, "%.2f"},
+	{"yaw kp", &FwDriveParams::yaw_kp, 0.01f, 0.0f, 20.0f, "%.2f"},          // cascade (0 / 0 = plain PD)
+	{"yaw ki", &FwDriveParams::yaw_ki, 0.01f, 0.0f, 500.0f, "%.2f /s"},
 	{"tgt curve gain", &FwDriveParams::target_curve_gain, 0.1f, 0.0f, 5.0f, "x%.2f"},   // drive 3/4, in curves
 	{"slalom ratio", &FwDriveParams::slalom_ratio, 0.05f, 0.0f, 1.0f, "%.2f"},          // drive 4, 45 deg segments
 	{"brake margin", &FwDriveParams::brake_margin_m, 0.01f, 0.0f, 1.0f, "%.2f m"},       // straight braking margin
-	{"pit-in dist", &FwDriveParams::pit_in_m, 0.01f, 0.0f, 1.0f, "%.2f m"},
-	{"yaw kp", &FwDriveParams::yaw_kp, 0.01f, 0.0f, 20.0f, "%.2f"},          // cascade (0 / 0 = plain PD)
-	{"yaw ki", &FwDriveParams::yaw_ki, 0.01f, 0.0f, 500.0f, "%.2f /s"},
-	{"lat acc max", &FwDriveParams::lat_acc_max, 0.5f, 0.0f, 40.0f, "%.1f m/s2"},
 };
 constexpr int kRowCount = sizeof kRows / sizeof kRows[0];
 
@@ -461,7 +460,7 @@ std::string LiveView::session_panel() const {
 		for (int i = 0; i < kRowCount; i++) {
 			const float* f = &(s.params.*(kRows[i].field));
 			if (f == &s.params.base_mps || f == &s.params.steer_kp || f == &s.params.steer_kd ||
-				f == &s.params.lat_acc_max || f == &s.params.slalom_ratio)
+				f == &s.params.slalom_ratio)
 				continue;
 			char val[48];
 			std::snprintf(val, sizeof val, kRows[i].fmt, shown(s.params, kRows[i]));
@@ -816,13 +815,11 @@ void LiveView::apply_recommended_gains() {
 	}
 	push_undo("AI recommended gains");
 	char msg[160];
-	std::snprintf(msg, sizeof msg, "[APPLIED] KP: %.2f->%.2f, KD: %.0f->%.0f, LAT: %.1f->%.1f (U to undo)",
+	std::snprintf(msg, sizeof msg, "[APPLIED] KP: %.2f->%.2f, KD: %.0f->%.0f (U to undo)",
 		s.params.steer_kp, gain_rec_.rec_kp,
-		s.params.steer_kd, gain_rec_.rec_kd,
-		s.params.lat_acc_max, gain_rec_.rec_lat_acc);
+		s.params.steer_kd, gain_rec_.rec_kd);
 	s.params.steer_kp = gain_rec_.rec_kp;
 	s.params.steer_kd = gain_rec_.rec_kd;
-	s.params.lat_acc_max = gain_rec_.rec_lat_acc;
 	if (gain_rec_.rec_yaw_kp > 0.0f)
 		s.params.yaw_kp = gain_rec_.rec_yaw_kp;
 	fwb_set_drive_params(&s.params);
@@ -851,7 +848,6 @@ void LiveView::push_undo(const std::string& desc) {
 		    top.target_shift == s.params.target_shift &&
 		    top.yaw_kp == s.params.yaw_kp &&
 		    top.yaw_ki == s.params.yaw_ki &&
-		    top.lat_acc_max == s.params.lat_acc_max &&
 		    top.target_curve_gain == s.params.target_curve_gain &&
 		    top.slalom_ratio == s.params.slalom_ratio &&
 		    top.brake_margin_m == s.params.brake_margin_m &&
@@ -885,9 +881,9 @@ void LiveView::undo_gains() {
 	fwb_set_drive_params(&s.params);
 
 	char msg[160];
-	std::snprintf(msg, sizeof msg, "[UNDO: %s] Restored: KP=%.3f, KD=%.0f, LAT=%.1f (Undo left: %d | Shift+U: baseline)",
+	std::snprintf(msg, sizeof msg, "[UNDO: %s] Restored: KP=%.3f, KD=%.0f (Undo left: %d | Shift+U: baseline)",
 		prev.desc.empty() ? "Previous" : prev.desc.c_str(),
-		s.params.steer_kp, s.params.steer_kd, s.params.lat_acc_max,
+		s.params.steer_kp, s.params.steer_kd,
 		static_cast<int>(s.undo_stack.size()));
 	s.message = msg;
 	std::printf("%s\n", msg);
@@ -910,8 +906,8 @@ void LiveView::redo_gains() {
 	fwb_set_drive_params(&s.params);
 
 	char msg[160];
-	std::snprintf(msg, sizeof msg, "[REDO] Restored: KP=%.3f, KD=%.0f, LAT=%.1f (Redo left: %d)",
-		s.params.steer_kp, s.params.steer_kd, s.params.lat_acc_max,
+	std::snprintf(msg, sizeof msg, "[REDO] Restored: KP=%.3f, KD=%.0f (Redo left: %d)",
+		s.params.steer_kp, s.params.steer_kd,
 		static_cast<int>(s.redo_stack.size()));
 	s.message = msg;
 	std::printf("%s\n", msg);
@@ -1040,7 +1036,6 @@ void LiveView::update_gain_recommendation() {
 
 	const float cur_kp = cur_params.steer_kp;
 	const float cur_kd = cur_params.steer_kd;
-	const float cur_lat = cur_params.lat_acc_max;
 	const float cur_yaw = cur_params.yaw_kp;
 
 	const double max_lat = max_lat_seen_;
@@ -1050,7 +1045,6 @@ void LiveView::update_gain_recommendation() {
 
 	gain_rec_.current_kp = cur_kp;
 	gain_rec_.current_kd = cur_kd;
-	gain_rec_.current_lat_acc = cur_lat;
 	gain_rec_.current_yaw_kp = cur_yaw;
 	gain_rec_.max_lat_mm = max_lat;
 	gain_rec_.rms_lat_mm = rms_lat;
@@ -1060,7 +1054,6 @@ void LiveView::update_gain_recommendation() {
 	const float ideal_kd = std::max(80.0f, cur_kp * 28.0f);
 	float rec_kp = cur_kp;
 	float rec_kd = cur_kd;
-	float rec_lat = cur_lat;
 	float rec_yaw = cur_yaw;
 
 	const bool is_oversteer = (max_beta >= 22.0);
@@ -1089,14 +1082,7 @@ void LiveView::update_gain_recommendation() {
 			rec_kp = 13.3f;
 		}
 
-		if (cur_lat > 10.5f) {
-			rec_lat = std::clamp(cur_lat - 0.75f * (1.0f + (float)slip_sev), 9.0f, 15.0f);
-			char b[128];
-			std::snprintf(b, sizeof b, "Corner acc (%.1f) exceeds grip; lower to %.1f m/s2", cur_lat, rec_lat);
-			gain_rec_.diag_action = b;
-		} else {
-			gain_rec_.diag_action = "Boost damping KD & enable yaw_kp to suppress spin";
-		}
+		gain_rec_.diag_action = "Boost damping KD & enable yaw_kp to suppress spin";
 
 		if (cur_yaw < 0.15f) {
 			rec_yaw = 0.25f;
@@ -1139,7 +1125,6 @@ void LiveView::update_gain_recommendation() {
 
 	gain_rec_.rec_kp = std::round(rec_kp * 100.0f) / 100.0f;
 	gain_rec_.rec_kd = std::round(rec_kd);
-	gain_rec_.rec_lat_acc = std::round(rec_lat * 10.0f) / 10.0f;
 	gain_rec_.rec_yaw_kp = std::round(rec_yaw * 100.0f) / 100.0f;
 	gain_rec_.valid = (lat_samples_ > 30 || max_lat > 0.0);
 }
@@ -1165,7 +1150,7 @@ std::string LiveView::format_gain_recommendation_hud() const {
 		"Errors : Lat %4.1f mm (RMS %4.1f) | Beta %4.1f deg | Weave %3.0f dps\n"
 		"Action : %s\n"
 		"Gains  : KP  %5.2f -> %5.2f (%+5.2f)   KD  %4.0f -> %4.0f [Ideal %3.0f]\n"
-		"         LAT %5.2f -> %5.2f (%+5.2f)   YAW %5.2f -> %5.2f (%+5.2f)",
+		"         YAW %5.2f -> %5.2f (%+5.2f)",
 		session ? "Press G: Apply / U: Undo" : "Auto-Analysis",
 		g.valid ? g.status_label.c_str() : "MONITORING OSCILLATIONS",
 		fft_str,
@@ -1173,7 +1158,6 @@ std::string LiveView::format_gain_recommendation_hud() const {
 		g.valid ? g.diag_action.c_str() : "Tracking active",
 		g.current_kp, g.rec_kp, (g.rec_kp - g.current_kp),
 		g.current_kd, g.rec_kd, (g.rec_kp * 22.0f),
-		g.current_lat_acc, g.rec_lat_acc, (g.rec_lat_acc - g.current_lat_acc),
 		g.current_yaw_kp, g.rec_yaw_kp, (g.rec_yaw_kp - g.current_yaw_kp));
 
 	return std::string(card);

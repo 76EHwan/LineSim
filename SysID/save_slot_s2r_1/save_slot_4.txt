@@ -1,37 +1,52 @@
-base mps = 1.81
-max mps = 10.00
-accel = 7.50
-decel = 7.50
-steer kp = 20.58
-steer kd = 593.00
+base mps = 1.80
+max mps = 8.00
+accel = 5.50
+decel = 5.50
+steer kp = 22.40
+steer kd = 600.00
 pos atten gain = 0.00
-yaw kp = 0.600
-yaw ki = 0.000
-lat acc max = 13.90
-target shift = 0.38
-target curve gain = 1.42
-slalom ratio = 0.03
-brake margin = 0.24
 ===================
 IDX	TYPE	DIST
-0	U	0.159 m	2.5 deg
-1	L	0.212 m	-3.4 deg
-2	L	0.796 m	-134.2 deg
-3	L	0.283 m	-7.3 deg
-4	L	0.158 m	-30.1 deg
-5	R	0.281 m	4.7 deg
-6	R	0.162 m	32.3 deg
-7	R	0.722 m	3.6 deg
-8	L	0.194 m	28.6 deg
-9	R	0.241 m	-33.3 deg
-10	R	0.986 m	161.1 deg
-11	L	0.518 m	8.1 deg
-12	L	0.182 m	-33.8 deg
-13	L	0.236 m	-3.2 deg
-14	L	0.766 m	-128.0 deg
-15	R	0.450 m	-7.4 deg
-16	L	1.026 m	169.5 deg
-17	L	0.196 m	-23.3 deg
-18	C	0.782 m	-8.4 deg
-19	L	0.102 m	1.8 deg
-20	U	0.130 m	-4.6 deg
+0	U	0.158 m	-4.8 deg
+1	L	0.192 m	0.3 deg
+2	L	0.762 m	-139.6 deg
+3	L	0.277 m	-3.1 deg
+4	L	0.159 m	-24.3 deg
+5	R	0.283 m	-7.0 deg
+6	R	0.170 m	37.8 deg
+7	R	0.715 m	6.0 deg
+8	L	0.205 m	30.7 deg
+9	R	0.246 m	-19.3 deg
+10	L	0.077 m	-19.3 deg
+11	R	0.950 m	160.9 deg
+12	L	0.486 m	-12.1 deg
+13	L	0.162 m	-22.7 deg
+14	L	0.242 m	-6.9 deg
+15	L	0.757 m	-135.8 deg
+16	R	0.423 m	2.7 deg
+17	L	1.060 m	163.0 deg
+18	L	0.148 m	-19.1 deg
+19	C	0.787 m	-6.6 deg
+20	R	0.230 m	-1.1 deg
+21	R	1.251 m	201.6 deg
+22	C	0.297 m	-12.6 deg
+23	L	0.370 m	5.9 deg
+24	L	0.382 m	-79.4 deg
+25	L	1.518 m	8.8 deg
+26	L	0.521 m	-8.1 deg
+27	R	1.111 m	-168.4 deg
+28	L	1.281 m	201.2 deg
+29	L	0.824 m	-93.7 deg
+30	L	0.683 m	4.0 deg
+31	L	0.082 m	-21.7 deg
+32	L	0.360 m	-56.9 deg
+33	L	0.350 m	-12.5 deg
+34	R	0.212 m	-21.2 deg
+35	L	0.431 m	42.4 deg
+36	R	0.516 m	-81.0 deg
+37	L	1.018 m	73.9 deg
+38	L	0.002 m	73.9 deg
+39	L	0.002 m	73.9 deg
+40	L	0.065 m	-0.4 deg
+41	L	0.002 m	-1.1 deg
+42	U	0.274 m	1.9 deg
