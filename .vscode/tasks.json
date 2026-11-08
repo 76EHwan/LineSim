@@ -160,6 +160,7 @@
       "description": "Course (random = a new ZETIN-rule course every time)",
       "options": [
         "tracks/finals_1_5x_championship.json",
+        "tracks/practice_board.json",
         "random"
       ],
       "default": "tracks/finals_1_5x_championship.json"
@@ -169,7 +170,8 @@
       "type": "pickString",
       "description": "Scenario",
       "options": [
-        "scenarios/finals_1_5x_championship.json"
+        "scenarios/finals_1_5x_championship.json",
+        "scenarios/practice_board.json"
       ],
       "default": "scenarios/finals_1_5x_championship.json"
     },

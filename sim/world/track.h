@@ -49,6 +49,11 @@ struct TrackCrossing {
 	double angle_deg = 0;    // angle between the two lines
 };
 
+struct TrackCrossLine {
+	double s = 0.0;
+	double width = 0.25;
+};
+
 struct TrackMarker {
 	double s;
 	std::string kind;      // "left", "right", "end", "both"
@@ -141,6 +146,8 @@ public:
 	const std::vector<Shape>& shapes() const { return shapes_; }
 	const std::vector<PathPiece>& pieces() const { return pieces_; }
 	const std::vector<TrackMarker>& markers() const { return markers_; }
+	const std::vector<TrackCrossLine>& cross_lines() const { return cross_lines_; }
+	void add_cross_line(double s, double width = 0.25);
 	void bounds(double* x0, double* y0, double* x1, double* y1) const;
 
 private:
@@ -162,6 +169,7 @@ private:
 	std::vector<PathPiece> pieces_;
 	std::vector<Shape> shapes_;
 	std::vector<TrackMarker> markers_;
+	std::vector<TrackCrossLine> cross_lines_;
 	std::vector<TrackCrossing> crossings_;
 
 	double gx0_ = 0, gy0_ = 0, cell_ = 0.05;

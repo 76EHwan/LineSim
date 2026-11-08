@@ -281,16 +281,35 @@ bool Track::load_text(const std::string& text, const std::string& path, std::str
 			std::string side = m.str("side", "");
 			if (side == "left") {
 				add_mark(ms_s, +1);
+				markers_.push_back({ms_s, side});
 			} else if (side == "right") {
 				add_mark(ms_s, -1);
+				markers_.push_back({ms_s, side});
 			} else if (side == "both") {
 				add_mark(ms_s, +1);
 				add_mark(ms_s, -1);
+				markers_.push_back({ms_s, side});
+			} else if (side == "cross" || side == "crossing") {
+				double cs_w = m.num("width", 0.25);
+				add_cross_line(ms_s, cs_w);
 			} else {
-				*err = path + ": mark side must be left / right / both";
+				*err = path + ": mark side must be left / right / both / cross";
 				return false;
 			}
-			markers_.push_back({ms_s, side});
+		}
+	}
+
+	if (const json::Value* cls = j.get("cross_lines"); cls && cls->is_arr()) {
+		for (const json::Value& cl : cls->a) {
+			double cs_s = 0;
+			double cs_w = 0.25;
+			if (cl.is_num()) {
+				cs_s = cl.n;
+			} else if (cl.is_obj()) {
+				cs_s = cl.num("s", 0);
+				cs_w = cl.num("width", 0.25);
+			}
+			add_cross_line(cs_s, cs_w);
 		}
 	}
 
@@ -298,7 +317,30 @@ bool Track::load_text(const std::string& text, const std::string& path, std::str
 	robot_start_s_ = j.num("robot_start_s", start_s_);
 	build_index();
 	find_crossings();
+	for (const auto& cl : cross_lines_) {
+		Pose2 p = pose_at(cl.s);
+		TrackCrossing tc;
+		tc.s1 = cl.s;
+		tc.s2 = cl.s;
+		tc.p = {p.x, p.y};
+		tc.angle_deg = 90.0;
+		crossings_.push_back(tc);
+	}
 	return true;
+}
+
+void Track::add_cross_line(double s, double width) {
+	Pose2 p = pose_at(s);
+	Shape sh;
+	sh.kind = Shape::Rect;
+	sh.a = {p.x, p.y};
+	sh.u = {std::cos(p.th), std::sin(p.th)};
+	sh.hl = line_width_ / 2.0;
+	sh.hw = width / 2.0;
+	sh.compute_bounds();
+	shapes_.push_back(sh);
+
+	cross_lines_.push_back({s, width});
 }
 
 void Track::add_mark(double s, int side) {
@@ -613,7 +655,9 @@ std::vector<ExpectedMarkerEvent> Track::expected_marker_events() const {
 	}
 	for (const TrackCrossing& x : crossings_) {
 		ev.push_back({rel(x.s1), 'C'});
-		ev.push_back({rel(x.s2), 'C'});
+		if (std::fabs(x.s2 - x.s1) > 1e-4) {
+			ev.push_back({rel(x.s2), 'C'});
+		}
 	}
 	std::sort(ev.begin(), ev.end());
 

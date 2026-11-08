@@ -39,7 +39,8 @@ struct MotorParams {
 //             relaxation length: the yaw response lags the wheel-speed difference.
 struct TireParams {
 	std::string model = "brush";
-	double mu = 1.6;                  // friction coefficient (sliding limit)
+	double mu = 1.6;                  // Coulomb friction coefficient (sliding limit)
+	double mu_viscous = 0.5;          // viscous friction coefficient when sliding [1/(m/s)]
 	double slip_stiffness = 8.0;      // [N per N of load per unit slip]
 	double relaxation_length = 0.004; // [m]
 	double damping_ratio = 0.7;       // of the tread deflection mode

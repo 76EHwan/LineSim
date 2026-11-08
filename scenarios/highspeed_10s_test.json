@@ -1,0 +1,13 @@
+{
+  "track": "../tracks/highspeed_10s_test.json",
+  "robot": "../robots/full.json",
+  "drives": [1, 2, 3],
+  "seed": 1,
+  "max_drive_time": 180,
+  "params": {
+    "max_mps": 7.0,
+    "base_mps": 1.8,
+    "accel": 8.0,
+    "decel": 8.0
+  }
+}

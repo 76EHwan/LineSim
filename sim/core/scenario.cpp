@@ -2781,7 +2781,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 			if (std::fabs(lat * 1000) > opt.off_track_mm) {
 				lifted = true;
 				lift_reason = "off_track";
-			} else if (running > opt.max_drive_time) {
+			} else if (opt.max_drive_time > 0.0 && running > opt.max_drive_time) {
 				lifted = true;
 				lift_reason = "timeout";
 			}

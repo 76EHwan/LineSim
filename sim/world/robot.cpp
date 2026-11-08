@@ -30,6 +30,7 @@ void RobotParams::load(const json::Value& j, const std::string& base_dir) {
 	if (const json::Value* t = j.get("tire")) {
 		tire.model = t->str("model", tire.model);
 		tire.mu = t->num("mu", tire.mu);
+		tire.mu_viscous = t->num("mu_viscous", tire.mu_viscous);
 		tire.slip_stiffness = t->num("slip_stiffness", tire.slip_stiffness);
 		tire.relaxation_length = t->num("relaxation_length", tire.relaxation_length);
 		tire.damping_ratio = t->num("damping_ratio", tire.damping_ratio);
@@ -386,13 +387,16 @@ void Robot::tire_forces() {
 		w.ux += dux * dt;
 		w.uy += duy * dt;
 		double fx = -k * w.ux - c * dux, fy = -k * w.uy - c * duy;
-		const double fmax = tp.mu * fz;
+		const double fmax_coulomb = tp.mu * fz;
 		double fm = std::sqrt(fx * fx + fy * fy);
-		if (fm > fmax) {   // sliding: the tread holds the friction limit
-			fx *= fmax / fm;
-			fy *= fmax / fm;
-			w.ux = -fx / k;
-			w.uy = -fy / k;
+		if (fm > fmax_coulomb) {   // sliding: Coulomb friction + viscous friction proportional to excess slip speed
+			double v_slide = ((fm - fmax_coulomb) / (k + 1e-9)) * relax;
+			double fmax_total = fmax_coulomb + tp.mu_viscous * fz * v_slide;
+			double scale = fmax_total / fm;
+			fx *= scale;
+			fy *= scale;
+			w.ux = -fx * (fmax_coulomb / fmax_total) / k;
+			w.uy = -fy * (fmax_coulomb / fmax_total) / k;
 		}
 		w.fx = fx;
 		w.fy = fy;

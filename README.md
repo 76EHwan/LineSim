@@ -154,10 +154,21 @@ python tools/compare_logs.py "real_logs/주행 로그" "real_logs/주행 로그/
   python tools/fft_analysis.py runs/latest/drive1.csv
   ```
 
-### 2. 직선 고속 사행(Hunting) 원천 억제 & 가속 극대화 (`g_is_straight`)
-* **직선 공진 억제 제어**: 직선 가속 및 고속 크루즈 구간(`g_is_straight = 1`) 진입 시, 미세한 센서 편차에 의한 3.4 Hz 좌우 사행 공진을 차단하기 위해 조향 P 게인을 0.5배로 낮추고 D 게인을 1.4배 증폭하여 차체 감쇠(Damping)를 극대화합니다.
-* **접지 한계 감속 확장**: 직선 구간에서는 접지 한계 감속(`lat_acc_max`) 임계치를 2배 확장 적용하여, 최고 속도 도달 시 불필요한 감속 없이 최대 가속을 유지합니다.
-* **캐스케이드 자이로 피드백 안정화**: 외부 PD 출력 이득이 인위적으로 증폭되던 버그를 개선하여, 목표 요레이트는 온전히 유지한 채 순수한 각속도 감쇠만 피드백하도록 최적화했습니다.
+### 2. 기하학적 Pure Pursuit ($L_d = 132.13\,\text{mm}$) + $R = 0.25\,\text{m}$ 곡률 조향 및 코너 탈출 안정화 (`feat/pure-pursuit`)
+* **전방 원호 센서바 기하학 기반 Pure Pursuit (`motor.c`)**:
+  * 16채널 IR 센서가 뒷바퀴 축 중심으로부터 반경 $L_d = 0.13213\,\text{m}$ ($132.13\,\text{mm}$) 원호 위에 배치된 기하학을 그대로 활용하여, 정규화 센서 오차 `error`를 전방 주시 방위각 $\alpha = 0.4145\,\text{rad/unit} \times \text{error}$ ($23.75^\circ/\text{unit}$)로 변환한 뒤 기하학적 Pure Pursuit 곡률 $\kappa_{\text{pp}} = \frac{2\sin\alpha}{L_d}$를 산출합니다.
+  * 중심 부근(`|error| -> 0`)에서의 등가 비례 기울기는 $6.274\,\text{m}^{-1}/\text{unit}$으로, 기존 선형 PD($K_p = 20.4$) 대비 **중심 강성을 약 $1/3.25$로 낮춰** 직선 및 코너 탈출 직후의 5~6 Hz 사행(Hunting) 진동을 원천 억제합니다.
+* **대회 규격 고정 곡률 $R = 0.25\,\text{m}$ ($\kappa_{\text{rule}} = 4.0\,\text{m}^{-1}$) 비선형 결합**:
+  * 모든 곡선 구간의 반경이 $R = 0.25\,\text{m}$ ($\kappa = 4.0\,\text{m}^{-1}$)로 일정하다는 점을 이용해, 중심에서는 값과 미분값이 모두 $0$이고 코너 진입 시(`|error| >= 0.12`) 매끄럽게 활성화되는 가중치 $W(e) = \frac{e^2}{e^2 + 0.12^2}$로 코너 곡률 및 슬립각 보상을 결합합니다:
+    $$\kappa_{\text{corner}}(e) = \text{sign}(e) \cdot 4.0 \cdot \frac{e^2}{e^2 + 0.12^2} \cdot (1 + 1.85\,e^2)$$
+  * 고속 직선($v > v_{\text{base}}$)에서는 유효 룩어헤드 거리를 $L_{\text{eff}}(v) = L_d \sqrt{v / v_{\text{base}}}$로 확장하여 $7.0\,\text{m/s}$ 초고속 주행 시에도 안정적인 직선 복원력($3.18\,\text{m}^{-1}/\text{unit}$)과 감쇠비를 유지합니다.
+* **크로스 구간 및 `target_pos` 전환 시 미분 킥 원천 차단 (`motor.c`, `sensor.c`)**:
+  * **Derivative-on-Measurement**: `error = line_pos - target_pos` 대신 `line_pos` 측정값만 미분하고 `target_pos`에 1차 완충 필터($\tau \approx 12\,\text{ms}$)를 적용하여, 3·4차 주행에서 마커 통과 시 `target_pos`가 급변할 때 발생하던 인위적 D항 스파이크를 제거했습니다.
+  * **크로스 피크 동결 및 미분 홀드오프**: 20 cm 간격 연속 크로스 등 교차선 통과 시 중심 탐색 윈도우 내부 합산 밝기/점등 수로 크로스를 즉시 감지하여 피크 인덱스와 위치를 동결하고, 크로스 탈출 후 4주기(2.0 ms) 동안 미분항을 `0`으로 유지합니다.
+  * **교차로 직후 고스트 마커 락아웃**: 크로스 통과 직후 15 cm 동안 잔류 대각선 테이프에 의한 좌/우 마커 오검출을 차단하고 15 cm 이후 자동 해제합니다.
+* **코너 탈출 동적 자세 정렬 확인 후 가속 개시 (`drive.c`)**:
+  * 2·3·4차 주행에서 곡선 탈출 마커 통과 직후 $0.00\,\text{m}$에서 즉시 `max_mps`를 인가하지 않고, 최소 $0.25\,\text{m}$ 주행 및 차체 자세 정렬(`|yaw_rate| < 40 dps && |line_err| < 0.20`, 비간섭 `Sensor_Get_Last_Position()` 사용)이 확인될 때까지 `base_mps`를 유지한 뒤 풀 가속을 래치(latch)합니다.
+  * 이를 통해 180도 유턴 탈출 직후 $7.0\,\text{m/s}$ 초고속 직선 가속 구간(`scenarios/highspeed_10s_test.json`)에서 직선 수렴 횡오차 **`rms_lat = 0.41 mm` (`max_lat = 0.66 mm`)**, 기본 평가 트랙(`scenarios/finals_1_5x_championship.json`) Drive 3 완주 **`40.48 s` (`markers OK`)**를 달성했습니다.
 
 ### 3. 실시간 AI 게인 추천 & 즉각 적용 및 되돌리기 (`G` / `U` 키)
 * 3D 주행 중 발생하는 오차 패턴과 요레이트 진동을 분석하여 최적의 `steer_kp`, `steer_kd`, `yaw_gain_p`, `lat_acc_max`를 우측 하단 HUD 카드로 실시간 추천합니다.

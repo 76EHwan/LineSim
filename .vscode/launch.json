@@ -7,7 +7,26 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "LineSim",
+      "name": "LineSim: Practice Board",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/Release/linesim.exe",
+      "args": [
+        "view",
+        "--session",
+        "--track",
+        "tracks/practice_board.json",
+        "--robot",
+        "robots/full.json",
+        "--out",
+        "runs/latest"
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "preLaunchTask": "LineSim: Build (Release)"
+    },
+    {
+      "name": "LineSim: Championship",
       "type": "cppvsdbg",
       "request": "launch",
       "program": "${workspaceFolder}/build/Release/linesim.exe",

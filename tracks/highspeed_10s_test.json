@@ -1,0 +1,32 @@
+{
+  "name": "highspeed_10s_test",
+  "closed": true,
+  "line_width": 0.02,
+  "goal_s": 0.2,
+  "start_s": 0.65,
+  "auto_turn_marks": true,
+  "marks": [
+    { "s": 73.51, "side": "right" },
+    { "s": 168.015, "side": "right" }
+  ],
+  "cross_lines": [
+    20.0,
+    42.5,
+    60.0,
+    68.0,
+    68.2,
+    115.0,
+    137.5,
+    155.0,
+    163.0,
+    163.2
+  ],
+  "segments": [
+    { "straight": 72.86 },
+    { "straight": 20.86 },
+    { "arc": 180 },
+    { "straight": 72.86 },
+    { "straight": 20.86 },
+    { "arc": 180 }
+  ]
+}
