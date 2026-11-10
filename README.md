@@ -7,11 +7,11 @@
 ┌──────────────── linesim.exe ─────────────────────────────────────────────┐
 │  firmware fiber                         simulator fiber                    │
 │  ┌──────────────────────────┐           ┌──────────────────────────────┐  │
-│  │ Main/Src/*.c (원본 그대로)│  HAL shim │ 가상 시간 스케줄러            │  │
+│  │ Main/Src/*.c (원본 그대로) │  HAL shim │ 가상 시간 스케줄러            │  │
 │  │ drive / sensor / motor / │◄────────►│  TIM7 25µs → ADC3 (IR 스캔)   │  │
 │  │ foc / menu / sd_ui       │ 레지스터  │  TIM13/14 2kHz (속도/조향)    │  │
 │  │ BSP: button, buzzer,     │ GPIO, I2C │  SysTick 1kHz → IMU I2C DMA   │  │
-│  │ lsm6ds3, SDcard          │ FatFs     │  MuJoCo 10kHz 물리 스텝       │  │
+│  │ lsm6ds, SDcard           │ FatFs     │  MuJoCo 10kHz 물리 스텝       │  │
 │  └──────────────────────────┘           └──────────────────────────────┘  │
 │                                           로봇(MuJoCo) · 모터 · IR · IMU · 트랙 │
 └────────────────────────────────────────────────────────────────────────────┘

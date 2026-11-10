@@ -91,6 +91,20 @@ static __inline void arm_inv_park_f32(float32_t Id, float32_t Iq, float32_t *pIa
 	*pIbeta = Id * sinVal + Iq * cosVal;
 }
 
+/* Full linear convolution, length srcALen + srcBLen - 1 (CMSIS-DSP arm_conv_f32):
+   pDst[n] = sum_k pSrcA[k] * pSrcB[n - k] */
+static __inline void arm_conv_f32(const float32_t *pSrcA, uint32_t srcALen, const float32_t *pSrcB,
+		uint32_t srcBLen, float32_t *pDst) {
+	for (uint32_t n = 0; n < srcALen + srcBLen - 1; n++) {
+		float32_t sum = 0.0f;
+		uint32_t k0 = (n >= srcBLen - 1) ? n - (srcBLen - 1) : 0;
+		uint32_t k1 = (n < srcALen - 1) ? n : srcALen - 1;
+		for (uint32_t k = k0; k <= k1; k++)
+			sum += pSrcA[k] * pSrcB[n - k];
+		pDst[n] = sum;
+	}
+}
+
 #ifdef __cplusplus
 }
 #endif

@@ -99,6 +99,20 @@
       "presentation": { "reveal": "always", "clear": true }
     },
     {
+      "label": "LineSim: Straight Endless Tuner",
+      "detail": "Endless 5-run Drive 3 auto-tuner for highspeed straight section (saves candidates with weave <= 1%)",
+      "type": "process",
+      "windows": {
+        "command": "${workspaceFolder}\\tools\\.venv\\Scripts\\python.exe"
+      },
+      "linux": {
+        "command": "python3"
+      },
+      "args": ["tools/straight_endless.py", "--jobs", "5"],
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "clear": true }
+    },
+    {
       "label": "LineSim: Run scenario (no window)",
       "detail": "Headless, as fast as possible; output in runs/latest",
       "type": "process",

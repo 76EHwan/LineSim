@@ -2,6 +2,8 @@
  * The one file that sees both the firmware (its headers and globals) and the
  * simulator interface (fw_bridge.h / sim_mcu.h).
  */
+#include <stdlib.h>
+
 #include "main.h"
 #include "ff.h"
 #include "foc.h"
@@ -78,7 +80,13 @@ void fwb_adc_injected_irq(int adc) {
 
 /* ---------------- firmware main fiber ---------------- */
 
-void fwb_boot(void) { User_Init(); }
+void fwb_boot(void) {
+	User_Init();
+	/* A/B test hook: LINESIM_CONV_GAIN overrides sensorData.conv_gain (sensor.c 1D convolution state) */
+	const char *g = getenv("LINESIM_CONV_GAIN");
+	if (g && *g)
+		sensorData.conv_gain = (float) atof(g);
+}
 void fwb_menu_step(void) { Menu_ProcessLoop(); }
 
 void fwb_drive(int n) {
