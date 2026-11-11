@@ -45,7 +45,7 @@ struct ScenarioOptions {
 	std::map<std::string, double> robot_params;   // robot model overrides (sensor_delay, tire_mu, ...)
 	unsigned seed = 1;
 	double max_drive_time = 0.0;      // [s] per drive before the operator lifts the robot (<= 0 to disable)
-	double off_track_mm = 120.0;      // sensor bar this far from the line -> lift
+	double off_track_mm = 295.0;      // sensor bar / extension bar (295mm) this far from the line -> lift
 	bool quiet = false;
 	bool view = false;                // 3D viewer, real-time playback of the drives
 	bool interactive = false;         // 3D viewer + firmware menu driven from the keyboard
