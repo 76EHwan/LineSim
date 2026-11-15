@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "fw_bridge.h"
+#include "view/map_calib.h"
 #include "view/viewer.h"
 #include "world/robot.h"
 #include "world/track.h"
@@ -69,14 +70,22 @@ public:
 	void hold_until_closed();
 	bool stop_requested() const { return stop_; }
 	// A drive is starting: the trail shows this drive only.
-	void on_drive_finished(double max_lat_mm, double rms_lat_mm, double max_beta_deg, double weave_dps);
+	void on_robot_stopped_at_end(const std::vector<FwMarker>& markers, Pose2 start_pose);
+	void on_drive_finished(double max_lat_mm, double rms_lat_mm, double max_beta_deg, double weave_dps,
+		const std::vector<FwMarker>& markers = {}, Pose2 start_pose = {});
 	void apply_recommended_gains();
 	void push_undo(const std::string& desc = "");
 	void undo_gains();
 	void redo_gains();
 	void revert_to_baseline();
 	const GainRecommendation& gain_recommendation() const { return gain_rec_; }
-	void drive_started() {
+	void drive_started(int drive_num = 1) {
+		drive_num_ = drive_num;
+		driving_ = true;
+		calibrated_ = false;
+		v_.set_track_alpha(0.15f);
+		v_.clear_traced_map();
+		v_.clear_reconstructed_map();
 		v_.clear_trail();
 		has_trail_pose_ = false;
 		live_beta_ = 0;
@@ -86,6 +95,7 @@ public:
 		lat_samples_ = 0;
 		max_weave_seen_ = 0;
 		recent_wz_.clear();
+		init_vector_odom();
 	}
 	// New course: the lap records start over.
 	void clear_laps() { courses_.clear(); }
@@ -143,6 +153,18 @@ private:
 	double speed_;
 	bool paused_ = false;
 	bool show_trail_ = true;
+	bool driving_ = false;
+	bool calibrated_ = false;
+	int drive_num_ = 1;
+	void init_vector_odom();
+	double dr_x_ = 0.0, dr_y_ = 0.0, dr_th_ = 0.0, dr_th0_ = 0.0, dr_s_ = 0.0;
+	double dr_start_x_ = 0.0, dr_start_y_ = 0.0;
+	double dr_acc_ds_ = 0.0, dr_acc_dth_ = 0.0;
+	double prev_odom_m_ = 0.0, prev_imu_yaw_ = 0.0;
+	uint16_t prev_marker_count_ = 0;
+	std::vector<MapCalibNode> calib_nodes_;
+	std::vector<MapCalibMarker> calib_markers_;
+	MapCalibStats calib_stats_{};
 	struct LapSlot {
 		std::string last;      // latest attempt, empty = none yet
 		std::string best_tag;  // e.g. "#15-2" or "#1"

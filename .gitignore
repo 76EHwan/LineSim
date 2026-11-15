@@ -21,3 +21,6 @@ powershell.cmd
 /scratch/
 /build-linux/
 nul
+# Antigravity session continuity runtime state
+/.agents/session_checkpoint.json
+/.agents/SESSION_HANDOFF.md

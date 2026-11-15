@@ -505,7 +505,7 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 	const double R = kR, start_len = 1.0, goal_s = 0.2, start_s = 0.65;
 	const double bw = opt.board_w - 0.2, bh = opt.board_h - 0.2;
 	const double target = opt.complex_mode
-		? uni(std::max(opt.min_length, 65.0), std::max(opt.max_length, 85.0))
+		? uni(std::max(opt.min_length, 66.0), std::min(std::max(opt.min_length + 4.0, 78.0), opt.max_length))
 		: uni(opt.min_length, opt.max_length);
 	const int default_want_cross = opt.complex_mode ? std::max(2, 2 + pick(2)) : std::max(opt.min_crossings, 1 + pick(2));
 	const int want_cross = opt.crossings >= 0 ? opt.crossings : default_want_cross;
@@ -557,15 +557,17 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 			return mirror({{true, 0, 90}, {false, d, 0}, {true, 0, -90}, {false, w, 0}, {true, 0, -90}, {false, d, 0},
 				{true, 0, 90}}, s);
 		}
-		if (kind == 6) {   // continuous 45 deg S-turn slalom (4 or 8 continuous 45 deg turns)
-			int pairs = (opt.complex_mode && uni(0, 1) < 0.65) ? 2 : 1;
-			double b = len_q(0.20, 0.35);
+		if (kind == 6) {   // continuous 45 deg S-turn slalom (variable length)
+			int pairs = 1 + pick(opt.complex_mode ? 3 : 2);
+			bool has_mid = uni(0, 1) < 0.5;
+			double b = len_q(0.20, 0.45);
 			Pieces m;
 			for (int k = 0; k < pairs; k++) {
 				m.push_back({true, 0, 45});
 				m.push_back({true, 0, -45});
 			}
-			m.push_back({false, b, 0});
+			if (has_mid)
+				m.push_back({false, b, 0});
 			for (int k = 0; k < pairs; k++) {
 				m.push_back({true, 0, -45});
 				m.push_back({true, 0, 45});
@@ -573,18 +575,28 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 			return mirror(m, s);
 		}
 		if (kind == 7 || kind == 8) {   // 45 deg hump (compact span, good diagonal straight)
-			double a = len_q(0.25, 1.2);
+			double a = len_q(0.25, 1.4);
 			return mirror({{true, 0, 45}, {false, a, 0}, {true, 0, -90}, {false, a, 0}, {true, 0, 45}}, s);
 		}
-		if ((kind == 9 || kind == 12 || kind == 13) && opt.complex_mode) {   // Continuous 45 deg slalom cascade: 8 alternating 45 deg bends
-			double b = len_q(0.20, 0.35);
-			return mirror({
-				{true, 0, 45}, {true, 0, -45},
-				{false, b, 0},
-				{true, 0, -45}, {true, 0, 45}, {true, 0, -45}, {true, 0, 45},
-				{false, b, 0},
-				{true, 0, 45}, {true, 0, -45}
-			}, s);
+		if ((kind == 9 || kind == 12 || kind == 13) && opt.complex_mode) {   // Asymmetric / long 45 deg wave detour
+			int k1 = 1 + pick(3), k2 = 1 + pick(3);
+			if (k1 == k2) k2 = (k1 % 3) + 1;
+			Pieces m;
+			for (int k = 0; k < k1; k++) {
+				m.push_back({true, 0, 45});
+				m.push_back({true, 0, -45});
+			}
+			m.push_back({false, len_q(0.20, 0.50), 0});
+			for (int k = 0; k < k1 + k2; k++) {
+				m.push_back({true, 0, -45});
+				m.push_back({true, 0, 45});
+			}
+			m.push_back({false, len_q(0.20, 0.50), 0});
+			for (int k = 0; k < k2; k++) {
+				m.push_back({true, 0, 45});
+				m.push_back({true, 0, -45});
+			}
+			return mirror(m, s);
 		}
 		if (kind == 10 && opt.complex_mode) {  // Omega hairpin bulb (135 -> -270 -> 135)
 			double a = len_q(0.2, 0.4);
@@ -621,6 +633,31 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 	};
 	// new arc sequence between two straights with total turn `turn`
 	auto corner = [&](int turn) -> Pieces {
+		const int sgn_t = turn >= 0 ? 1 : -1;
+		// Long diagonal straight chamfer on 90 deg corners
+		if (std::abs(turn) == 90 && uni(0, 1) < 0.35) {
+			return {{true, 0, 45 * sgn_t}, {false, len_q(0.6, 2.8), 0}, {true, 0, 45 * sgn_t}};
+		}
+		// Continuous 45 deg slalom corner on 90 deg corners (e.g. 45, -45, 45, -45, 45, 45)
+		if (std::abs(turn) == 90 && uni(0, 1) < 0.25) {
+			int pairs = 1 + pick(4);
+			Pieces c;
+			for (int k = 0; k < pairs; k++) {
+				c.push_back({true, 0, 45 * sgn_t});
+				c.push_back({true, 0, -45 * sgn_t});
+			}
+			c.push_back({true, 0, 45 * sgn_t});
+			c.push_back({false, len_q(0.20, 0.80), 0});
+			c.push_back({true, 0, 45 * sgn_t});
+			return c;
+		}
+		// Diagonal U-turn on 180 deg corners
+		if (std::abs(turn) == 180 && uni(0, 1) < 0.35) {
+			if (uni(0, 1) < 0.5)
+				return {{true, 0, 45 * sgn_t}, {false, len_q(0.5, 2.0), 0}, {true, 0, 90 * sgn_t},
+					{false, len_q(0.5, 2.0), 0}, {true, 0, 45 * sgn_t}};
+			return {{true, 0, 45 * sgn_t}, {false, len_q(0.6, 2.2), 0}, {true, 0, 135 * sgn_t}};
+		}
 		Pieces c;
 		int sum = 0;
 		const int arcs = 1 + pick(3);
@@ -640,54 +677,234 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 		return c;
 	};
 
-	auto c45_detour = [&]() -> Pieces {
+	// Non-collinear shift modules: start at heading 0, end at heading 0 (mod 360), with dy != 0
+	// so the incoming and outgoing straights are NOT on the same line.
+	auto shift_module = [&]() -> Pieces {
 		const int s = sgn();
-		if (uni(0, 1) < 0.5) {
-			int pairs = (opt.complex_mode && uni(0, 1) < 0.7) ? 2 : 1;
-			double b = len_q(0.20, 0.35);
+		const int kind = pick(5);
+		if (kind == 0) {
+			// Single 45 deg S-bend (once only, shifts straight laterally)
+			if (uni(0, 1) < 0.35)
+				return mirror({{true, 0, 45}, {true, 0, -45}}, s);
+			return mirror({{true, 0, 45}, {false, len_q(0.20, 1.40), 0}, {true, 0, -45}}, s);
+		}
+		if (kind == 1) {
+			// Double 45 deg step in the same direction (staircase)
+			double d1 = len_q(0.20, 0.80), d2 = len_q(0.20, 0.60), d3 = len_q(0.20, 0.80);
+			Pieces m = {{true, 0, 45}};
+			if (uni(0, 1) < 0.7) m.push_back({false, d1, 0});
+			m.push_back({true, 0, -45});
+			m.push_back({false, d2, 0});
+			m.push_back({true, 0, 45});
+			if (uni(0, 1) < 0.7) m.push_back({false, d3, 0});
+			m.push_back({true, 0, -45});
+			return mirror(m, s);
+		}
+		if (kind == 2) {
+			// Asymmetric double 45 deg in opposite directions (d1 != d3 so final line is shifted)
+			double d1 = len_q(0.20, 1.00), d2 = len_q(0.20, 0.50), d3 = len_q(0.20, 1.00);
+			if (std::fabs(d1 - d3) < 0.25)
+				d3 = d1 + 0.35;
+			Pieces m = {{true, 0, 45}, {false, d1, 0}, {true, 0, -45}, {false, d2, 0},
+				{true, 0, -45}, {false, d3, 0}, {true, 0, 45}};
+			return mirror(m, s);
+		}
+		if (kind == 3) {
+			// Continuous 45 deg slalom chain: 6, 8, 10, or 12 consecutive alternating 45 deg turns!
+			int pairs = 3 + pick(4);   // 3..6 pairs => 6..12 consecutive 45 deg arcs
 			Pieces m;
 			for (int k = 0; k < pairs; k++) {
 				m.push_back({true, 0, 45});
 				m.push_back({true, 0, -45});
 			}
-			m.push_back({false, b, 0});
-			for (int k = 0; k < pairs; k++) {
-				m.push_back({true, 0, -45});
-				m.push_back({true, 0, 45});
-			}
 			return mirror(m, s);
 		}
-		double b = len_q(0.20, 0.35);
-		return mirror({
-			{true, 0, 45}, {true, 0, -45},
-			{false, b, 0},
-			{true, 0, -45}, {true, 0, 45}, {true, 0, -45}, {true, 0, 45},
-			{false, b, 0},
-			{true, 0, 45}, {true, 0, -45}
-		}, s);
+		// Asymmetric multi-pair 45 deg wave (e.g. 3 pairs one way + 2 pairs the other way = 10 consecutive 45s)
+		int k1 = 2 + pick(3), k2 = 1 + pick(3);
+		if (k1 == k2) k1++;
+		Pieces m;
+		for (int k = 0; k < k1; k++) {
+			m.push_back({true, 0, 45});
+			m.push_back({true, 0, -45});
+		}
+		if (uni(0, 1) < 0.4)
+			m.push_back({false, len_q(0.20, 0.45), 0});
+		for (int k = 0; k < k2; k++) {
+			m.push_back({true, 0, -45});
+			m.push_back({true, 0, 45});
+		}
+		return mirror(m, s);
 	};
 
 	auto count_c45 = [](const Pieces& ps) -> int {
 		int cnt = 0;
-		const size_t n = ps.size();
-		for (size_t i = 0; i < n; i++) {
-			if (!ps[i].arc || std::abs(ps[i].deg) != 45)
-				continue;
-			bool prev_45 = (i > 0 && ps[i - 1].arc && std::abs(ps[i - 1].deg) == 45);
-			bool next_45 = (i + 1 < n && ps[i + 1].arc && std::abs(ps[i + 1].deg) == 45);
-			if (prev_45 || next_45)
+		for (const Piece& p : ps)
+			if (p.arc && std::abs(p.deg) == 45)
 				cnt++;
-		}
 		return cnt;
 	};
 
+	auto close_base_loop = [](Pieces& ps, size_t idx_a, size_t idx_b) -> bool {
+		ps[idx_a].len = 0.0;
+		ps[idx_b].len = 0.0;
+		double x = 0.0, y = 0.0, th = 0.0;
+		double th_a = 0.0, th_b = 0.0;
+		for (size_t i = 0; i < ps.size(); i++) {
+			if (i == idx_a) th_a = th;
+			if (i == idx_b) th_b = th;
+			if (!ps[i].arc) {
+				x += ps[i].len * std::cos(th);
+				y += ps[i].len * std::sin(th);
+			} else {
+				int turn = ps[i].deg > 0 ? 1 : -1;
+				double phi = ps[i].deg * kPi / 180.0;
+				double cx = x - turn * kR * std::sin(th), cy = y + turn * kR * std::cos(th);
+				double rx = x - cx, ry = y - cy;
+				x = cx + rx * std::cos(phi) - ry * std::sin(phi);
+				y = cy + rx * std::sin(phi) + ry * std::cos(phi);
+				th += phi;
+			}
+		}
+		const double turns = th / (2 * kPi);
+		if (std::fabs(turns - std::round(turns)) > 1e-6)
+			return false;
+		double ux = std::cos(th_a), uy = std::sin(th_a);
+		double vx = std::cos(th_b), vy = std::sin(th_b);
+		double det = ux * vy - uy * vx;
+		if (std::fabs(det) < 1e-4)
+			return false;
+		double da = (-x * vy + y * vx) / det;
+		double db = (-y * ux + x * uy) / det;
+		if (da < 0.35 || db < 0.35)
+			return false;
+		ps[idx_a].len = round_to(da, 1e-4);
+		ps[idx_b].len = round_to(db, 1e-4);
+		return true;
+	};
+
 	// ---- base loops; piece 0 is the end-mark straight and is never touched
-	auto base = [&]() -> Pieces {
+	auto base = [&](int attempt) -> Pieces {
 		double W = opt.complex_mode ? round_to(uni(0.88, 0.93) * bw, 0.05) : round_to(uni(0.85, 0.92) * bw, 0.05);
 		double H = opt.complex_mode ? round_to(uni(0.74, 0.82) * bh, 0.05) : round_to(uni(0.68, 0.80) * bh, 0.05);
 		const double top_total = W - 2 * R;
 		if (opt.complex_mode) {
-			// Championship Infield Serpentine Base with 3 Long Straights:
+			const int arch = (attempt <= 3) ? (pick(4) == 3 ? 3 : pick(2)) : pick(4);
+			if (std::getenv("LINESIM_GEN_DEBUG"))
+				std::fprintf(stderr, "  trying arch=%d\n", arch);
+			if (arch == 0) {
+				// Archetype 0: Diagonal X-Cross + Perimeter Loop (two long 45/-45 deg straights crossing at 90 deg)
+				double d1 = len_q(4.8, 5.4);
+				double d2 = len_q(5.6, 6.2);
+				double w_top = len_q(3.6, 4.4);
+				double r_up1 = len_q(1.4, 1.8);
+				double r_up2 = len_q(0.8, 1.0);
+				double r_up3 = len_q(2.2, 2.6);
+				double r_jog = len_q(0.9, 1.2);
+				Pieces ps = {
+					{false, 1.20, 0, false},
+					{false, len_q(0.4, 0.8), 0, false},
+					{true,  0,   45, false},
+					{false, d1,  0, true},     // Long diagonal straight 1 (45 deg)
+					{true,  0,  135, false},
+					{false, w_top, 0, false},  // Top westbound straight
+					{true,  0,  135, false},
+					{false, d2,  0, true},     // Long diagonal straight 2 (-45 deg, crosses #3 at 90 deg)
+					{true,  0,   45, false},
+					{false, len_q(1.6, 2.2), 0, false}, // Eastbound to right edge
+					{true,  0,   90, false},
+					{false, r_up1, 0, false},  // Right northbound 1
+					{true,  0,   90, false},
+					{false, r_jog, 0, false},  // Right jog west
+					{true,  0,  -90, false},
+					{false, r_up2, 0, false},  // Right jog north
+					{true,  0,  -90, false},
+					{false, r_jog, 0, false},  // Right jog east
+					{true,  0,   90, false},
+					{false, r_up3, 0, false},  // Right northbound 2
+					{true,  0,   90, false},
+					{false, 1.0, 0, false},    // idx_a (21): top westbound
+					{true,  0,   90, false},
+					{false, len_q(0.5, 0.8), 0, false}, // Left southbound upper
+					{true,  0,   90, false},
+					{false, len_q(1.0, 1.5), 0, false}, // Infield jog 1 east
+					{true,  0,  -90, false},
+					{false, len_q(0.35, 0.55), 0, false}, // Infield jog 1 south
+					{true,  0,  -90, false},
+					{false, len_q(1.0, 1.5), 0, false}, // Infield jog 1 west
+					{true,  0,   90, false},
+					{false, len_q(0.35, 0.55), 0, false}, // Infield jog 2 south-step
+					{true,  0,   90, false},
+					{false, len_q(1.0, 1.5), 0, false}, // Infield jog 2 east
+					{true,  0,  -90, false},
+					{false, len_q(0.35, 0.55), 0, false}, // Infield jog 2 south
+					{true,  0,  -90, false},
+					{false, len_q(1.0, 1.5), 0, false}, // Infield jog 2 west
+					{true,  0,   90, false},
+					{false, 1.0, 0, false},    // idx_b (39): left southbound lower
+					{true,  0,   90, false},
+					{false, 0.30, 0, false}
+				};
+				return close_base_loop(ps, 21, 39) ? ps : Pieces{};
+			}
+			if (arch == 1) {
+				// Archetype 1: Dual Diagonal Peak + Perimeter Loop (long 45 deg & -45 deg straights)
+				double d1 = len_q(4.0, 4.6);
+				double d2 = len_q(2.8, 3.3);
+				Pieces ps = {
+					{false, 1.20, 0, false},
+					{false, len_q(0.3, 0.7), 0, false},
+					{true,  0,   45, false},
+					{false, d1,  0, true},     // Long diagonal straight 1 (45 deg)
+					{true,  0,  -90, false},
+					{false, d2,  0, true},     // Long diagonal straight 2 (-45 deg)
+					{true,  0,  135, false},
+					{false, len_q(3.4, 3.9), 0, false}, // Right northbound
+					{true,  0,   90, false},
+					{false, 1.0, 0, false},    // idx_a (9): top westbound
+					{true,  0,   90, false},
+					{false, len_q(0.5, 0.8), 0, false}, // Left southbound upper
+					{true,  0,   90, false},
+					{false, len_q(1.0, 1.5), 0, false}, // Infield jog 1 east
+					{true,  0,  -90, false},
+					{false, len_q(0.35, 0.55), 0, false}, // Infield jog 1 south
+					{true,  0,  -90, false},
+					{false, len_q(1.0, 1.5), 0, false}, // Infield jog 1 west
+					{true,  0,   90, false},
+					{false, len_q(0.35, 0.55), 0, false}, // Infield jog 2 south-step
+					{true,  0,   90, false},
+					{false, len_q(1.0, 1.5), 0, false}, // Infield jog 2 east
+					{true,  0,  -90, false},
+					{false, len_q(0.35, 0.55), 0, false}, // Infield jog 2 south
+					{true,  0,  -90, false},
+					{false, len_q(1.0, 1.5), 0, false}, // Infield jog 2 west
+					{true,  0,   90, false},
+					{false, 1.0, 0, false},    // idx_b (27): left southbound lower
+					{true,  0,   90, false},
+					{false, 0.30, 0, false}
+				};
+				return close_base_loop(ps, 9, 27) ? ps : Pieces{};
+			}
+			if (arch == 2) {
+				// Archetype 2: Reverse-Diagonal Loop (long -135 deg diagonal straight)
+				double h1 = len_q(3.0, 4.0);
+				double d1 = len_q(1.8, 2.8);
+				double d2 = len_q(3.2, 4.6);
+				Pieces ps = {
+					{false, 1.20, 0, false},
+					{true,  0,   90, false},
+					{false, h1,  0, false},    // Northbound
+					{true,  0,   45, false},
+					{false, d1,  0, false},    // NW diagonal (135 deg)
+					{true,  0,   90, false},
+					{false, d2,  0, true},     // Long SW diagonal (-135 deg)
+					{true,  0,   45, false},
+					{false, 1.0, 0, false},    // idx_a: southbound
+					{true,  0,   90, false},
+					{false, 1.0, 0, false}     // idx_b: eastbound
+				};
+				return close_base_loop(ps, 8, 10) ? ps : Pieces{};
+			}
+			// Archetype 3: Championship Infield Serpentine Base with 3 Long Straights:
 			// - Long Straight 1 (6.6m, East, Y=1.80): unbroken, crossed at 90 deg by Vertical Corridor 1 (X=3.00).
 			// - Long Straight 2 (6.85m, West, Y=4.20): unbroken, crossed at 90 deg by Vertical Corridor 2 (X=2.00).
 			// - Long Straight 3 (~6.2m, East, Y=6.40): unbroken, one straight line from start to end.
@@ -744,22 +961,25 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 			{true, 0, 90}, {false, H - 2 * R, 0}, {true, 0, 90}};
 	};
 
-	const int want_c45 = opt.complex_mode ? 12 : 0;
+	const int want_c45 = opt.complex_mode ? 8 : 0;
 	int checks = 0;
 	const int max_attempts = opt.complex_mode ? 250 : 60;
 	for (int attempt = 1; attempt <= max_attempts; attempt++) {
-		Pieces ps = base();
+		Pieces ps = base(attempt);
 		if (ps.empty())
 			continue;
 		double cur_len = 0;
 		int crossings = 0, fails = 0;
 		int c45_count = count_c45(ps);
 		checks++;
-		if (!fast_check_course(ps, bw, bh, opt.max_length, &cur_len, &crossings))
+		if (!fast_check_course(ps, bw, bh, opt.max_length, &cur_len, &crossings)) {
+			if (std::getenv("LINESIM_GEN_DEBUG"))
+				std::fprintf(stderr, "attempt %d: base failed fast_check_course (pieces=%zu)\n", attempt, ps.size());
 			continue;
+		}
 		if (opt.crossings >= 0 && crossings > opt.crossings)
 			continue;
-		const int max_fails = opt.complex_mode ? 2500 : 800;
+		const int max_fails = opt.complex_mode ? 3500 : 800;
 		while ((cur_len < target || crossings < want_cross || c45_count < want_c45) && fails < max_fails) {
 			std::vector<int> hd(ps.size() + 1, 0);
 			for (size_t i = 0; i < ps.size(); i++)
@@ -769,9 +989,62 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 			// Place crossings early while base straights are still long and uncut
 			const bool force_cross = (crossings < want_cross) && (fails < 120 || uni(0, 1) < 0.75);
 			const bool force_c45 = !force_cross && (c45_count < want_c45) && (uni(0, 1) < 0.65);
-			if (force_cross || force_c45 || r < 0.65) {
+			const double shift_prob = (cur_len < target - 5.0) ? 0.22 : 0.35;
+			const bool do_shift = !force_cross && (force_c45 ? (uni(0, 1) < 0.60) : (r < shift_prob));
+			if (do_shift) {
+				Pieces m_base = shift_module();
+				if (m_base.empty()) {
+					fails++;
+					continue;
+				}
+				std::vector<int> straights;
+				for (size_t k = 1; k < ps.size(); k++)
+					if (!ps[k].arc)
+						straights.push_back(static_cast<int>(k));
+				struct ShiftCand { int i, j; double ub, db, l_rem, lb; Pieces m; };
+				std::vector<ShiftCand> scands;
+				for (int flip : {1, -1}) {
+					Pieces m = mirror(m_base, flip);
+					double dx_m, dy_m, th_m;
+					walk(m, &dx_m, &dy_m, &th_m);
+					if (std::fabs(th_m / (2 * kPi) - std::round(th_m / (2 * kPi))) > 1e-6)
+						continue;
+					for (size_t k = 0; k + 1 < straights.size(); k++) {
+						int i = straights[k];
+						if (ps[i].main_straight) continue;
+						// Find nearest subsequent non-parallel editable straight j
+						for (size_t k2 = k + 1; k2 < straights.size() && k2 <= k + 3; k2++) {
+							int j = straights[k2];
+							if (ps[j].main_straight) break;
+							double ub = (hd[j] - hd[i]) * kPi / 180.0;
+							if (std::fabs(std::sin(ub)) < 0.5) continue;
+							double db = -dy_m / std::sin(ub);
+							double l_rem = ps[i].len - dx_m - db * std::cos(ub);
+							double lb = ps[j].len + db;
+							if (l_rem >= 0.40 && lb >= 0.20)
+								scands.push_back({i, j, ub, db, l_rem, lb, m});
+							break;
+						}
+					}
+				}
+				if (scands.empty()) {
+					fails++;
+					continue;
+				}
+				const ShiftCand& sc = scands[pick(static_cast<int>(scands.size()))];
+				double b = round_to(0.20 + uni(0, sc.l_rem - 0.40), 0.05);
+				b = std::clamp(b, 0.20, sc.l_rem - 0.20);
+				double c = round_to(sc.l_rem - b, 1e-4);
+				next.assign(ps.begin(), ps.begin() + sc.i);
+				next.push_back({false, b, 0});
+				next.insert(next.end(), sc.m.begin(), sc.m.end());
+				next.push_back({false, c, 0});
+				next.insert(next.end(), ps.begin() + sc.i + 1, ps.begin() + sc.j);
+				next.push_back({false, round_to(sc.lb, 1e-4), 0});
+				next.insert(next.end(), ps.begin() + sc.j + 1, ps.end());
+			} else if (force_cross || (!force_c45 && r < 0.80)) {
 				bool need_cross = force_cross || (crossings < want_cross && (opt.crossings >= 0 || uni(0, 1) < 0.5));
-				Pieces m_base = need_cross ? cross_loop() : (force_c45 ? c45_detour() : detour());
+				Pieces m_base = need_cross ? cross_loop() : detour();
 				double span;
 				if (m_base.empty() || !module_span(m_base, &span) || span < 0.25 || (!need_cross && !module_clear(m_base, span))) {
 					fails++;
@@ -786,7 +1059,7 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 				if (cand.empty()) {
 					if (need_cross) {
 						need_cross = false;
-						m_base = (c45_count < want_c45 && uni(0, 1) < 0.65) ? c45_detour() : detour();
+						m_base = detour();
 						if (m_base.empty() || !module_span(m_base, &span) || span < 0.25 || !module_clear(m_base, span)) {
 							fails++;
 							continue;
@@ -915,7 +1188,7 @@ std::string generate_grown(const TrackGenOptions& opt, std::string* err, int* at
 		if (std::getenv("LINESIM_GEN_DEBUG"))
 			std::fprintf(stderr, "attempt %d: %.1f m (target %.1f), %d/%d crossings, %d c45, %zu pieces, %d checks\n", attempt,
 				cur_len, target, crossings, want_cross, c45_count, ps.size(), checks);
-		if (cur_len < opt.min_length || crossings < (opt.crossings >= 0 ? opt.crossings : opt.min_crossings) || c45_count < (opt.complex_mode ? 10 : 0))
+		if (cur_len < opt.min_length || crossings < (opt.crossings >= 0 ? opt.crossings : opt.min_crossings) || c45_count < (opt.complex_mode ? 6 : 0))
 			continue;
 		Track t;
 		if (!full_check(ps, &t))

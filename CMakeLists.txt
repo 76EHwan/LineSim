@@ -180,6 +180,7 @@ add_executable(linesim
   sim/out/report.cpp
   sim/view/viewer.cpp
   sim/view/live_view.cpp
+  sim/view/map_calib.c
 )
 target_include_directories(linesim PRIVATE sim ${SHIM_DIR}/include ${CMAKE_BINARY_DIR}/generated)
 target_link_libraries(linesim PRIVATE firmware fw_shim mujoco opengl32 gdi32 user32 winmm)

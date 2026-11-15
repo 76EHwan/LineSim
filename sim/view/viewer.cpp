@@ -14,7 +14,7 @@
 #include <mujoco/mujoco.h>
 
 namespace {
-constexpr int kMaxGeom = 12000;
+constexpr int kMaxGeom = 24000;
 constexpr size_t kMaxTrail = 6000;
 const wchar_t* kClass = L"LineSimViewer";
 
@@ -157,6 +157,10 @@ void Viewer::set_track(const Track& track) {
 	// the track: white bands / arc pieces / mark bars a hair above the floor
 	im_->track.clear();
 	trail_.clear();
+	track_alpha_ = 1.0f;
+	traced_map_.clear();
+	reconstructed_map_.clear();
+	reconstructed_markers_.clear();
 	const float white[4] = {0.95f, 0.95f, 0.95f, 1.0f};
 	const double z = 0.0003, hz = 0.0003;
 	for (const Shape& s : track.shapes()) {
@@ -383,6 +387,28 @@ void Viewer::add_trail(double x, double y, double speed, double beta, double lat
 	trail_vmax_ = std::max(trail_vmax_, speed);
 }
 
+void Viewer::add_traced_point(double x, double y) {
+	const float fx = static_cast<float>(x);
+	const float fy = static_cast<float>(y);
+	if (!traced_map_.empty()) {
+		const auto& prev = traced_map_.back();
+		if (std::hypot(fx - prev[0], fy - prev[1]) < 0.015f)
+			return;
+	}
+	if (traced_map_.size() >= kMaxTrail)
+		traced_map_.erase(traced_map_.begin(), traced_map_.begin() + kMaxTrail / 10);
+	traced_map_.push_back({fx, fy});
+}
+
+void Viewer::set_reconstructed_map(const std::vector<std::array<double, 2>>& pts,
+	const std::vector<MapMarkerPt>& markers) {
+	reconstructed_map_.clear();
+	reconstructed_map_.reserve(pts.size());
+	for (const auto& p : pts)
+		reconstructed_map_.push_back({static_cast<float>(p[0]), static_cast<float>(p[1])});
+	reconstructed_markers_ = markers;
+}
+
 void Viewer::overlay(int grid, int left, int bottom, int width, int height, const std::string& text) {
 	// whole lines, each piece under the mjr_overlay limit
 	std::vector<std::string> pieces(1);
@@ -474,10 +500,56 @@ void Viewer::render(const ViewerHud& hud) {
 	}
 	mjv_updateScene(m_, d_, &im_->opt, nullptr, &im_->cam, mjCAT_ALL, &scn);
 
-	for (const mjvGeom& g : im_->track) {
+	const float alpha = show_reconstructed_map_ ? track_alpha_ : 1.0f;
+	for (mjvGeom g : im_->track) {
 		if (scn.ngeom >= scn.maxgeom)
 			break;
+		g.rgba[3] *= alpha;
 		scn.geoms[scn.ngeom++] = g;
+	}
+	if (show_reconstructed_map_) {
+		// Map drawn along the path the robot follows as it sees the line
+		const float traced_rgba[4] = {0.95f, 0.98f, 1.0f, 0.95f};
+		for (size_t i = 1; i < traced_map_.size() && scn.ngeom < scn.maxgeom; i++) {
+			const auto& a = traced_map_[i - 1];
+			const auto& b = traced_map_[i];
+			const double dx = b[0] - a[0], dy = b[1] - a[1];
+			const double len = std::hypot(dx, dy);
+			if (len < 1e-4 || len > 0.3)
+				continue;
+			mjvGeom* g = &scn.geoms[scn.ngeom++];
+			box_geom(g, 0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1]), 0.0005, len * 0.52, 0.010, 0.0003,
+				std::atan2(dy, dx), traced_rgba);
+			g->emission = 0.45f;
+		}
+		// Reconstructed map from data collected at END
+		const float rec_rgba[4] = {0.05f, 0.88f, 1.0f, 0.95f};
+		for (size_t i = 1; i < reconstructed_map_.size() && scn.ngeom < scn.maxgeom; i++) {
+			const auto& a = reconstructed_map_[i - 1];
+			const auto& b = reconstructed_map_[i];
+			const double dx = b[0] - a[0], dy = b[1] - a[1];
+			const double len = std::hypot(dx, dy);
+			if (len < 1e-4 || len > 0.5)
+				continue;
+			mjvGeom* g = &scn.geoms[scn.ngeom++];
+			box_geom(g, 0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1]), 0.0009, len * 0.52, 0.007, 0.00035,
+				std::atan2(dy, dx), rec_rgba);
+			g->emission = 0.85f;
+		}
+		for (const auto& m : reconstructed_markers_) {
+			if (scn.ngeom >= scn.maxgeom)
+				break;
+			float mc[4] = {1.0f, 0.9f, 0.1f, 0.95f}; // U (4): yellow
+			if (m.type == 1) { mc[0] = 0.2f; mc[1] = 1.0f; mc[2] = 0.3f; }      // L: green
+			else if (m.type == 2) { mc[0] = 1.0f; mc[1] = 0.5f; mc[2] = 0.1f; } // R: orange
+			else if (m.type == 3) { mc[0] = 1.0f; mc[1] = 0.2f; mc[2] = 0.9f; } // C: magenta
+			mjtNum pos[3] = {m.x, m.y, 0.0013};
+			mjtNum sz[3] = {0.014, 0.014, 0.0005};
+			mjvGeom* g = &scn.geoms[scn.ngeom++];
+			mjv_initGeom(g, mjGEOM_CYLINDER, sz, pos, nullptr, mc);
+			g->category = mjCAT_DECOR;
+			g->emission = 0.9f;
+		}
 	}
 	for (size_t i = 1; i < trail_.size() && scn.ngeom < scn.maxgeom; i++) {
 		const TrailPt& a = trail_[i - 1];

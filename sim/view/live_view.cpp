@@ -93,6 +93,9 @@ void LiveView::handle_keys() {
 			show_trail_ = !show_trail_;
 			v_.clear_trail();
 			break;
+		case 'L':   // reconstructed map path on/off (keeps data so toggling back restores it)
+			v_.toggle_reconstructed_map();
+			break;
 		case 'S':
 			if (session)
 				session_key(k);
@@ -535,7 +538,7 @@ void LiveView::render(double t_sim, const std::string& phase) {
 	char buf[700];
 	std::snprintf(buf, sizeof buf,
 		"%s\n"
-		"sim speed x%.3g%s%s%s\n"
+		"sim speed x%.3g%s%s%s%s\n"
 		"speed     %.2f m/s   wheels %.2f m/s   slip %.0f %%\n"
 		"fw base   %.2f / target %.2f m/s   command %.2f m/s%s\n"
 		"line      %+.1f mm (sensor bar)   target_pos %+.2f\n"
@@ -543,7 +546,10 @@ void LiveView::render(double t_sim, const std::string& phase) {
 		"%s\n"
 		"markers   %d%s\n"
 		"iq        L %+.2f A   R %+.2f A",
-		phase.c_str(), speed_, actual, paused_ ? ", PAUSED" : "", show_trail_ ? "" : "   (trail off)", v_body, v_wheels,
+		phase.c_str(), speed_, actual, paused_ ? ", PAUSED" : "",
+		show_trail_ ? "" : "   (trail off)",
+		v_.show_reconstructed_map() ? "" : "   (map off)",
+		v_body, v_wheels,
 		slip, tm.current_base_mps, tm.target_base_mps, tm.cmd_mps, cut, lat * 1000, tm.target_pos,
 		tm.yaw_deg, live_beta_, max_beta_seen_,
 		live_beta_ >= 25.0 ? (std::fabs(lat * 1000.0) > 70.0 ? "  [OVERSTEER - OFF LIMIT!]" : "  [DRIFT: LIMIT OK]")
@@ -551,6 +557,15 @@ void LiveView::render(double t_sim, const std::string& phase) {
 		fft_hud,
 		tm.marker_count, tm.lost ? "   LINE LOST" : "", robot_.iq(0), robot_.iq(1));
 	hud.status = buf;
+	if (v_.has_reconstructed_map()) {
+		char mbuf[224];
+		std::snprintf(mbuf, sizeof mbuf,
+			"\nmap       actual (white) vs calibrated (cyan, %zu mk | drift %+.2f deg, scale %.4f, cross %d)%s",
+			v_.reconstructed_marker_count(), calib_stats_.gyro_drift_deg,
+			calib_stats_.odom_scale, calib_stats_.crossing_pairs,
+			v_.show_reconstructed_map() ? "" : " [hidden]");
+		hud.status += mbuf;
+	}
 	hud.live_beta = live_beta_;
 	hud.live_lat_mm = lat * 1000.0;
 	// lap list: one course as before (drive 1-4); several (auto-tune) under a heading each, with the
@@ -586,7 +601,7 @@ void LiveView::render(double t_sim, const std::string& phase) {
 					hud.status += "\n   " + lap_line(d, c.d[d]);
 		}
 	}
-	hud.help = "C: camera (Follow/Sensor/Top Map)   M: minimap (Track Map/Sensor/Off)   T: trail   K: marker misread 3D view\n"
+	hud.help = "C: camera (Follow/Sensor/Top Map)   M: minimap (Track Map/Sensor/Off)   T: trail   L: rec map   K: marker misread 3D view\n"
 	           "Space: pause   +/-: speed   S: save to drive.c   P: screenshot   Esc: quit   (mouse: drag, wheel)";
 	if (v_.focused_miss_idx() >= 0)
 		hud.help += "\n[K]: Focus next misread marker (focused: #" + std::to_string(v_.focused_miss_idx()) + ")";
@@ -649,6 +664,46 @@ void LiveView::tick(double t_sim, bool fast_forward, const std::string& phase) {
 	const bool fast = (speed_ >= 2.0 || (session && session->auto_tune));
 	v_.set_fast_mode(fast);
 
+	if (driving_) {
+		FwTelemetry tm;
+		fwb_telemetry(&tm);
+		const double odom = static_cast<double>(tm.odom_m);
+		const double ds = (odom >= prev_odom_m_) ? (odom - prev_odom_m_) : odom;
+		prev_odom_m_ = odom;
+		double dth = 0.0;
+		if (dr_s_ > 0.0 || ds > 1e-4) {
+			double dyaw = static_cast<double>(tm.yaw_deg) - prev_imu_yaw_;
+			if (dyaw > 180.0) dyaw -= 360.0;
+			else if (dyaw < -180.0) dyaw += 360.0;
+			dth = dyaw * (3.14159265358979323846 / 180.0);
+		}
+		prev_imu_yaw_ = static_cast<double>(tm.yaw_deg);
+		dr_th_ += dth;
+		dr_s_ += ds;
+		dr_acc_ds_ += ds;
+		dr_acc_dth_ += dth;
+
+		if (tm.marker_count < prev_marker_count_)
+			prev_marker_count_ = 0;
+		const bool marker_hit = (tm.marker_count > prev_marker_count_);
+		if (dr_acc_ds_ >= 0.05 || std::fabs(dr_acc_dth_) >= 0.05 || marker_hit) {
+			MapCalibNode node{};
+			node.ds = static_cast<float>(dr_acc_ds_);
+			node.th = static_cast<float>(dr_th_);
+			node.s = static_cast<float>(dr_s_);
+			calib_nodes_.push_back(node);
+			dr_acc_ds_ = 0.0;
+			dr_acc_dth_ = 0.0;
+		}
+		if (marker_hit) {
+			prev_marker_count_ = tm.marker_count;
+			MapCalibMarker mk{};
+			mk.node_idx = static_cast<int32_t>(calib_nodes_.size()) - 1;
+			mk.type = 4;
+			calib_markers_.push_back(mk);
+		}
+	}
+
 	if (++trail_div_ >= 10) {
 		trail_div_ = 0;
 		Pose2 p = robot_.pose();
@@ -699,6 +754,10 @@ void LiveView::tick(double t_sim, bool fast_forward, const std::string& phase) {
 		}
 		if (show_trail_ && robot_.forward_speed() > 0.02) {
 			v_.add_trail(p.x, p.y, robot_.forward_speed(), beta, lat_mm);
+		}
+		if (driving_ && robot_.forward_speed() > 0.02) {
+			const auto sp = robot_.body_to_ground(rp.sensor_x, 0.0);
+			v_.add_traced_point(sp.x, sp.y);
 		}
 	}
 	last_t_ = t_sim;
@@ -795,7 +854,277 @@ void LiveView::hold_until_closed() {
 	}
 }
 
-void LiveView::on_drive_finished(double max_lat_mm, double rms_lat_mm, double max_beta_deg, double weave_dps) {
+namespace {
+void build_reconstructed_map(const std::vector<FwMarker>& markers, Pose2 start_pose, double sensor_x,
+	std::vector<std::array<double, 2>>& pts_out, std::vector<MapMarkerPt>& marks_out) {
+	pts_out.clear();
+	marks_out.clear();
+	if (markers.empty())
+		return;
+	constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
+
+	struct Seg {
+		bool is_arc = false;
+		double len = 0.0;   // straight length [m]
+		double R = 0.25;    // arc radius [m]
+		double phi = 0.0;   // arc sweep [rad]
+		double th0 = 0.0;   // heading at segment start [rad]
+		int end_type = 0;
+	};
+
+	const double sx0 = start_pose.x + (markers[0].dist_m + sensor_x) * std::cos(start_pose.th);
+	const double sy0 = start_pose.y + (markers[0].dist_m + sensor_x) * std::sin(start_pose.th);
+	const double th0 = start_pose.th;
+
+	std::vector<Seg> segs;
+	segs.reserve(markers.size());
+	double th = th0;
+	int prev_dir = 0;   // -1 = R, 0 = Straight, +1 = L
+	const double r_axle_rule = std::sqrt(std::max(0.01, 0.25 * 0.25 - sensor_x * sensor_x));
+	const double arc45_axle = r_axle_rule * (45.0 * kDegToRad);
+	for (size_t i = 1; i < markers.size(); ++i) {
+		Seg s;
+		s.th0 = th;
+		s.end_type = markers[i].type;
+		const double d = std::max(0.0, static_cast<double>(markers[i].dist_m));
+		const int prev_type = markers[i - 1].type;
+		int next_dir = 0;
+		if (prev_type == 1 || prev_type == 2) {
+			const int x = (prev_type == 1) ? 1 : -1;
+			next_dir = (prev_dir != x) ? x : 0;
+		}
+		// Safeguard against marker misread (wrong type / missed / ghost) using gyro yaw
+		const double yaw_d = static_cast<double>(markers[i].yaw_deg);
+		if (std::fabs(yaw_d) >= 28.0) {
+			next_dir = (yaw_d > 0.0) ? 1 : -1;
+		} else if (next_dir != 0 && std::fabs(yaw_d) < 12.0 && d > 0.35) {
+			next_dir = 0;
+		}
+		if (next_dir != 0) {
+			const double k_odom = d / arc45_axle;
+			const double k_yaw = (next_dir * static_cast<double>(markers[i].yaw_deg)) / 45.0;
+			const double k_est = (k_yaw > 0.4) ? (0.5 * k_odom + 0.5 * k_yaw) : k_odom;
+			const int k = std::clamp(static_cast<int>(std::round(k_est)), 1, 6);
+			s.is_arc = true;
+			s.phi = next_dir * k * 45.0 * kDegToRad;
+			s.R = 0.25;
+			th += s.phi;
+		} else {
+			s.is_arc = false;
+			s.len = d;
+		}
+		prev_dir = next_dir;
+		segs.push_back(s);
+	}
+
+	auto trace_end = [&](const std::vector<Seg>& list) {
+		double x = sx0, y = sy0, t = th0;
+		for (const Seg& s : list) {
+			if (!s.is_arc) {
+				x += s.len * std::cos(t);
+				y += s.len * std::sin(t);
+			} else {
+				const double turn = (s.phi > 0.0) ? 1.0 : -1.0;
+				const double cx = x - turn * s.R * std::sin(t);
+				const double cy = y + turn * s.R * std::cos(t);
+				const double rx = x - cx, ry = y - cy;
+				const double c = std::cos(s.phi), sn = std::sin(s.phi);
+				x = cx + rx * c - ry * sn;
+				y = cy + rx * sn + ry * c;
+				t += s.phi;
+			}
+		}
+		return std::array<double, 3>{x, y, t};
+	};
+
+	// If closed course (ended at STOP mark with matching heading), adjust straight lengths to close loop
+	const auto end_pose = trace_end(segs);
+	const bool can_close = segs.size() >= 3 && markers.back().type == 4 && std::cos(end_pose[2] - th0) > 0.9;
+	if (can_close) {
+		const double proj_close = -(end_pose[0] - sx0) * std::cos(end_pose[2])
+			- (end_pose[1] - sy0) * std::sin(end_pose[2]);
+		Seg close_seg;
+		close_seg.is_arc = false;
+		close_seg.len = std::max(0.15, proj_close);
+		close_seg.th0 = end_pose[2];
+		close_seg.end_type = markers[0].type;
+		segs.push_back(close_seg);
+
+		const auto closed_end = trace_end(segs);
+		const double rx = sx0 - closed_end[0];
+		const double ry = sy0 - closed_end[1];
+
+		double m00 = 0.0, m01 = 0.0, m11 = 0.0;
+		for (const Seg& s : segs) {
+			if (s.is_arc)
+				continue;
+			const double w = std::max(0.05, s.len);
+			const double w2 = w * w;
+			const double c = std::cos(s.th0), sn = std::sin(s.th0);
+			m00 += w2 * c * c;
+			m01 += w2 * c * sn;
+			m11 += w2 * sn * sn;
+		}
+		const double det = m00 * m11 - m01 * m01;
+		if (det > 1e-8) {
+			const double a = (m11 * rx - m01 * ry) / det;
+			const double b = (-m01 * rx + m00 * ry) / det;
+			for (Seg& s : segs) {
+				if (s.is_arc)
+					continue;
+				const double w = std::max(0.05, s.len);
+				const double dl = (w * w) * (a * std::cos(s.th0) + b * std::sin(s.th0));
+				s.len = std::max(0.02, s.len + dl);
+			}
+		}
+	}
+
+	double x = sx0, y = sy0, t = th0;
+	pts_out.push_back({x, y});
+	marks_out.push_back({x, y, markers[0].type});
+	for (size_t idx = 0; idx < segs.size(); ++idx) {
+		const Seg& s = segs[idx];
+		if (!s.is_arc) {
+			const int steps = std::max(1, static_cast<int>(std::ceil(s.len / 0.05)));
+			const double ds = s.len / steps;
+			for (int k = 0; k < steps; ++k) {
+				x += ds * std::cos(t);
+				y += ds * std::sin(t);
+				pts_out.push_back({x, y});
+			}
+		} else {
+			const double turn = (s.phi > 0.0) ? 1.0 : -1.0;
+			const double cx = x - turn * s.R * std::sin(t);
+			const double cy = y + turn * s.R * std::cos(t);
+			const double rx = x - cx, ry = y - cy;
+			const double arc_len = std::fabs(s.phi) * s.R;
+			const int steps = std::max(4, static_cast<int>(std::ceil(arc_len / 0.02)));
+			for (int k = 1; k <= steps; ++k) {
+				const double a = s.phi * (static_cast<double>(k) / steps);
+				const double c = std::cos(a), sn = std::sin(a);
+				x = cx + rx * c - ry * sn;
+				y = cy + rx * sn + ry * c;
+				pts_out.push_back({x, y});
+			}
+			t += s.phi;
+		}
+		if (!can_close || idx + 1 < segs.size())
+			marks_out.push_back({x, y, s.end_type});
+	}
+}
+}  // namespace
+
+void LiveView::init_vector_odom() {
+	const Pose2 p = robot_.pose();
+	dr_start_x_ = p.x;
+	dr_start_y_ = p.y;
+	dr_x_ = p.x;
+	dr_y_ = p.y;
+	dr_th_ = p.th;
+	dr_th0_ = p.th;
+	dr_s_ = 0.0;
+	dr_acc_ds_ = 0.0;
+	dr_acc_dth_ = 0.0;
+	FwTelemetry tm;
+	fwb_telemetry(&tm);
+	prev_odom_m_ = static_cast<double>(tm.odom_m);
+	prev_imu_yaw_ = static_cast<double>(tm.yaw_deg);
+	prev_marker_count_ = tm.marker_count;
+	calib_nodes_.clear();
+	calib_markers_.clear();
+	calib_stats_ = {};
+	MapCalibNode n0{};
+	n0.ds = 0.0f;
+	n0.th = static_cast<float>(dr_th_);
+	n0.s = 0.0f;
+	calib_nodes_.push_back(n0);
+}
+
+void LiveView::on_robot_stopped_at_end(const std::vector<FwMarker>& markers, Pose2 start_pose) {
+	driving_ = false;
+	if (calibrated_)
+		return;
+	calibrated_ = true;
+	if (calib_nodes_.size() >= 2) {
+		if (dr_acc_ds_ > 1e-3 || std::fabs(dr_acc_dth_) > 1e-3) {
+			MapCalibNode tail{};
+			tail.ds = static_cast<float>(dr_acc_ds_);
+			tail.th = static_cast<float>(dr_th_);
+			tail.s = static_cast<float>(dr_s_);
+			calib_nodes_.push_back(tail);
+			dr_acc_ds_ = 0.0;
+			dr_acc_dth_ = 0.0;
+		}
+		for (size_t i = 0; i < calib_markers_.size() && i < markers.size(); ++i)
+			calib_markers_[i].type = markers[i].type;
+
+		const bool path_only = (drive_num_ >= 2);
+		const bool closed_ok = !markers.empty() && markers.back().type == 4
+			&& std::cos(dr_th_ - dr_th0_) > 0.85 && dr_s_ > 0.5;
+		MapCalibConfig cfg{};
+		cfg.start_x = static_cast<float>(dr_start_x_);
+		cfg.start_y = static_cast<float>(dr_start_y_);
+		cfg.start_th = static_cast<float>(dr_th0_);
+		cfg.sensor_x = static_cast<float>(robot_.params().sensor_x);
+		cfg.rule_arc_radius = 0.25f;
+		cfg.closed_loop = closed_ok ? 1 : 0;
+		cfg.path_only = path_only ? 1 : 0;
+
+		MapCalib_Run(calib_nodes_.data(), static_cast<int32_t>(calib_nodes_.size()),
+			calib_markers_.empty() ? nullptr : calib_markers_.data(),
+			static_cast<int32_t>(calib_markers_.size()), &cfg, &calib_stats_);
+
+		std::vector<std::array<double, 2>> rec_pts;
+		rec_pts.reserve(calib_nodes_.size() + 1);
+		for (const auto& n : calib_nodes_)
+			rec_pts.push_back({static_cast<double>(n.x), static_cast<double>(n.y)});
+		if (closed_ok) {
+			const double along = (rec_pts.front()[0] - rec_pts.back()[0]) * std::cos(dr_th0_)
+				+ (rec_pts.front()[1] - rec_pts.back()[1]) * std::sin(dr_th0_);
+			if (along > 0.02 && along < 2.0)
+				rec_pts.push_back(rec_pts.front());
+		}
+
+		std::vector<MapMarkerPt> rec_marks;
+		rec_marks.reserve(calib_markers_.size());
+		for (const auto& m : calib_markers_)
+			rec_marks.push_back({static_cast<double>(m.x), static_cast<double>(m.y), m.type});
+
+		double sum_e2 = 0.0, max_e = 0.0;
+		for (const auto& rp : rec_pts) {
+			double lat = 0.0, s_tr = 0.0;
+			track_.nearest(Vec2{rp[0], rp[1]}, &lat, &s_tr);
+			const double ae = std::fabs(lat) * 1000.0;
+			sum_e2 += ae * ae;
+			if (ae > max_e) max_e = ae;
+		}
+		const double rms_e = rec_pts.empty() ? 0.0 : std::sqrt(sum_e2 / rec_pts.size());
+		std::fprintf(stderr,
+			"[%s] drive=%d nodes=%zu markers=%zu drift=%+.2fdeg scale=%.4f lat_err=%.1fmm cross_pairs=%d | map_err rms=%.1fmm max=%.1fmm\n",
+			path_only ? "PathCalib" : "MapCalib", drive_num_,
+			calib_nodes_.size(), calib_markers_.size(),
+			calib_stats_.gyro_drift_deg, calib_stats_.odom_scale,
+			calib_stats_.closure_lat_mm, calib_stats_.crossing_pairs,
+			rms_e, max_e);
+
+		v_.set_reconstructed_map(rec_pts, rec_marks);
+		v_.set_track_alpha(0.60f);
+		return;
+	}
+	if (!markers.empty() && drive_num_ < 2) {
+		std::vector<std::array<double, 2>> rec_pts;
+		std::vector<MapMarkerPt> rec_marks;
+		build_reconstructed_map(markers, start_pose, robot_.params().sensor_x, rec_pts, rec_marks);
+		v_.set_reconstructed_map(rec_pts, rec_marks);
+		v_.set_track_alpha(0.60f);
+	} else {
+		v_.set_track_alpha(1.0f);
+	}
+}
+
+void LiveView::on_drive_finished(double max_lat_mm, double rms_lat_mm, double max_beta_deg, double weave_dps,
+	const std::vector<FwMarker>& markers, Pose2 start_pose) {
+	on_robot_stopped_at_end(markers, start_pose);
 	max_lat_seen_ = max_lat_mm;
 	rms_lat_mm_ = rms_lat_mm;
 	max_beta_seen_ = max_beta_deg;

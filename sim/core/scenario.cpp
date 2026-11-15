@@ -2660,6 +2660,11 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 		} else if (ramp_seen && !ramp_done) {
 			ramp_done = true;
 			t_finished = sim->t();
+			if (live) {
+				FwMarker m[256];
+				int nm = fwb_marker_log(m, 256);
+				live->on_robot_stopped_at_end(std::vector<FwMarker>(m, m + nm), start);
+			}
 		}
 	};
 
@@ -2807,7 +2812,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 		current = n;
 		cur->t_start = sim->t();
 		if (live)
-			live->drive_started();
+			live->drive_started(n);
 		const std::string attempt_tag = lap_tag.empty() ? ("#" + std::to_string(++lap_no)) : lap_tag;
 		if (!opt.quiet)
 			std::printf("%s[%8.3f s]%s %sdrive %d%s %s(%s)%s %sstart%s\n",
@@ -2858,7 +2863,8 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 		if (viewer)
 			viewer->set_marker_diags(marker_diags);
 		if (live)
-			live->on_drive_finished(cur->max_lat_mm, cur->rms_lat_mm, cur->max_beta_deg, weave_dps(cur->samples));
+			live->on_drive_finished(cur->max_lat_mm, cur->rms_lat_mm, cur->max_beta_deg, weave_dps(cur->samples),
+				cur->markers, start);
 
 		char buf[256];
 		if (!miss_diag.valid) {

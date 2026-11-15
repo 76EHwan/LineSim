@@ -14,6 +14,12 @@ struct FftBar {
 	float amp = 0.0f;
 };
 
+struct MapMarkerPt {
+	double x = 0.0;
+	double y = 0.0;
+	int type = 0;
+};
+
 struct ViewerHud {
 	std::string status;                 // top-left block (multi-line)
 	std::string help;                   // bottom-left block
@@ -43,6 +49,17 @@ public:
 	bool open(int width, int height, const char* title, std::string* err);
 	void attach(mjModel_* m, mjData_* d, int follow_body, const Track& track);
 	void set_track(const Track& track);   // replace the drawn course (new random map)
+	void set_track_alpha(float alpha) { track_alpha_ = alpha; }
+	void add_traced_point(double x, double y);
+	void clear_traced_map() { traced_map_.clear(); }
+	void set_reconstructed_map(const std::vector<std::array<double, 2>>& pts,
+		const std::vector<MapMarkerPt>& markers);
+	void clear_reconstructed_map() {
+		reconstructed_map_.clear();
+		reconstructed_markers_.clear();
+	}
+	bool has_reconstructed_map() const { return !reconstructed_map_.empty(); }
+	size_t reconstructed_marker_count() const { return reconstructed_markers_.size(); }
 
 	bool pump();                        // handle window messages; false once the window is closed
 	void render(const ViewerHud& hud);
@@ -95,6 +112,9 @@ public:
 	bool show_fft() const { return show_fft_; }
 	void toggle_fft() { show_fft_ = !show_fft_; }
 	void set_show_fft(bool b) { show_fft_ = b; }
+	bool show_reconstructed_map() const { return show_reconstructed_map_; }
+	void toggle_reconstructed_map() { show_reconstructed_map_ = !show_reconstructed_map_; }
+	void set_show_reconstructed_map(bool b) { show_reconstructed_map_ = b; }
 
 private:
 	static long long __stdcall wndproc(void* hwnd, unsigned msg, unsigned long long wp, long long lp);
@@ -137,4 +157,9 @@ private:
 	int focused_miss_idx_ = -1;
 	bool show_gain_rec_ = true;
 	bool show_fft_ = true;
+	bool show_reconstructed_map_ = true;
+	float track_alpha_ = 1.0f;
+	std::vector<std::array<float, 2>> traced_map_;
+	std::vector<std::array<float, 2>> reconstructed_map_;
+	std::vector<MapMarkerPt> reconstructed_markers_;
 };
