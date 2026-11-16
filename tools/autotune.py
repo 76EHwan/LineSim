@@ -5,7 +5,7 @@
     python tools/autotune.py 1.6 --max-speed     highest base speed that passes, from 1.6 up
     python tools/autotune.py 2.2 --max-speed --lat 10,12,14,16   with the grip limit (lat_acc_max) as a 3rd axis
 
-    options: [--hours <N>] [--endless] [--drives 1,3] [--track tracks/x.json ...] [--courses 4]
+    options: [--hours <N>] [--endless] [--drives 1,4] [--track tracks/x.json ...] [--courses 4]
              [--robot robots/full.json] [--jobs 8] [--kp 8,10,...] [--kd 0,0.05,...] [--lat 0]
              [--set max_mps=4 ...] [--reuse] [--apply]
 
@@ -13,10 +13,12 @@ Course: the real practice board (tracks/practice_board.json, made from the robot
 is there, else --courses random ZETIN courses with fixed seeds. --track picks courses by hand.
 
 Every kp x kd pair of the grid runs drive 1 (learning: markers and distances must come out clean)
-and then drive 4 (or drive 2 if specified via --drives 1,2: accelerates on the straights from drive 1's data;
-max_mps / accel / decel from --set or the firmware defaults). A pair passes when on every course both drives finish,
-never more than MAX_LAT_MM off the line, with every marker read right. Score (lower is better): 5 x fast drive
-lap time [s] + drive 1 cleanliness (line rms [mm] + weave [dps] / 20 + wheel slip [%] / 2).
+and then drive 4 (or drive 2/3 if specified via --drives 1,2 / 1,3: accelerates on the straights
+from drive 1's data; max_mps / accel / decel from --set or the firmware defaults). A pair passes
+when on every course both drives finish without spinout, drive 1 stays within MAX_LAT_MM of the
+center line, drive 4 stays within MAX_LAT_FAST_MM (295 mm physical corridor bar limit; drive 2/3
+keeps MAX_LAT_MM), with every marker read right. Score (lower is better): 5 x fast drive
+lap time [s] + drive 1 rms_lat_mm + fast-drive stability (weave [dps] / 20 + wheel slip [%] / 2).
 A pass must also hold with more steering lag than the model has: the lag (robot sensor_delay,
 fitted to one gyro log) is not known exactly, so drive 1 runs again with it x1.4 (must keep the
 line, weave at most 1.5 x nominal + 10 dps) and x1.85 (must keep the line). Gains that only work
@@ -102,7 +104,8 @@ SEEDS = [101, 102, 103, 104, 105, 106, 107, 108]
 STRESS_LAG = (1.4, 1.85)   # sensor_delay factors of the stress drives
 STRESS_MU = 0.85           # tire friction factor of the grip stress drive
 # Maximum allowable distance off the center line [mm]
-MAX_LAT_MM = 70.0
+MAX_LAT_MM = 70.0         # drive 1 (exploration) & center-following drives (2, 3)
+MAX_LAT_FAST_MM = 295.0   # drive 4 (corridor straight-cut; matches sim/core/scenario.h off_track_mm)
 KEEP_RUNS = False
 
 
@@ -124,7 +127,7 @@ def clean_run_dir(d):
                     pass
 
 
-def _cache_metrics(out_dir, weave, slip):
+def _cache_metrics(out_dir, csv_name, weave, slip):
     if not out_dir:
         return
     sj_path = os.path.join(out_dir, "summary.json")
@@ -132,8 +135,8 @@ def _cache_metrics(out_dir, weave, slip):
         try:
             with open(sj_path, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
-            data["_cached_weave"] = weave
-            data["_cached_slip"] = slip
+            metrics = data.setdefault("_cached_metrics", {})
+            metrics[csv_name] = {"weave": weave, "slip": slip}
             with open(sj_path, "w", encoding="utf-8") as fh:
                 json.dump(data, fh)
         except Exception:
@@ -327,13 +330,15 @@ class SpeedOptimizer:
 def drive_metrics(csv_path):
     """(weave [dps], wheel slip [%]) of one drive. weave: rms of the yaw rate minus its 60 ms average."""
     out_dir = os.path.dirname(csv_path)
+    csv_name = os.path.basename(csv_path)
     sj_path = os.path.join(out_dir, "summary.json")
     if os.path.exists(sj_path):
         try:
             with open(sj_path, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
-                if "_cached_weave" in data and "_cached_slip" in data:
-                    return float(data["_cached_weave"]), float(data["_cached_slip"])
+                cached = data.get("_cached_metrics", {}).get(csv_name)
+                if cached and "weave" in cached and "slip" in cached:
+                    return float(cached["weave"]), float(cached["slip"])
         except Exception:
             pass
 
@@ -361,7 +366,7 @@ def drive_metrics(csv_path):
         weave = math.sqrt(sq / (len(wz) - k))
     w_res = weave
     s_res = 100.0 * sum(slip) / len(slip) if slip else 0.0
-    _cache_metrics(out_dir, w_res, s_res)
+    _cache_metrics(out_dir, csv_name, w_res, s_res)
     return w_res, s_res
 
 
@@ -400,14 +405,17 @@ def sim(course, robot, drives, speed, kp, kd, extra, out, reuse, robot_params=()
         return None
 
 
-def lost_line(d):
-    return not d["outcome"].startswith("finished") or d["max_lat_mm"] > MAX_LAT_MM
+def lost_line(d, max_lat_mm=MAX_LAT_MM):
+    return (not d["outcome"].startswith("finished")
+            or d["max_lat_mm"] > max_lat_mm
+            or d.get("max_beta_deg", 0.0) >= 90.0)
 
 
-def run(course, robot, speed, kp, kd, lat, extra, out, reuse, lag, mu, seed=1, drives="1,3"):
+def run(course, robot, speed, kp, kd, lat, extra, out, reuse, lag, mu, seed=1, drives="1,4"):
     extra = list(extra) + ([f"lat_acc_max={lat}"] if lat > 0 else [])
     j = sim(course, robot, drives, speed, kp, kd, extra, out, reuse, seed=seed)
     fast_num = drives.split(",")[-1].strip()
+    fast_limit = MAX_LAT_FAST_MM if fast_num == "4" else MAX_LAT_MM
     try:
         d1 = j["drives"][0]
         d_fast = j["drives"][1] if len(j["drives"]) > 1 else None
@@ -415,23 +423,29 @@ def run(course, robot, speed, kp, kd, lat, extra, out, reuse, lag, mu, seed=1, d
     except (TypeError, IndexError, KeyError):
         clean_run_dir(out)
         return {"lost": True, "pass": False, "score": 1000.0, "why": "no result", "kd_fw": 0}
-    weave, slip = drive_metrics(os.path.join(out, "drive1.csv"))
+    weave1, slip1 = drive_metrics(os.path.join(out, "drive1.csv"))
+    weave_fast, slip_fast = (drive_metrics(os.path.join(out, f"drive{fast_num}.csv"))
+                             if d_fast is not None else (weave1, slip1))
     clean_run_dir(out)
-    clean1 = d1["rms_lat_mm"] + weave / 20.0 + slip / 2.0
-    r = {"kd_fw": kd_fw, "rms_lat": d1["rms_lat_mm"], "max_lat": d1["max_lat_mm"], "weave": weave, "slip": slip,
-         "clean1": clean1, "lap_fast": None, "lost": False, "pass": False}
-    if lost_line(d1):
+    weave_eff = weave_fast if fast_num == "4" else weave1
+    slip_eff = slip_fast if fast_num == "4" else slip1
+    clean1 = d1["rms_lat_mm"] + weave1 / 20.0 + slip1 / 2.0
+    clean_score = d1["rms_lat_mm"] + weave_eff / 20.0 + slip_eff / 2.0
+    r = {"kd_fw": kd_fw, "rms_lat": d1["rms_lat_mm"], "max_lat": d_fast["max_lat_mm"] if d_fast else d1["max_lat_mm"],
+         "weave": weave_eff, "slip": slip_eff, "clean1": clean1, "lap_fast": None, "lost": False, "pass": False}
+    if lost_line(d1, MAX_LAT_MM):
         r.update(lost=True, score=1000.0, why=f"1: {d1['outcome'] if d1['outcome'] != 'finished' else 'line far off'}")
     elif d1.get("marker_check") != "OK":
         r.update(score=500.0 + clean1, why=f"1: markers {d1.get('marker_check')}")
     elif d_fast is None:
         r.update(score=400.0 + clean1, why=f"{fast_num}: did not run")
-    elif lost_line(d_fast):
-        r.update(lost=True, score=300.0 + clean1, why=f"{fast_num}: {d_fast['outcome'] if d_fast['outcome'] != 'finished' else 'line far off'}")
+    elif lost_line(d_fast, fast_limit):
+        reason = d_fast["outcome"] if d_fast["outcome"] != "finished" else ("spinout" if d_fast.get("max_beta_deg", 0.0) >= 90.0 else "line far off")
+        r.update(lost=True, score=300.0 + clean1, why=f"{fast_num}: {reason}")
     elif d_fast.get("marker_check") != "OK" or d_fast["lap_time_fw"] <= 0:
         r.update(score=200.0 + clean1, why=f"{fast_num}: markers {d_fast.get('marker_check')}")
     else:
-        r.update({"pass": True, "lap_fast": d_fast["lap_time_fw"], "score": 5.0 * d_fast["lap_time_fw"] + clean1, "why": ""})
+        r.update({"pass": True, "lap_fast": d_fast["lap_time_fw"], "score": 5.0 * d_fast["lap_time_fw"] + clean_score, "why": ""})
         why = ""
         if lag > 0:   # model-error stress: more steering lag than fitted
             for k, f in enumerate(STRESS_LAG):
@@ -445,7 +459,7 @@ def run(course, robot, speed, kp, kd, lat, extra, out, reuse, lag, mu, seed=1, d
                 if k == 0:
                     sw, _ = drive_metrics(os.path.join(lag_out, "drive1.csv"))
                     clean_run_dir(lag_out)
-                    if sw > 1.5 * weave + 10.0:
+                    if sw > 1.5 * weave1 + 10.0:
                         why = f"lag x{f:g}: weave {sw:.0f} dps"
                         break
                 clean_run_dir(lag_out)
@@ -463,7 +477,7 @@ def run(course, robot, speed, kp, kd, lat, extra, out, reuse, lag, mu, seed=1, d
     return r
 
 
-def tune_at(speed, courses, robot, axes, extra, jobs, reuse, quiet=False, drives="1,3"):
+def tune_at(speed, courses, robot, axes, extra, jobs, reuse, quiet=False, drives="1,4"):
     """axes = (kps, kds, lats). Returns the grid evaluated at one base speed."""
     kps, kds, lats = axes
     lag, mu = robot_delay(robot), robot_mu(robot)
@@ -526,14 +540,15 @@ def describe(p):
     return f"steer kp {p[0]:g}, steer kd {p[1]:g} s" + (f", lat_acc_max {p[2]:g}" if p[2] > 0 else "")
 
 
-def report(t, courses, robot, extra, with_pick=True, drives="1,3"):
+def report(t, courses, robot, extra, with_pick=True, drives="1,4"):
     cell, pick = t["cell"], t["pick"]
     kps, kds, lats = t["axes"]
     fast_num = drives.split(",")[-1].strip()
+    stab_src = f"drive {fast_num}" if fast_num == "4" else "drive 1"
     lines = [f"base speed {t['speed']:g} m/s, drive 1 + {fast_num} on {', '.join(os.path.basename(c) for c in courses)}, "
              f"robot {os.path.basename(robot)}" + (f", --set {' '.join(extra)}" if extra else ""),
              "",
-             f"score = 5 x drive {fast_num} lap [s] + drive 1 (line rms [mm] + weave/20 + slip%/2), lower is better",
+             f"score = 5 x drive {fast_num} lap [s] + d1 rms [mm] + {stab_src} (weave/20 + slip%/2), lower is better",
              f"x = loses the line, or fails a stress drive (steering lag x{STRESS_LAG[0]:g} / x{STRESS_LAG[1]:g}, "
              f"grip x{STRESS_MU:g}), m = misreads markers, * = picked"]
     for lat in lats:
@@ -558,8 +573,9 @@ def report(t, courses, robot, extra, with_pick=True, drives="1,3"):
         n = len(rs)
         lines.append(f"picked: base {t['speed']:g} m/s, {describe(pick)} (robot menu: steer_gain_d {rs[0]['kd_fw']:.0f})"
                      + ("" if pick in t["safe"] else "   (a grid neighbour fails: at the edge)"))
-        lines.append(f"  drive {fast_num} lap {sum(r['lap_fast'] for r in rs) / n:.2f} s;  drive 1: line rms "
-                     f"{sum(r['rms_lat'] for r in rs) / n:.1f} mm, weave {sum(r['weave'] for r in rs) / n:.0f} dps, "
+        stab_lbl = f"d{fast_num}" if fast_num == "4" else "d1"
+        lines.append(f"  drive {fast_num} lap {sum(r['lap_fast'] for r in rs) / n:.2f} s;  d1 line rms "
+                     f"{sum(r['rms_lat'] for r in rs) / n:.1f} mm, {stab_lbl} weave {sum(r['weave'] for r in rs) / n:.0f} dps, "
                      f"slip {sum(r['slip'] for r in rs) / n:.1f} %")
         lines.append(f"  passing {len(t['passing'])} of {len(t['points'])}, away from the edge {len(t['safe'])}")
         lines.append("")
@@ -579,7 +595,7 @@ def report(t, courses, robot, extra, with_pick=True, drives="1,3"):
     return "\n".join(lines)
 
 
-def save(t, text, drives="1,3", streak_info=None):
+def save(t, text, drives="1,4", streak_info=None):
     os.makedirs(t["out_root"], exist_ok=True)
     cell, pick = t["cell"], t["pick"]
     if streak_info is None and pick:
@@ -629,7 +645,7 @@ def refine_axes(center, steps):
     return tuple(out)
 
 
-def search_at(speed, courses, robot, axes, extra, jobs, reuse, refine, quiet=False, drives="1,3"):
+def search_at(speed, courses, robot, axes, extra, jobs, reuse, refine, quiet=False, drives="1,4"):
     """Coarse grid, then `refine` times a 3x3x3 grid around the best point with half the step, then the
     pick is driven again with 2 more seeds (sensor noise / gain spread): it must pass every time."""
     coarse = tune_at(speed, courses, robot, axes, extra, jobs, reuse, quiet, drives)
@@ -674,7 +690,7 @@ def search_at(speed, courses, robot, axes, extra, jobs, reuse, refine, quiet=Fal
     return {"speed": speed, "coarse": coarse, "final": best, "log": log, "verified": verified, "drives": drives}
 
 
-def report_search(s, courses, robot, extra, drives="1,3"):
+def report_search(s, courses, robot, extra, drives="1,4"):
     t = s["final"]
     fast_num = drives.split(",")[-1].strip()
     lines = [report(s["coarse"], courses, robot, extra, with_pick=False, drives=drives), "", "refinement around the best point:"]
@@ -686,8 +702,9 @@ def report_search(s, courses, robot, extra, drives="1,3"):
         ok = t["pick"] in t["safe"] and s["verified"]
         lines.append(f"{'picked' if ok else 'best found (NOT reliable)'}: base {s['speed']:g} m/s, {describe(t['pick'])}"
                      f"  (robot menu: steer_gain_d {rs[0]['kd_fw']:.0f})")
-        lines.append(f"  drive {fast_num} lap {sum(r['lap_fast'] for r in rs) / n:.2f} s;  drive 1: line rms "
-                     f"{sum(r['rms_lat'] for r in rs) / n:.1f} mm, weave {sum(r['weave'] for r in rs) / n:.0f} dps, "
+        stab_lbl = f"d{fast_num}" if fast_num == "4" else "d1"
+        lines.append(f"  drive {fast_num} lap {sum(r['lap_fast'] for r in rs) / n:.2f} s;  d1 line rms "
+                     f"{sum(r['rms_lat'] for r in rs) / n:.1f} mm, {stab_lbl} weave {sum(r['weave'] for r in rs) / n:.0f} dps, "
                      f"slip {sum(r['slip'] for r in rs) / n:.1f} %")
         lines.append("")
         lines.append("try it in the 3D session:")
@@ -942,7 +959,7 @@ def main():
     robot = os.path.abspath(opt("--robot", os.path.join(ROOT, "robots", "full.json")))
     if not os.path.exists(robot):
         robot = os.path.join(ROOT, "robots", "default.json")
-    drives = opt("--drives", "1,3")
+    drives = opt("--drives", "1,4")
     fast_num = drives.split(",")[-1].strip()
     jobs = int(opt("--jobs", max(1, (os.cpu_count() or 2) - 1)))
     n_courses = int(opt("--courses", 4))
