@@ -25,12 +25,15 @@ public:
 	double sensor_y(int channel) const { return y_[channel]; }
 	// Robot picked up by the operator: every channel sees only the dark floor far below.
 	void set_lifted(bool lifted) { lifted_ = lifted; }
+	// Debug fault injection: blank mark sensors (channels 16, 17) near given world points.
+	void set_suppressed_markers(std::vector<Vec2> pts) { suppressed_pts_ = std::move(pts); }
 
 private:
 	RobotParams p_;
 	double x_[kChannels]{}, y_[kChannels]{};
 	double white_[kChannels]{}, black_[kChannels]{};
 	bool lifted_ = false;
+	std::vector<Vec2> suppressed_pts_;
 	std::vector<std::array<double, 8>> hist_;   // ring of ground frames, one per physics step
 	size_t head_ = 0, filled_ = 0;
 	std::mt19937 rng_;

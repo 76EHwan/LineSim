@@ -103,6 +103,15 @@ public:
 		marker_diags_.clear();
 		focused_miss_idx_ = -1;
 	}
+	void set_dropped_markers(const std::vector<std::array<double, 2>>& pts, std::string label = "") {
+		dropped_markers_ = pts;
+		dropped_label_ = std::move(label);
+	}
+	void clear_dropped_markers() {
+		dropped_markers_.clear();
+		dropped_label_.clear();
+	}
+	const std::string& dropped_markers_label() const { return dropped_label_; }
 	const std::vector<MarkerVisualInfo>& marker_diags() const { return marker_diags_; }
 	int focused_miss_idx() const { return focused_miss_idx_; }
 	void jump_to_next_marker_miss();
@@ -154,6 +163,8 @@ private:
 	double cx_ = 0, cy_ = 0, extent_ = 2;   // track center / size for the top view
 	bool fast_mode_ = false;
 	std::vector<MarkerVisualInfo> marker_diags_;
+	std::vector<std::array<double, 2>> dropped_markers_;
+	std::string dropped_label_;
 	int focused_miss_idx_ = -1;
 	bool show_gain_rec_ = true;
 	bool show_fft_ = true;

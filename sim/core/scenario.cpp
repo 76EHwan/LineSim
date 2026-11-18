@@ -2635,6 +2635,8 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 		live->on_reset = [&]() {
 			robot->place(start);
 			ir.set_lifted(false);
+		ir.set_suppressed_markers({});
+		if (viewer) viewer->clear_dropped_markers();
 		};
 		if (opt.session)
 			live->session = &session;
@@ -2806,6 +2808,8 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 		cur->n = n;
 		robot->place(start);
 		ir.set_lifted(false);
+		ir.set_suppressed_markers({});
+		if (viewer) viewer->clear_dropped_markers();
 		lifted = false;
 		lift_reason.clear();
 		ramp_seen = ramp_done = false;
@@ -2825,6 +2829,51 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 		auto w0 = std::chrono::steady_clock::now();
 		uint64_t r0 = sim->resumes, s0 = sim->sleeps, f0[16];
 		std::memcpy(f0, sim->fired, sizeof f0);
+
+		if (n > 1) {
+			if (const char* drop_env = std::getenv("LINESIM_DROP_MARKERS")) {
+				if (*drop_env && std::strcmp(drop_env, "0") != 0) {
+					int min_d = 2, max_d = 5;
+					int a = 0, b = 0;
+					if (std::sscanf(drop_env, "%d,%d", &a, &b) == 2 && a >= 0 && b >= a) {
+						min_d = a; max_d = b;
+					} else if (std::sscanf(drop_env, "%d", &a) == 1 && a > 1) {
+						min_d = max_d = a;
+					}
+					const auto evs = track.expected_marker_events();
+					std::vector<size_t> cand;
+					for (size_t i = 0; i < evs.size(); i++) {
+						if (evs[i].type != 'U') cand.push_back(i);
+					}
+					if (!cand.empty()) {
+						std::mt19937 rng(static_cast<uint32_t>(opt.seed + n * 1009));
+						std::shuffle(cand.begin(), cand.end(), rng);
+						int cnt = min_d + static_cast<int>(rng() % static_cast<uint32_t>(max_d - min_d + 1));
+						cnt = std::min(cnt, static_cast<int>(cand.size()));
+						std::vector<Vec2> pts;
+						std::vector<std::array<double, 2>> vpts;
+						std::string dlabel;
+						pts.reserve(cnt);
+						vpts.reserve(cnt);
+						if (!opt.quiet)
+							std::printf("[FAULT INJECT] Drive %d: dropping %d marker(s) at", n, cnt);
+						for (int k = 0; k < cnt; k++) {
+							const auto& ev = evs[cand[k]];
+							pts.push_back(ev.center);
+							vpts.push_back({ev.center.x, ev.center.y});
+							char item[48];
+							std::snprintf(item, sizeof item, "%s#%zu(%c@%.2fm)", k ? " " : "", ev.index, ev.type, ev.s);
+							dlabel += item;
+							if (!opt.quiet)
+								std::printf(" #%zu(%c@%.2fm)", ev.index, ev.type, ev.s);
+						}
+						if (!opt.quiet) std::printf("\n");
+						ir.set_suppressed_markers(std::move(pts));
+						if (viewer) viewer->set_dropped_markers(vpts, dlabel);
+					}
+				}
+			}
+		}
 
 		fwb_drive(n);
 
@@ -3139,6 +3188,8 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 		start = start_pose();
 		robot->place(start);
 		ir.set_lifted(false);
+		ir.set_suppressed_markers({});
+		if (viewer) viewer->clear_dropped_markers();
 		session.map_name = track.name();
 		session.expected = track.expected_markers();
 		drive1_ok = false;

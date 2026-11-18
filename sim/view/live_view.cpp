@@ -566,6 +566,9 @@ void LiveView::render(double t_sim, const std::string& phase) {
 			v_.show_reconstructed_map() ? "" : " [hidden]");
 		hud.status += mbuf;
 	}
+	if (!v_.dropped_markers_label().empty()) {
+		hud.status += "\ndropped   " + v_.dropped_markers_label();
+	}
 	hud.live_beta = live_beta_;
 	hud.live_lat_mm = lat * 1000.0;
 	// lap list: one course as before (drive 1-4); several (auto-tune) under a heading each, with the

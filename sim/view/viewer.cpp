@@ -154,15 +154,35 @@ void Viewer::attach(mjModel_* m, mjData_* d, int follow_body, const Track& track
 }
 
 void Viewer::set_track(const Track& track) {
-	// the track: white bands / arc pieces / mark bars a hair above the floor
+	// the track: faint +-150mm corridor underneath, then white bands / arc pieces / mark bars above the floor
 	im_->track.clear();
 	trail_.clear();
 	track_alpha_ = 1.0f;
 	traced_map_.clear();
 	reconstructed_map_.clear();
 	reconstructed_markers_.clear();
+	const float corridor[4] = {0.45f, 0.72f, 0.95f, 0.045f};
 	const float white[4] = {0.95f, 0.95f, 0.95f, 1.0f};
+	const double cz = 0.00012, chz = 0.00010, chw = 0.15;
 	const double z = 0.0003, hz = 0.0003;
+	for (const Shape& s : track.shapes()) {
+		mjvGeom g;
+		if (s.kind == Shape::Band) {
+			double yaw = std::atan2(s.u.y, s.u.x);
+			box_geom(&g, s.a.x + s.u.x * s.len / 2, s.a.y + s.u.y * s.len / 2, cz, s.len / 2, chw, chz, yaw, corridor);
+			im_->track.push_back(g);
+		} else if (s.kind == Shape::ArcBand) {
+			int n = std::max(4, static_cast<int>(std::fabs(s.sweep) * s.R / 0.025));
+			double da = s.sweep / n;
+			double half = std::fabs(da) * (s.R + chw) / 2 * 1.04;
+			for (int k = 0; k < n; k++) {
+				double a = s.a0 + da * (k + 0.5);
+				double x = s.a.x + s.R * std::cos(a), y = s.a.y + s.R * std::sin(a);
+				box_geom(&g, x, y, cz, half, chw, chz, a + 1.5707963267948966, corridor);
+				im_->track.push_back(g);
+			}
+		}
+	}
 	for (const Shape& s : track.shapes()) {
 		mjvGeom g;
 		if (s.kind == Shape::Band) {
@@ -649,6 +669,27 @@ void Viewer::render(const ViewerHud& hud) {
 		mjv_initGeom(g, mjGEOM_CYLINDER, size, pos, nullptr, rgba);
 		g->category = mjCAT_DECOR;
 		g->emission = 1.0f;
+	}
+
+	// Dropped markers (fault-injection debug): glowing red disc + yellow X on floor
+	for (const auto& dp : dropped_markers_) {
+		if (scn.ngeom + 3 > scn.maxgeom) break;
+		const float ring_c[4] = {1.0f, 0.22f, 0.12f, 0.65f};
+		const float cross_c[4] = {1.0f, 0.92f, 0.15f, 0.95f};
+		mjtNum p[3] = {dp[0], dp[1], 0.0011};
+		mjtNum sz[3] = {0.055, 0.055, 0.0004};
+		mjvGeom* gr = &scn.geoms[scn.ngeom++];
+		mjv_initGeom(gr, mjGEOM_CYLINDER, sz, p, nullptr, ring_c);
+		gr->category = mjCAT_DECOR;
+		gr->emission = 1.0f;
+
+		mjvGeom* gx1 = &scn.geoms[scn.ngeom++];
+		box_geom(gx1, dp[0], dp[1], 0.0015, 0.045, 0.006, 0.0003, 0.7853981633974483, cross_c);
+		gx1->emission = 1.0f;
+
+		mjvGeom* gx2 = &scn.geoms[scn.ngeom++];
+		box_geom(gx2, dp[0], dp[1], 0.0015, 0.045, 0.006, 0.0003, -0.7853981633974483, cross_c);
+		gx2->emission = 1.0f;
 	}
 
 	// Marker visual diagnostics: tape boxes on floor

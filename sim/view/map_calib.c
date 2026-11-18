@@ -2,6 +2,7 @@
 
 #include <math.h>
 #include <stddef.h>
+#include <stdlib.h>
 
 #define MC_PI      3.14159265358979323846f
 #define MC_RAD2DEG 57.2957795130823208768f
@@ -377,9 +378,8 @@ void MapCalib_Run(MapCalibNode *nodes, int32_t n_nodes,
 	}
 
 	const int used_zetin = (!cfg->path_only && cfg->rule_arc_radius > 0.0f && markers && n_markers >= 2);
-	if (used_zetin) {
-		reconstruct_zetin_map(nodes, n_nodes, markers, n_markers, cfg, th0, &st);
-	} else {
+	/* Stage 2 + Stage 3 + Stage 4: Vector reconstruction (always run so 1st drive also has vector map) */
+	{
 		/*
 		 * Stage 2:
 		 * - Map mode (!path_only): 45-deg straight snapping + constant-arc reconstruction
@@ -481,7 +481,7 @@ void MapCalib_Run(MapCalibNode *nodes, int32_t n_nodes,
 	}
 
 	/* Stage 4: Closed-loop lateral/overshoot closure (skipped when ZETIN pass already closed straights) */
-	if (!used_zetin && cfg->closed_loop && total_s > 0.5f) {
+	if (cfg->closed_loop && total_s > 0.5f) {
 		const float u0x = cosf(th0), u0y = sinf(th0);
 		const float n0x = -u0y, n0y = u0x;
 		const float dx = nodes[n_nodes - 1].x - nodes[0].x;
@@ -495,6 +495,45 @@ void MapCalib_Run(MapCalibNode *nodes, int32_t n_nodes,
 			float u = nodes[i].s / total_s;
 			nodes[i].x -= u * (e_lat * n0x + e_long * u0x);
 			nodes[i].y -= u * (e_lat * n0y + e_long * u0y);
+		}
+	}
+
+	if (used_zetin) {
+		float *vec_xy = (float *)malloc((size_t)n_nodes * 2U * sizeof(float));
+		if (vec_xy) {
+			for (int32_t i = 0; i < n_nodes; ++i) {
+				vec_xy[2 * i] = nodes[i].x;
+				vec_xy[2 * i + 1] = nodes[i].y;
+				nodes[i].x = nodes[i].th - drift_per_m * nodes[i].s;
+			}
+			float vec_odom_scale = st.odom_scale;
+			float vec_closure_lat = st.closure_lat_mm;
+			reconstruct_zetin_map(nodes, n_nodes, markers, n_markers, cfg, th0, &st);
+			st.odom_scale = vec_odom_scale;
+			st.closure_lat_mm = vec_closure_lat;
+			for (int32_t m = 1; m < n_markers; ++m) {
+				int32_t ia = markers[m - 1].node_idx;
+				int32_t ib = markers[m].node_idx;
+				if (ia < 0) ia = 0;
+				if (ib >= n_nodes) ib = n_nodes - 1;
+				if (ib <= ia) continue;
+				float ex_a = nodes[ia].x - vec_xy[2 * ia];
+				float ey_a = nodes[ia].y - vec_xy[2 * ia + 1];
+				float ex_b = nodes[ib].x - vec_xy[2 * ib];
+				float ey_b = nodes[ib].y - vec_xy[2 * ib + 1];
+				float sa = nodes[ia].s;
+				float ds = nodes[ib].s - sa;
+				for (int32_t i = ia + 1; i < ib; ++i) {
+					float u = (ds > 1e-4f) ? ((nodes[i].s - sa) / ds) : 0.5f;
+					float vx_al = vec_xy[2 * i] + ex_a * (1.0f - u) + ex_b * u;
+					float vy_al = vec_xy[2 * i + 1] + ey_a * (1.0f - u) + ey_b * u;
+					float d = hypotf(nodes[i].x - vx_al, nodes[i].y - vy_al);
+					float w_vec = (d <= 0.12f) ? 0.35f : 0.20f;
+					nodes[i].x = (1.0f - w_vec) * nodes[i].x + w_vec * vx_al;
+					nodes[i].y = (1.0f - w_vec) * nodes[i].y + w_vec * vy_al;
+				}
+			}
+			free(vec_xy);
 		}
 	}
 

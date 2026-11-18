@@ -41,6 +41,29 @@
       "cwd": "${workspaceFolder}",
       "console": "integratedTerminal",
       "preLaunchTask": "LineSim: Build (Release)"
+    },
+    {
+      "name": "LineSim: Championship (Drop Markers 2-5)",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/build/Release/linesim.exe",
+      "args": [
+        "view",
+        "--session",
+        "scenarios/finals_1_5x_championship.json",
+        "--complex",
+        "--out",
+        "runs/latest"
+      ],
+      "environment": [
+        {
+          "name": "LINESIM_DROP_MARKERS",
+          "value": "2,5"
+        }
+      ],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "preLaunchTask": "LineSim: Build (Release)"
     }
   ]
 }

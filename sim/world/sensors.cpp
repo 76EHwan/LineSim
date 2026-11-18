@@ -63,6 +63,14 @@ uint16_t IrBar::sample(int channel, const Robot& robot, const Track& track) {
 		g = robot.body_to_ground(x_[channel], y_[channel]);
 	}
 	double c = lifted_ ? 0.0 : track.coverage(g, p_.sensor_sigma);
+	if (c > 0.0 && channel >= 16 && !suppressed_pts_.empty()) {
+		for (const Vec2& p : suppressed_pts_) {
+			if (std::hypot(g.x - p.x, g.y - p.y) < 0.085) {
+				c = 0.0;
+				break;
+			}
+		}
+	}
 	double v = black_[channel] + (white_[channel] - black_[channel]) * c + p_.ir_noise * noise_(rng_);
 	return static_cast<uint16_t>(std::clamp(v, 0.0, 4095.0));
 }
