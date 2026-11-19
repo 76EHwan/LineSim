@@ -232,10 +232,14 @@ constexpr int kTuneCourses = 3;
 
 struct TuneSet {
 	double kp = 15.04, kd = 0.215;     // steering PD, kd in seconds (431 * 0.0005s)
-	double lat = 14.77, sl = 0.10;     // lat_acc_max [m/s2], slalom_ratio
+	double lat = 14.77, sl = 0.10;     // lat_acc_max [m/s2] (legacy), slalom_ratio
 	double target_shift = 0.0;          // target_shift_val
 	double target_curve_gain = 1.50;    // target_curve_gain
 	double brake_margin = 0.10;         // brake_margin_m [m]
+	double bulge_lat_acc = 6.50;        // Bulge curved shortcut lateral accel [m/s2]
+	double corner45_max_mps = 3.30;     // Corner45 arc shortcut max speed [m/s]
+	double omega_add_mps = 0.04;        // Omega hairpin arc speed offset [m/s]
+	double wave_add_mps = 0.25;         // Wave180 shortcut speed offset [m/s]
 	double pos_atten = 0.0;             // pos_atten_gain (fixed 0.0)
 	double yaw_kp = 0.33, yaw_ki = 0.9; // yaw cascade
 	double accel = 6.0, decel = 6.0;    // accel/decel
@@ -713,7 +717,7 @@ public:
 
 	enum class ProbeMode {
 		SPEED,
-		LAT
+		CURVE_CUT
 	};
 
 	int target_window() const { return target_win_; }
@@ -724,8 +728,22 @@ public:
 	double dv_down() const { return dv_; }
 	double dv_up() const { return dv_; }
 	ProbeMode probe_mode() const { return probe_mode_; }
-	double d_lat() const { return d_lat_; }
-	double max_lat() const { return max_lat_; }
+	double d_bulge() const { return d_bulge_; }
+	double max_bulge() const { return max_bulge_; }
+
+	bool can_step_curve_cut() const {
+		return (best_.bulge_lat_acc + 1e-4 < max_bulge_) ||
+		       (best_.corner45_max_mps + 1e-4 < max_c45_) ||
+		       (best_.omega_add_mps + 1e-4 < max_omega_) ||
+		       (best_.wave_add_mps + 1e-4 < max_wave_);
+	}
+
+	void step_curve_cut_up() {
+		best_.bulge_lat_acc = std::clamp(std::round((best_.bulge_lat_acc + d_bulge_) * 100.0) / 100.0, 3.5, max_bulge_);
+		best_.corner45_max_mps = std::clamp(std::round((best_.corner45_max_mps + d_c45_) * 100.0) / 100.0, 2.0, max_c45_);
+		best_.omega_add_mps = std::clamp(std::round((best_.omega_add_mps + d_omega_) * 100.0) / 100.0, -0.30, max_omega_);
+		best_.wave_add_mps = std::clamp(std::round((best_.wave_add_mps + d_wave_) * 100.0) / 100.0, -0.30, max_wave_);
+	}
 
 	double decay_dv() {
 		const double old_dv = dv_;
@@ -749,18 +767,25 @@ public:
 		min_dv_ = std::getenv("LINESIM_ENDLESS_MIN_DV")
 			? std::max(0.001, std::atof(std::getenv("LINESIM_ENDLESS_MIN_DV"))) : 0.01;
 		dv_ = start_dv_;
-		d_lat_ = std::getenv("LINESIM_ENDLESS_D_LAT")
-			? std::max(0.05, std::atof(std::getenv("LINESIM_ENDLESS_D_LAT"))) : 0.50;
-		max_lat_ = std::getenv("LINESIM_ENDLESS_MAX_LAT")
-			? std::max(12.0, std::atof(std::getenv("LINESIM_ENDLESS_MAX_LAT"))) : 20.0;
+		d_bulge_ = std::getenv("LINESIM_ENDLESS_D_BULGE")
+			? std::max(0.10, std::atof(std::getenv("LINESIM_ENDLESS_D_BULGE"))) : 0.50;
+		max_bulge_ = std::getenv("LINESIM_ENDLESS_MAX_BULGE")
+			? std::max(6.50, std::atof(std::getenv("LINESIM_ENDLESS_MAX_BULGE"))) : 14.0;
+		d_c45_ = 0.15; max_c45_ = 5.00;
+		d_omega_ = 0.03; max_omega_ = 0.40;
+		d_wave_ = 0.05; max_wave_ = 0.80;
 		probe_mode_ = ProbeMode::SPEED;
 		best_ = from;
 		best_.pos_atten = 0.0;
 		// Clamp initial gains to healthy non-saturated bounds before storing anchor_
 		best_.kp = std::max(0.0, std::round(best_.kp * 1000.0) / 1000.0);
 		best_.kd = std::max(0.0, best_.kd);
-		best_.lat = std::clamp(best_.lat, 10.0, max_lat_);
+		best_.lat = std::clamp(best_.lat, 10.0, 20.0);
 		best_.brake_margin = std::clamp(best_.brake_margin, 0.06, 0.24);
+		best_.bulge_lat_acc = std::clamp(best_.bulge_lat_acc > 0.5 ? best_.bulge_lat_acc : 6.50, 3.5, 16.0);
+		best_.corner45_max_mps = std::clamp(best_.corner45_max_mps > 0.1 ? best_.corner45_max_mps : 3.30, 2.0, 6.0);
+		best_.omega_add_mps = std::clamp(best_.omega_add_mps, -0.30, 0.80);
+		best_.wave_add_mps = std::clamp(best_.wave_add_mps, -0.30, 1.20);
 		anchor_ = best_;
 		max_fail_pct_ = max_fail_pct > 0.0 ? max_fail_pct : 10.0;
 		target_win_ = window_size > 0 ? window_size : 50;
@@ -835,8 +860,9 @@ public:
 				*out_v = prev_passed_.speed;
 				*out_set = prev_passed_.set;
 				if (out_reason) {
-					*out_reason = fmt("Prev-Passed Window WON (%d vs %d wins) -> Overwrote with faster Prev-Passed (%.2f m/s, lat=%.1f)",
-						ab_score_.prev_passed_wins, ab_score_.speed_up_wins, prev_passed_.speed, prev_passed_.set.lat);
+					*out_reason = fmt("Prev-Passed Window WON (%d vs %d wins) -> Overwrote with faster Prev-Passed (%.2f m/s, bulge=%.2f c45=%.2f)",
+						ab_score_.prev_passed_wins, ab_score_.speed_up_wins, prev_passed_.speed,
+						prev_passed_.set.bulge_lat_acc, prev_passed_.set.corner45_max_mps);
 				}
 				return;
 			} else if (ab_score_.speed_up_wins > ab_score_.prev_passed_wins) {
@@ -844,8 +870,9 @@ public:
 				*out_v = v_;
 				*out_set = best_;
 				if (out_reason) {
-					*out_reason = fmt("Speed-Up Window WON (%d vs %d wins) -> Overwrote with faster Speed-Up (%.2f m/s, lat=%.1f)",
-						ab_score_.speed_up_wins, ab_score_.prev_passed_wins, v_, best_.lat);
+					*out_reason = fmt("Probe Window WON (%d vs %d wins) -> Overwrote with faster Probe (%.2f m/s, bulge=%.2f c45=%.2f)",
+						ab_score_.speed_up_wins, ab_score_.prev_passed_wins, v_,
+						best_.bulge_lat_acc, best_.corner45_max_mps);
 				}
 				return;
 			} else {
@@ -853,8 +880,9 @@ public:
 				*out_v = prev_passed_.speed;
 				*out_set = prev_passed_.set;
 				if (out_reason) {
-					*out_reason = fmt("A/B Tied (%d vs %d wins) -> Preserved verified Prev-Passed (%.2f m/s, lat=%.1f)",
-						ab_score_.speed_up_wins, ab_score_.prev_passed_wins, prev_passed_.speed, prev_passed_.set.lat);
+					*out_reason = fmt("A/B Tied (%d vs %d wins) -> Preserved verified Prev-Passed (%.2f m/s, bulge=%.2f c45=%.2f)",
+						ab_score_.speed_up_wins, ab_score_.prev_passed_wins, prev_passed_.speed,
+						prev_passed_.set.bulge_lat_acc, prev_passed_.set.corner45_max_mps);
 				}
 				return;
 			}
@@ -863,17 +891,18 @@ public:
 		*out_v = v_;
 		*out_set = best_;
 		if (out_reason) {
-			*out_reason = fmt("Current best parameters (%.2f m/s, lat=%.1f)", v_, best_.lat);
+			*out_reason = fmt("Current best parameters (%.2f m/s, bulge=%.2f c45=%.2f omg=%+.2f wav=%+.2f)",
+				v_, best_.bulge_lat_acc, best_.corner45_max_mps, best_.omega_add_mps, best_.wave_add_mps);
 		}
 	}
 
-	// Generate 5 targeted AI Gain Auto-Heal candidates using proportional failure telemetry & anti-ratchet centering
+	// Generate targeted AI Gain Auto-Heal candidates using proportional failure telemetry & anti-ratchet centering
 	std::vector<HealCandidate> make_heal_candidates(const FailMetrics& fm) const {
 		std::mt19937 rng(9001 + static_cast<unsigned>(total_maps_) * 97 + static_cast<unsigned>(total_healed_) * 31);
 		std::normal_distribution<double> norm(0.0, 1.0);
 		std::uniform_real_distribution<double> sym(-1.0, 1.0);
 
-		// 1. Anti-Ratchet Centering: pull 15% toward anchor_ and desaturate if kd/kp/lat drifted near limits
+		// 1. Anti-Ratchet Centering: pull 15% toward anchor_ and desaturate if gains drifted near limits
 		Set base = best_;
 		base.kp = std::round((0.85 * best_.kp + 0.15 * anchor_.kp) * 1000.0) / 1000.0;
 		base.kd = 0.85 * best_.kd + 0.15 * anchor_.kd;
@@ -881,6 +910,10 @@ public:
 		base.brake_margin = 0.85 * best_.brake_margin + 0.15 * anchor_.brake_margin;
 		base.target_shift = 0.85 * best_.target_shift + 0.15 * anchor_.target_shift;
 		base.target_curve_gain = 0.85 * best_.target_curve_gain + 0.15 * anchor_.target_curve_gain;
+		base.bulge_lat_acc = 0.85 * best_.bulge_lat_acc + 0.15 * anchor_.bulge_lat_acc;
+		base.corner45_max_mps = 0.85 * best_.corner45_max_mps + 0.15 * anchor_.corner45_max_mps;
+		base.omega_add_mps = 0.85 * best_.omega_add_mps + 0.15 * anchor_.omega_add_mps;
+		base.wave_add_mps = 0.85 * best_.wave_add_mps + 0.15 * anchor_.wave_add_mps;
 
 		// (Unbounded: no artificial saturation clamping on kp or kd)
 		const bool kd_oversaturated = false;
@@ -910,8 +943,6 @@ public:
 				// Proportional kp reduction based on slip & oscillation severity
 				const double dkp = -(0.35 * slip_sev + 0.45 * osc_sev);
 				s.kp = std::max(0.0, std::round((base.kp + dkp) * 1000.0) / 1000.0);
-				// If kd was already oversaturated, high weave is caused by D-noise kick -> lower kd!
-				// Otherwise, increase kd proportionally to slip/oscillation toward healthy ceiling (<= 0.23s = 460)
 				if (kd_oversaturated) {
 					s.kd = std::max(0.0, best_.kd - (0.012 + 0.018 * osc_sev));
 				} else {
@@ -927,14 +958,15 @@ public:
 				s.kd = std::max(0.0, 0.65 * base.kd + 0.35 * ideal_kd(s.kp) + 0.005 * osc_sev);
 			}
 			if (!fm.d1_failed) {
-				s.lat = std::clamp(base.lat - (0.25 * slip_sev + 0.35 * speed_sev), 11.0, max_lat_);
 				s.brake_margin = std::clamp(base.brake_margin + (0.012 * slip_sev + 0.022 * speed_sev), 0.06, 0.24);
+				s.bulge_lat_acc = std::clamp(base.bulge_lat_acc - (0.35 * slip_sev + 0.30 * speed_sev), 3.5, 16.0);
+				s.corner45_max_mps = std::clamp(base.corner45_max_mps - (0.12 * slip_sev + 0.15 * speed_sev), 2.0, 6.0);
 			}
 			s.pos_atten = 0.0;
 			cands.push_back({s, "Heal-PropPD"});
 		}
 
-		// Candidate 2 [Heal-Entry]: Speed-excess (fail_v) proportional braking & cornering grip adjustment
+		// Candidate 2 [Heal-Entry]: Speed-excess (fail_v) proportional braking & curved-shortcut speed adjustment
 		{
 			Set s = base;
 			const double entry_sev = std::max({speed_sev, slip_sev, 0.35 * under_sev});
@@ -943,8 +975,11 @@ public:
 			s.kd = std::max(0.0, 0.60 * base.kd + 0.40 * ideal_kd(s.kp));
 			if (!fm.d1_failed) {
 				s.brake_margin = std::clamp(base.brake_margin + (0.015 + 0.030 * entry_sev), 0.07, 0.24);
-				s.lat = std::clamp(base.lat - (0.30 + 0.55 * entry_sev), 11.0, max_lat_);
 				s.sl = std::clamp(base.sl - 0.015 * slip_sev, 0.03, 0.20);
+				s.bulge_lat_acc = std::clamp(base.bulge_lat_acc - (0.50 + 0.70 * entry_sev), 3.5, 16.0);
+				s.corner45_max_mps = std::clamp(base.corner45_max_mps - (0.15 + 0.25 * entry_sev), 2.0, 6.0);
+				s.omega_add_mps = std::clamp(base.omega_add_mps - (0.03 + 0.05 * entry_sev), -0.30, 0.80);
+				s.wave_add_mps = std::clamp(base.wave_add_mps - (0.05 + 0.08 * entry_sev), -0.30, 1.20);
 			} else {
 				s.kd = std::max(0.0, s.kd + 0.008 * (osc_sev - 0.5));
 			}
@@ -953,16 +988,18 @@ public:
 		}
 
 		// Candidate 3 [Heal-DeSat]: Anti-saturation / D-kick relief & Anchor restoration
-		// Specifically tests lowering excessive kd and restoring brisk kp/lat response
+		// Specifically tests lowering excessive kd and restoring brisk kp/curved-shortcut response
 		{
 			Set s = best_;
 			s.kp = std::max(0.0, std::round((0.55 * best_.kp + 0.45 * anchor_.kp + 0.35 * under_sev) * 1000.0) / 1000.0);
-			// Explicitly reduce kd toward nominal (280..350) to eliminate high-D derivative kick!
 			const double nominal_kd = anchor_.kd;
 			s.kd = std::max(0.0, 0.50 * best_.kd + 0.50 * nominal_kd);
 			if (!fm.d1_failed) {
-				s.lat = std::clamp(0.60 * best_.lat + 0.40 * anchor_.lat - 0.20 * slip_sev, 11.4, 14.8);
 				s.brake_margin = std::clamp(0.60 * best_.brake_margin + 0.40 * anchor_.brake_margin + 0.015 * speed_sev, 0.07, 0.22);
+				s.bulge_lat_acc = std::clamp(0.60 * best_.bulge_lat_acc + 0.40 * anchor_.bulge_lat_acc - 0.30 * slip_sev, 3.5, 16.0);
+				s.corner45_max_mps = std::clamp(0.60 * best_.corner45_max_mps + 0.40 * anchor_.corner45_max_mps - 0.10 * speed_sev, 2.0, 6.0);
+				s.omega_add_mps = std::clamp(0.60 * best_.omega_add_mps + 0.40 * anchor_.omega_add_mps - 0.02 * slip_sev, -0.30, 0.80);
+				s.wave_add_mps = std::clamp(0.60 * best_.wave_add_mps + 0.40 * anchor_.wave_add_mps - 0.04 * slip_sev, -0.30, 1.20);
 			}
 			s.pos_atten = 0.0;
 			cands.push_back({s, "Heal-DeSat"});
@@ -979,6 +1016,11 @@ public:
 				s.target_shift = (base.target_shift <= 0.001) ? 0.0 : std::clamp(base.target_shift + shift_dir + sym(rng) * 0.025, 0.0, 0.56);
 				s.target_curve_gain = std::clamp(base.target_curve_gain + 0.05 * (under_sev - 0.5 * slip_sev) + sym(rng) * 0.05, 1.25, 2.00);
 				s.brake_margin = std::clamp(base.brake_margin + 0.015 * speed_sev, 0.06, 0.23);
+				const double cut_trim = std::max(slip_sev, 0.5 * under_sev);
+				s.bulge_lat_acc = std::clamp(base.bulge_lat_acc - 0.40 * cut_trim + sym(rng) * 0.35, 3.5, 16.0);
+				s.corner45_max_mps = std::clamp(base.corner45_max_mps - 0.12 * cut_trim + sym(rng) * 0.15, 2.0, 6.0);
+				s.omega_add_mps = std::clamp(base.omega_add_mps - 0.04 * cut_trim + sym(rng) * 0.04, -0.30, 0.80);
+				s.wave_add_mps = std::clamp(base.wave_add_mps - 0.06 * cut_trim + sym(rng) * 0.06, -0.30, 1.20);
 			}
 			s.pos_atten = 0.0;
 			cands.push_back({s, "Heal-Apex"});
@@ -991,13 +1033,29 @@ public:
 			s.kp = std::max(0.0, std::round((base.kp + norm(rng) * (0.85 * scale)) * 1000.0) / 1000.0);
 			s.kd = std::max(0.0, base.kd + norm(rng) * (0.009 * scale));
 			if (!fm.d1_failed) {
-				s.lat = std::clamp(base.lat + norm(rng) * (0.35 * scale), 11.0, max_lat_);
 				s.brake_margin = std::clamp(base.brake_margin + norm(rng) * (0.015 * scale), 0.06, 0.24);
 				s.target_shift = (base.target_shift <= 0.001) ? 0.0 : std::clamp(base.target_shift + norm(rng) * 0.025, 0.0, 0.56);
 				s.target_curve_gain = std::clamp(base.target_curve_gain + norm(rng) * 0.05, 1.25, 2.00);
+				s.bulge_lat_acc = std::clamp(base.bulge_lat_acc + norm(rng) * (0.55 * scale), 3.5, 16.0);
+				s.corner45_max_mps = std::clamp(base.corner45_max_mps + norm(rng) * (0.20 * scale), 2.0, 6.0);
+				s.omega_add_mps = std::clamp(base.omega_add_mps + norm(rng) * (0.04 * scale), -0.30, 0.80);
+				s.wave_add_mps = std::clamp(base.wave_add_mps + norm(rng) * (0.08 * scale), -0.30, 1.20);
 			}
 			s.pos_atten = 0.0;
 			cands.push_back({s, "Heal-Trust"});
+		}
+
+		// Candidate 6 [Heal-CurveCut]: Drive 4 specialized curved-shortcut speed trim (preserves steering PD)
+		if (!fm.d1_failed) {
+			Set s = best_;
+			const double cc_sev = std::max({0.5, slip_sev, speed_sev, 0.7 * under_sev});
+			s.bulge_lat_acc = std::clamp(best_.bulge_lat_acc - 0.85 * cc_sev, 3.5, 16.0);
+			s.corner45_max_mps = std::clamp(best_.corner45_max_mps - 0.28 * cc_sev, 2.0, 6.0);
+			s.omega_add_mps = std::clamp(best_.omega_add_mps - 0.06 * cc_sev, -0.30, 0.80);
+			s.wave_add_mps = std::clamp(best_.wave_add_mps - 0.10 * cc_sev, -0.30, 1.20);
+			s.brake_margin = std::clamp(best_.brake_margin + 0.015 * speed_sev, 0.06, 0.24);
+			s.pos_atten = 0.0;
+			cands.push_back({s, "Heal-CurveCut"});
 		}
 		return cands;
 	}
@@ -1008,13 +1066,17 @@ public:
 		constexpr double a = 0.15;
 		best_.kp = std::max(0.0, std::round((a * healed.kp + (1.0 - a) * best_.kp) * 1000.0) / 1000.0);
 		best_.kd = std::max(0.0, a * healed.kd + (1.0 - a) * best_.kd);
-		best_.lat = std::clamp(a * healed.lat + (1.0 - a) * best_.lat, 10.0, max_lat_);
+		best_.lat = std::clamp(a * healed.lat + (1.0 - a) * best_.lat, 10.0, 20.0);
 		best_.brake_margin = std::clamp(a * healed.brake_margin + (1.0 - a) * best_.brake_margin, 0.06, 0.24);
 		best_.target_shift = (best_.target_shift <= 0.001) ? 0.0 : std::clamp(a * healed.target_shift + (1.0 - a) * best_.target_shift, 0.0, 0.58);
 		best_.target_curve_gain = std::clamp(a * healed.target_curve_gain + (1.0 - a) * best_.target_curve_gain, 1.20, 2.05);
 		best_.sl = std::clamp(a * healed.sl + (1.0 - a) * best_.sl, 0.02, 0.22);
 		best_.yaw_kp = (best_.yaw_kp <= 0.001) ? 0.0 : std::clamp(a * healed.yaw_kp + (1.0 - a) * best_.yaw_kp, 0.0, 0.65);
 		best_.yaw_ki = (best_.yaw_kp <= 0.001) ? 0.0 : std::clamp(a * healed.yaw_ki + (1.0 - a) * best_.yaw_ki, 0.0, 0.20);
+		best_.bulge_lat_acc = std::clamp(std::round((a * healed.bulge_lat_acc + (1.0 - a) * best_.bulge_lat_acc) * 100.0) / 100.0, 3.5, 16.0);
+		best_.corner45_max_mps = std::clamp(std::round((a * healed.corner45_max_mps + (1.0 - a) * best_.corner45_max_mps) * 100.0) / 100.0, 2.0, 6.0);
+		best_.omega_add_mps = std::clamp(std::round((a * healed.omega_add_mps + (1.0 - a) * best_.omega_add_mps) * 100.0) / 100.0, -0.30, 0.80);
+		best_.wave_add_mps = std::clamp(std::round((a * healed.wave_add_mps + (1.0 - a) * best_.wave_add_mps) * 100.0) / 100.0, -0.30, 1.20);
 		best_.pos_atten = 0.0;
 		total_healed_++;
 		just_healed_ = true;
@@ -1125,10 +1187,11 @@ public:
 
 		char log_buf[200];
 
-		// Helper to advance to the next step (Speed-Up or Lat-Up) once current step is verified
+		// Helper to advance to the next step (Speed-Up or CurveCut-Up) once current step is verified
 		auto advance_to_next_step = [&](bool by_streak, int p_cnt, int h_cnt, int f_cnt) {
 			const double old_v = v_;
-			const double old_lat = best_.lat;
+			const double old_bulge = best_.bulge_lat_acc;
+			const double old_c45 = best_.corner45_max_mps;
 			verified_v_ = std::max(verified_v_, old_v);
 
 			prev_passed_.valid = true;
@@ -1146,34 +1209,34 @@ public:
 				just_streak_verified_ = true;
 			}
 
-			if (probe_mode_ == ProbeMode::LAT) {
+			if (probe_mode_ == ProbeMode::CURVE_CUT) {
 				just_ab_lat_verified_ = true;
-				if (best_.lat + d_lat_ <= max_lat_ + 1e-4) {
-					best_.lat = std::clamp(best_.lat + d_lat_, 10.0, max_lat_);
-					probe_mode_ = ProbeMode::LAT;
+				if (can_step_curve_cut()) {
+					step_curve_cut_up();
+					probe_mode_ = ProbeMode::CURVE_CUT;
 					if (by_streak) {
-						last_ = fmt("Map #%d: STREAK PASS! Consecutive %d/%d (>=2/3 of Window) at %.2f m/s  -> NEXT STEP: lat_acc_max UP %.2f -> %.2f m/s2!",
-							total_maps_, target_streak, win_max, old_v, old_lat, old_lat, best_.lat);
-						std::snprintf(log_buf, sizeof log_buf, "#%03d [STREAK >=2/3: %d/%d] lat: %.2f->%.2f m/s2",
-							total_maps_, target_streak, win_max, old_lat, best_.lat);
+						last_ = fmt("Map #%d: STREAK PASS! Consecutive %d/%d (>=2/3) at %.2f m/s -> NEXT STEP: CurveCut UP (bulge %.2f->%.2f, c45 %.2f->%.2f)!",
+							total_maps_, target_streak, win_max, old_v, old_bulge, best_.bulge_lat_acc, old_c45, best_.corner45_max_mps);
+						std::snprintf(log_buf, sizeof log_buf, "#%03d [STREAK >=2/3: %d/%d] CC bulge:%.2f->%.2f c45:%.2f->%.2f",
+							total_maps_, target_streak, win_max, old_bulge, best_.bulge_lat_acc, old_c45, best_.corner45_max_mps);
 					} else {
-						last_ = fmt("Map #%d: %d/%d Window PASS (Err %.1f%% <= %.0f%% [%dP/%dH/%dF]) at %.2f m/s  -> NEXT STEP: lat_acc_max UP %.2f -> %.2f m/s2!",
-							total_maps_, win_max, win_max, fr_pct, max_fail_pct_, p_cnt, h_cnt, f_cnt, old_v, old_lat, old_lat, best_.lat);
-						std::snprintf(log_buf, sizeof log_buf, "#%03d [WIN %d: Err %.0f%%<=%.0f%%] lat: %.2f->%.2f m/s2",
-							total_maps_, win_max, fr_pct, max_fail_pct_, old_lat, best_.lat);
+						last_ = fmt("Map #%d: %d/%d Window PASS (Err %.1f%% <= %.0f%% [%dP/%dH/%dF]) at %.2f m/s -> NEXT STEP: CurveCut UP (bulge %.2f->%.2f, c45 %.2f->%.2f)!",
+							total_maps_, win_max, win_max, fr_pct, max_fail_pct_, p_cnt, h_cnt, f_cnt, old_v, old_bulge, best_.bulge_lat_acc, old_c45, best_.corner45_max_mps);
+						std::snprintf(log_buf, sizeof log_buf, "#%03d [WIN %d: Err %.0f%%<=%.0f%%] CC bulge:%.2f->%.2f c45:%.2f->%.2f",
+							total_maps_, win_max, fr_pct, max_fail_pct_, old_bulge, best_.bulge_lat_acc, old_c45, best_.corner45_max_mps);
 					}
 				} else {
 					probe_mode_ = ProbeMode::SPEED;
 					reset_dv_on_success();
 					v_ = old_v + dv_up();
 					if (by_streak) {
-						last_ = fmt("Map #%d: STREAK PASS! Consecutive %d/%d (>=2/3) at (max) -> NEXT STEP: speed UP %.2f -> %.2f m/s (step: %.3f)!",
-							total_maps_, target_streak, win_max, old_lat, old_v, v_, dv_);
+						last_ = fmt("Map #%d: STREAK PASS! Consecutive %d/%d (>=2/3) at CurveCut max -> NEXT STEP: speed UP %.2f -> %.2f m/s (step: %.3f)!",
+							total_maps_, target_streak, win_max, old_v, v_, dv_);
 						std::snprintf(log_buf, sizeof log_buf, "#%03d [STREAK >=2/3: %d/%d] %.2f->%.2fm/s (dv:%.3f)",
 							total_maps_, target_streak, win_max, old_v, v_, dv_);
 					} else {
-						last_ = fmt("Map #%d: %d/%d Window PASS (Err %.1f%% <= %.0f%% [%dP/%dH/%dF]) at -> NEXT STEP: speed UP %.2f -> %.2f m/s (step: %.3f)!",
-							total_maps_, win_max, win_max, fr_pct, max_fail_pct_, p_cnt, h_cnt, f_cnt, old_lat, old_v, v_, dv_);
+						last_ = fmt("Map #%d: %d/%d Window PASS (Err %.1f%% <= %.0f%% [%dP/%dH/%dF]) at CurveCut max -> NEXT STEP: speed UP %.2f -> %.2f m/s (step: %.3f)!",
+							total_maps_, win_max, win_max, fr_pct, max_fail_pct_, p_cnt, h_cnt, f_cnt, old_v, v_, dv_);
 						std::snprintf(log_buf, sizeof log_buf, "#%03d [WIN %d: Err %.0f%%<=%.0f%%] %.2f->%.2fm/s (dv:%.3f)",
 							total_maps_, win_max, fr_pct, max_fail_pct_, old_v, v_, dv_);
 					}
@@ -1202,40 +1265,42 @@ public:
 		// Helper to handle window failure when error rate exceeds max_fail_pct_
 		auto handle_window_failure = [&](int f_cnt) {
 			const double old_v = v_;
-			const double old_lat = best_.lat;
+			const double old_bulge = best_.bulge_lat_acc;
+			const double old_c45 = best_.corner45_max_mps;
 			window_.clear();
 			streak_ = 0;
 			consecutive_fails_ = 0;
 			reset_ab_score();
 
 			if (prev_passed_.valid) {
-				if (probe_mode_ == ProbeMode::LAT) {
-					// Lat-Up probe exceeded allowed error rate -> revert lat to prev_passed_ and try Speed-Up with decayed dv_
+				if (probe_mode_ == ProbeMode::CURVE_CUT) {
+					// CurveCut-Up probe exceeded allowed error rate -> revert curved shortcut speeds to prev_passed_ and try Speed-Up with decayed dv_
 					v_ = prev_passed_.speed;
 					best_ = prev_passed_.set;
 					probe_mode_ = ProbeMode::SPEED;
 					v_ = v_ + dv_up();
 					speed_changed_ = true;
 					just_ab_selected_ = true;
-					last_ = fmt("Map #%d: Window Err %.1f%% > %.0f%% (%dF/%d) -> lat %.2f reverted to %.2f, NEXT STEP: speed probe %.2f m/s (dv: %.3f)",
-						total_maps_, win_err_pct, max_fail_pct_, f_cnt, win_max, old_lat, best_.lat, v_, dv_);
-					std::snprintf(log_buf, sizeof log_buf, "#%03d [ERR %.0f%%>%.0f%% LAT REVERT] lat:%.2f->%.2f | v:%.2f",
-						total_maps_, win_err_pct, max_fail_pct_, old_lat, best_.lat, v_);
+					last_ = fmt("Map #%d: Window Err %.1f%% > %.0f%% (%dF/%d) -> CurveCut (%.2f/%.2f) reverted to (%.2f/%.2f), NEXT STEP: speed probe %.2f m/s (dv: %.3f)",
+						total_maps_, win_err_pct, max_fail_pct_, f_cnt, win_max, old_bulge, old_c45, best_.bulge_lat_acc, best_.corner45_max_mps, v_, dv_);
+					std::snprintf(log_buf, sizeof log_buf, "#%03d [ERR %.0f%%>%.0f%% CC REVERT] b:%.2f->%.2f | v:%.2f",
+						total_maps_, win_err_pct, max_fail_pct_, old_bulge, best_.bulge_lat_acc, v_);
 				} else {
-					// Speed-Up probe exceeded allowed error rate -> revert to prev_passed_, decay dv_, and probe LAT (or smaller dv_)
+					// Speed-Up probe exceeded allowed error rate -> revert to prev_passed_, decay dv_, and probe CurveCut-Up (or smaller dv_)
 					v_ = prev_passed_.speed;
 					best_ = prev_passed_.set;
 					const double prev_dv = decay_dv();
 					speed_changed_ = true;
 					just_ab_selected_ = true;
-					if (best_.lat + d_lat_ <= max_lat_ + 1e-4) {
-						const double base_lat = best_.lat;
-						best_.lat = std::clamp(best_.lat + d_lat_, 10.0, max_lat_);
-						probe_mode_ = ProbeMode::LAT;
-						last_ = fmt("Map #%d: Window Err %.1f%% > %.0f%% (%dF/%d) at %.2f m/s -> reverted to %.2f m/s (dv: %.3f->%.3f), NEXT STEP: Lat-Up %.2f -> %.2f m/s2",
-							total_maps_, win_err_pct, max_fail_pct_, f_cnt, win_max, old_v, v_, prev_dv, dv_, base_lat, best_.lat);
-						std::snprintf(log_buf, sizeof log_buf, "#%03d [ERR %.0f%%>%.0f%% REVERT] %.2fm/s dv:%.3f->%.3f | LAT %.2f->%.2f",
-							total_maps_, win_err_pct, max_fail_pct_, v_, prev_dv, dv_, base_lat, best_.lat);
+					if (can_step_curve_cut()) {
+						const double base_bulge = best_.bulge_lat_acc;
+						const double base_c45 = best_.corner45_max_mps;
+						step_curve_cut_up();
+						probe_mode_ = ProbeMode::CURVE_CUT;
+						last_ = fmt("Map #%d: Window Err %.1f%% > %.0f%% (%dF/%d) at %.2f m/s -> reverted to %.2f m/s (dv: %.3f->%.3f), NEXT STEP: CurveCut-Up (bulge %.2f->%.2f, c45 %.2f->%.2f)",
+							total_maps_, win_err_pct, max_fail_pct_, f_cnt, win_max, old_v, v_, prev_dv, dv_, base_bulge, best_.bulge_lat_acc, base_c45, best_.corner45_max_mps);
+						std::snprintf(log_buf, sizeof log_buf, "#%03d [ERR %.0f%%>%.0f%% REVERT] %.2fm/s dv:%.3f->%.3f | CC b:%.2f->%.2f",
+							total_maps_, win_err_pct, max_fail_pct_, v_, prev_dv, dv_, base_bulge, best_.bulge_lat_acc);
 					} else {
 						const double base_v = v_;
 						probe_mode_ = ProbeMode::SPEED;
@@ -1320,8 +1385,8 @@ public:
 			std::snprintf(log_buf, sizeof log_buf, "#%03d [RECOVER %d/%d] %.2f->%.2fm/s | 4:%.2fs",
 				total_maps_, step_need, step_need, old_v, v_, lap4_s);
 		} else if (was_healed) {
-			last_ = fmt("Map #%d HEALED [%s] (Window %zu/%d: Err %.1f%% <= %.0f%% [%d/%dF] | Heal %d | Streak 0/%d) at %.2f m/s | kp=%.3f kd=%.0f lat=%.1f | 4th: %.2fs",
-				total_maps_, heal_role.c_str(), cur_win_cnt, step_need, win_err_pct, max_fail_pct_, fails_in_window(), max_allowed_fails, heals_in_window(), target_streak, v_, best_.kp, best_.kd / 0.0005, best_.lat, lap4_s);
+			last_ = fmt("Map #%d HEALED [%s] (Window %zu/%d: Err %.1f%% <= %.0f%% [%d/%dF] | Heal %d | Streak 0/%d) at %.2f m/s | kp=%.3f kd=%.0f b=%.1f c45=%.2f | 4th: %.2fs",
+				total_maps_, heal_role.c_str(), cur_win_cnt, step_need, win_err_pct, max_fail_pct_, fails_in_window(), max_allowed_fails, heals_in_window(), target_streak, v_, best_.kp, best_.kd / 0.0005, best_.bulge_lat_acc, best_.corner45_max_mps, lap4_s);
 			std::snprintf(log_buf, sizeof log_buf, "#%03d [HEALED:%s %zu/%d] %.2fm/s (Err:%.1f%%<=%.0f%%) | 4:%.2fs",
 				total_maps_, heal_role.c_str(), cur_win_cnt, step_need, v_, win_err_pct, max_fail_pct_, lap4_s);
 		} else {
@@ -1350,11 +1415,11 @@ public:
 		v.push_back("Mode: Drive 1 + Drive 4/Map + AI Gain Auto-Heal on Fail");
 		v.push_back("Map:  " + cur_map_info);
 		if (verified_v_ > 0.0)
-			v.push_back(fmt("Base Speed: %.2f m/s  (Start: %.2f | Floor: %.2f | lat: %.2f m/s2 | Step dv: %.3f | Verified: %.2f m/s)",
-				v_, start_v_, min_v_, best_.lat, dv_, verified_v_));
+			v.push_back(fmt("Base Speed: %.2f m/s  (Start: %.2f | Floor: %.2f | Step dv: %.3f | Verified: %.2f m/s)",
+				v_, start_v_, min_v_, dv_, verified_v_));
 		else
-			v.push_back(fmt("Base Speed: %.2f m/s  (Start: %.2f | Floor: %.2f | lat: %.2f m/s2 | Step dv: %.3f | Up: Err <=%.0f%% or %d/%d Streak)",
-				v_, start_v_, min_v_, best_.lat, dv_, max_fail_pct_, target_streak, target_win_));
+			v.push_back(fmt("Base Speed: %.2f m/s  (Start: %.2f | Floor: %.2f | Step dv: %.3f | Up: Err <=%.0f%% or %d/%d Streak)",
+				v_, start_v_, min_v_, dv_, max_fail_pct_, target_streak, target_win_));
 		v.push_back(fmt("Progress at %.2f m/s: %zu / %d maps (%s)",
 			v_, window_.size(), step_need,
 			recovering ? fmt("Fast-Recovery streak %d/%d", streak_, step_need).c_str()
@@ -1364,22 +1429,25 @@ public:
 			heal_rate_pct(), heals_in_window(), win_err_pct, fails_in_window(), max_allowed_fails, max_fail_pct_,
 			total_passes_, total_healed_, total_fails_));
 		v.push_back(fmt("Active Gains: kp=%.3f kd=%.0f brk=%.2fm shf=%.2f crv=%.2f",
-			best_.kp, best_.kd / dt, best_.lat, best_.brake_margin, best_.target_shift, best_.target_curve_gain));
+			best_.kp, best_.kd / dt, best_.brake_margin, best_.target_shift, best_.target_curve_gain));
+		v.push_back(fmt("CurveCut: bulge=%.2f c45=%.2f omg=%+.2f wav=%+.2f",
+			best_.bulge_lat_acc, best_.corner45_max_mps, best_.omega_add_mps, best_.wave_add_mps));
 		if (prev_passed_.valid) {
-			if (probe_mode_ == ProbeMode::LAT) {
-				v.push_back(fmt("Step Probe [LAT-UP]: Lat-Up (%.2fm/s, lat=%.2f) vs Prev (%.2fm/s, lat=%.2f) [%dW:%dW] | Streak %d/%d [2/3] | Err %.1f%%<=%.0f%%",
-					v_, best_.lat, prev_passed_.speed, prev_passed_.set.lat, ab_score_.speed_up_wins, ab_score_.prev_passed_wins, streak_, target_streak, win_err_pct, max_fail_pct_));
+			if (probe_mode_ == ProbeMode::CURVE_CUT) {
+				v.push_back(fmt("Step Probe [CURVECUT-UP]: CC(%.2f/%.2f) vs Prev(%.2f/%.2f) [%dW:%dW] | Streak %d/%d [2/3] | Err %.1f%%<=%.0f%%",
+					best_.bulge_lat_acc, best_.corner45_max_mps, prev_passed_.set.bulge_lat_acc, prev_passed_.set.corner45_max_mps,
+					ab_score_.speed_up_wins, ab_score_.prev_passed_wins, streak_, target_streak, win_err_pct, max_fail_pct_));
 			} else {
-				v.push_back(fmt("Step Probe [SPEED-UP]: Speed-Up (%.2fm/s, lat=%.2f) vs Prev (%.2fm/s, lat=%.2f) [%dW:%dW] | Streak %d/%d [2/3] | Err %.1f%%<=%.0f%%",
-					v_, best_.lat, prev_passed_.speed, prev_passed_.set.lat, ab_score_.speed_up_wins, ab_score_.prev_passed_wins, streak_, target_streak, win_err_pct, max_fail_pct_));
+				v.push_back(fmt("Step Probe [SPEED-UP]: Speed-Up(%.2fm/s) vs Prev(%.2fm/s) [%dW:%dW] | Streak %d/%d [2/3] | Err %.1f%%<=%.0f%%",
+					v_, prev_passed_.speed, ab_score_.speed_up_wins, ab_score_.prev_passed_wins, streak_, target_streak, win_err_pct, max_fail_pct_));
 			}
 		} else {
-			if (probe_mode_ == ProbeMode::LAT) {
-				v.push_back(fmt("Step Probe [LAT-UP] at %.2f m/s : Streak %d/%d [2/3] OR Window Err %.1f%% <= %.0f%% (Next: Lat-Up +%.2f m/s2)",
-					v_, best_.lat, streak_, target_streak, win_err_pct, max_fail_pct_, d_lat_));
+			if (probe_mode_ == ProbeMode::CURVE_CUT) {
+				v.push_back(fmt("Step Probe [CURVECUT-UP] at %.2f m/s : Streak %d/%d [2/3] OR Window Err %.1f%% <= %.0f%% (Next: bulge +%.2f)",
+					v_, streak_, target_streak, win_err_pct, max_fail_pct_, d_bulge_));
 			} else {
 				v.push_back(fmt("Step Probe [SPEED-UP] at %.2f m/s : Streak %d/%d [2/3] OR Window Err %.1f%% <= %.0f%% (Step dv: %.3f)",
-					v_, best_.lat, streak_, target_streak, win_err_pct, max_fail_pct_, dv_));
+					v_, streak_, target_streak, win_err_pct, max_fail_pct_, dv_));
 			}
 		}
 		if (!heal_note.empty())
@@ -1409,8 +1477,14 @@ private:
 	double dv_ = 0.10;
 	double min_dv_ = 0.01;
 	ProbeMode probe_mode_ = ProbeMode::SPEED;
-	double d_lat_ = 0.50;
-	double max_lat_ = 20.0;
+	double d_bulge_ = 0.50;
+	double max_bulge_ = 14.0;
+	double d_c45_ = 0.15;
+	double max_c45_ = 5.00;
+	double d_omega_ = 0.03;
+	double max_omega_ = 0.40;
+	double d_wave_ = 0.05;
+	double max_wave_ = 0.80;
 	bool just_ab_lat_verified_ = false;
 	Set best_;
 	Set anchor_;
@@ -1725,21 +1799,28 @@ static bool spawn_eval_worker(const std::string& exe_path, const std::string& tr
 	if (opt.off_track_mm > 0)
 		cmd += " --off-track " + std::to_string(opt.off_track_mm);
 
-	char buf[300];
+	char buf[480];
 	std::snprintf(buf, sizeof buf,
 		" --set base_mps=%.3f --set steer_kp=%.4f --set steer_kd_s=%.4f "
 		"--set brake_margin_m=%.2f "
+		"--set bulge_lat_acc=%.2f --set corner45_max_mps=%.2f "
+		"--set omega_add_mps=%.2f --set wave_add_mps=%.2f "
 		"--set target_shift=%.2f --set target_curve_gain=%.2f "
 		"--set slalom_ratio=%.2f --set yaw_kp=%.3f --set yaw_ki=%.3f",
 		speed, ts.kp, ts.kd,
 		ts.brake_margin,
+		ts.bulge_lat_acc, ts.corner45_max_mps,
+		ts.omega_add_mps, ts.wave_add_mps,
 		ts.target_shift, ts.target_curve_gain,
 		ts.sl, ts.yaw_kp, ts.yaw_ki);
 	cmd += buf;
 
 	for (const auto& [k, v] : opt.params) {
 		if (k != "base_mps" && k != "steer_kp" && k != "steer_kd" && k != "steer_kd_s" &&
-		    k != "lat_acc_max" && k != "brake_margin_m" && k != "target_shift" &&
+		    k != "lat_acc_max" && k != "brake_margin_m" && k != "brake_margin" &&
+		    k != "bulge_lat_acc" && k != "corner45_max_mps" &&
+		    k != "omega_add_mps" && k != "wave_add_mps" &&
+		    k != "target_shift" &&
 		    k != "target_curve_gain" && k != "slalom_ratio" && k != "yaw_kp" && k != "yaw_ki") {
 			cmd += " --set " + k + "=" + std::to_string(v);
 		}
@@ -3502,6 +3583,10 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 				from.target_shift = session.params.target_shift;
 				from.target_curve_gain = session.params.target_curve_gain;
 				from.brake_margin = session.params.brake_margin_m;
+				from.bulge_lat_acc = session.params.bulge_lat_acc;
+				from.corner45_max_mps = session.params.corner45_max_mps;
+				from.omega_add_mps = session.params.omega_add_mps;
+				from.wave_add_mps = session.params.wave_add_mps;
 				from.pos_atten = 0.0;
 				from.yaw_kp = session.params.yaw_kp;
 				from.yaw_ki = session.params.yaw_ki;
@@ -3518,6 +3603,10 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 				session.params.target_shift = static_cast<float>(ts.target_shift);
 				session.params.target_curve_gain = static_cast<float>(ts.target_curve_gain);
 				session.params.brake_margin_m = static_cast<float>(ts.brake_margin);
+				session.params.bulge_lat_acc = static_cast<float>(ts.bulge_lat_acc);
+				session.params.corner45_max_mps = static_cast<float>(ts.corner45_max_mps);
+				session.params.omega_add_mps = static_cast<float>(ts.omega_add_mps);
+				session.params.wave_add_mps = static_cast<float>(ts.wave_add_mps);
 				session.params.pos_atten_gain = 0.0f;
 				session.params.yaw_kp = static_cast<float>(ts.yaw_kp);
 				session.params.yaw_ki = static_cast<float>(ts.yaw_ki);
@@ -3635,6 +3724,9 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 								session.params.steer_kp, session.params.steer_kd, final_set.kd);
 							std::printf("  Brake Margin    : %.2fm, Target Shift: %.2f\n",
 								session.params.brake_margin_m, session.params.target_shift);
+							std::printf("  CurveCut Speed  : bulge=%.2f m/s2, c45=%.2f m/s, omega=%+.2f, wave=%+.2f\n",
+								session.params.bulge_lat_acc, session.params.corner45_max_mps,
+								session.params.omega_add_mps, session.params.wave_add_mps);
 							if (!saved_path.empty()) {
 								std::printf("  -> Saved File   : %s%s%s\n", col::Wht, saved_path.c_str(), col::Rst);
 							}
@@ -4233,15 +4325,16 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 						{
 							bool aborted = false;
 							for (size_t h = 0; h < heal_cands.size(); h++) {
-								char heal_msg[220];
+								char heal_msg[256];
 								std::snprintf(heal_msg, sizeof heal_msg,
-									"AI AUTO-HEAL (%zu/%zu) [%s]: Map #%zu at %.2f m/s (kp=%.3f kd=%.0f lat=%.1f brk=%.2f)",
+									"AI AUTO-HEAL (%zu/%zu) [%s]: Map #%zu at %.2f m/s (kp=%.3f kd=%.0f brk=%.2f b=%.1f c45=%.2f)",
 									h + 1, heal_cands.size(), heal_cands[h].role.c_str(), map_no, endless_tuner.speed(),
-									heal_cands[h].set.kp, heal_cands[h].set.kd / dt, heal_cands[h].set.lat, heal_cands[h].set.brake_margin);
+									heal_cands[h].set.kp, heal_cands[h].set.kd / dt, heal_cands[h].set.brake_margin,
+									heal_cands[h].set.bulge_lat_acc, heal_cands[h].set.corner45_max_mps);
 								session.tune_lines = endless_tuner.status(dt, cur_map_info(), heal_msg);
 								if (!opt.quiet) {
 									std::printf("%s[%8.3f s]%s %sAI AUTO-HEAL%s (%zu/%zu)%s %s[%s]%s: %sMap #%zu%s at %s%s%.2f m/s%s "
-										"(kp=%s%.3f%s kd=%s%.0f%s lat=%s%.1f%s brk=%s%.2f%s)\n",
+										"(kp=%s%.3f%s kd=%s%.0f%s brk=%s%.2f%s b=%s%.1f%s c45=%s%.2f%s omg=%s%+.2f%s wav=%s%+.2f%s)\n",
 										col::Dim, sim->t(), col::Rst,
 										col::Bold, col::Mag,
 										h + 1, heal_cands.size(), col::Rst,
@@ -4250,8 +4343,11 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 										col::Bold, col::Yel, endless_tuner.speed(), col::Rst,
 										col::Cyn, heal_cands[h].set.kp, col::Rst,
 										col::Cyn, heal_cands[h].set.kd / dt, col::Rst,
-										col::Mag, heal_cands[h].set.lat, col::Rst,
-										col::Grn, heal_cands[h].set.brake_margin, col::Rst);
+										col::Grn, heal_cands[h].set.brake_margin, col::Rst,
+										col::Mag, heal_cands[h].set.bulge_lat_acc, col::Rst,
+										col::Mag, heal_cands[h].set.corner45_max_mps, col::Rst,
+										col::Mag, heal_cands[h].set.omega_add_mps, col::Rst,
+										col::Mag, heal_cands[h].set.wave_add_mps, col::Rst);
 									std::fflush(stdout);
 								}
 
@@ -4315,35 +4411,34 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 
 							if (!opt.quiet) {
 								const auto& ab = endless_tuner.ab_score();
-								const bool is_lat = (endless_tuner.probe_mode() == EndlessTuner::ProbeMode::LAT);
-								const char* cand_name = is_lat ? "Lat-Up" : "Speed-Up";
+								const bool is_cc = (endless_tuner.probe_mode() == EndlessTuner::ProbeMode::CURVE_CUT);
 								constexpr double w_str = 0.002;
 								const double eff_curr = lap4_s + w_str * curr_str_osc;
 								const double eff_prev = lap4_prev + w_str * str_osc_prev;
 								const char* winner = (pass && pass_prev)
-									? (eff_curr < eff_prev - 0.008 ? (is_lat ? "Lat-Up FASTER/SMOOTHER" : "Speed-Up FASTER/SMOOTHER")
+									? (eff_curr < eff_prev - 0.008 ? (is_cc ? "CurveCut-Up FASTER/SMOOTHER" : "Speed-Up FASTER/SMOOTHER")
 									                               : (eff_prev < eff_curr - 0.008 ? "Prev-Passed FASTER/SMOOTHER" : "Tie"))
-									: (pass ? (is_lat ? "Lat-Up WON (Prev failed)" : "Speed-Up WON (Prev failed)")
-									        : (pass_prev ? (is_lat ? "Prev-Passed WON (Lat-Up failed)" : "Prev-Passed WON (Speed-Up failed)")
+									: (pass ? (is_cc ? "CurveCut-Up WON (Prev failed)" : "Speed-Up WON (Prev failed)")
+									        : (pass_prev ? (is_cc ? "Prev-Passed WON (CurveCut-Up failed)" : "Prev-Passed WON (Speed-Up failed)")
 									                     : "Both Failed"));
 								const int target_ab_w = (endless_tuner.target_window() * 2 + 2) / 3;
-								if (is_lat) {
-									std::printf("%s[%8.3f s]%s %s[A/B MATCH #%zu/%d]%s Lat-Up(%.2fm/s, %slat=%.2f%s): %s%.2fs%s (str: %.0fdps/%.1fmm) vs Prev-Passed(%.2fm/s, %slat=%.2f%s): %s%.2fs%s (str: %.0fdps/%.1fmm) -> %s%s%s | Score: Lat-Up(%d) vs Prev(%d) (Need >=%d wins for 2/3)\n",
+								if (is_cc) {
+									std::printf("%s[%8.3f s]%s %s[A/B MATCH #%zu/%d]%s CurveCut-Up(%.2fm/s, %sb=%.1f c45=%.2f%s): %s%.2fs%s (str: %.0fdps/%.1fmm) vs Prev-Passed(%.2fm/s, %sb=%.1f c45=%.2f%s): %s%.2fs%s (str: %.0fdps/%.1fmm) -> %s%s%s | Score: CC-Up(%d) vs Prev(%d) (Need >=%d wins for 2/3)\n",
 										col::Dim, sim->t(), col::Rst,
 										col::Bold, map_no, endless_tuner.target_window(), col::Rst,
-										curr_v, col::Mag, curr_set.lat, col::Rst,
+										curr_v, col::Mag, curr_set.bulge_lat_acc, curr_set.corner45_max_mps, col::Rst,
 										pass ? col::Grn : col::Red, lap4_s, col::Rst, curr_str_wz, curr_str_lat,
-										prev_win_v, col::Mag, prev_win_set.lat, col::Rst,
+										prev_win_v, col::Mag, prev_win_set.bulge_lat_acc, prev_win_set.corner45_max_mps, col::Rst,
 										pass_prev ? col::Grn : col::Red, lap4_prev, col::Rst, str_wz_prev, str_lat_prev,
 										col::Yel, winner, col::Rst,
 										ab.speed_up_wins, ab.prev_passed_wins, target_ab_w);
 								} else {
-									std::printf("%s[%8.3f s]%s %s[A/B MATCH #%zu/%d]%s Speed-Up(%s%.2fm/s%s): %s%.2fs%s (str: %.0fdps/%.1fmm) vs Prev-Passed(%s%.2fm/s%s, lat=%.2f): %s%.2fs%s (str: %.0fdps/%.1fmm) -> %s%s%s | Score: Speed-Up(%d) vs Prev(%d) (Need >=%d wins for 2/3)\n",
+									std::printf("%s[%8.3f s]%s %s[A/B MATCH #%zu/%d]%s Speed-Up(%s%.2fm/s%s): %s%.2fs%s (str: %.0fdps/%.1fmm) vs Prev-Passed(%s%.2fm/s%s, b=%.1f/c45=%.2f): %s%.2fs%s (str: %.0fdps/%.1fmm) -> %s%s%s | Score: Speed-Up(%d) vs Prev(%d) (Need >=%d wins for 2/3)\n",
 										col::Dim, sim->t(), col::Rst,
 										col::Bold, map_no, endless_tuner.target_window(), col::Rst,
 										col::Yel, curr_v, col::Rst,
 										pass ? col::Grn : col::Red, lap4_s, col::Rst, curr_str_wz, curr_str_lat,
-										col::Yel, prev_win_v, col::Rst, prev_win_set.lat,
+										col::Yel, prev_win_v, col::Rst, prev_win_set.bulge_lat_acc, prev_win_set.corner45_max_mps,
 										pass_prev ? col::Grn : col::Red, lap4_prev, col::Rst, str_wz_prev, str_lat_prev,
 										col::Yel, winner, col::Rst,
 										ab.speed_up_wins, ab.prev_passed_wins, target_ab_w);
@@ -4369,17 +4464,22 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 							if (ab_lat_verified) {
 								if (streak_verified) {
 									std::snprintf(save_msg, sizeof save_msg,
-										"[SAVED STREAK >=2/3 LAT-UP] Passed %d/%d consecutive maps (>=2/3)! Next step: base_mps=%.2f m/s",
-										(endless_tuner.target_window() * 2 + 2) / 3, endless_tuner.target_window(), session.params.base_mps);
+										"[SAVED STREAK >=2/3 CURVECUT-UP] Passed %d/%d consecutive maps! bulge=%.2f c45=%.2f omg=%+.2f wav=%+.2f",
+										(endless_tuner.target_window() * 2 + 2) / 3, endless_tuner.target_window(),
+										session.params.bulge_lat_acc, session.params.corner45_max_mps,
+										session.params.omega_add_mps, session.params.wave_add_mps);
 								} else {
 									std::snprintf(save_msg, sizeof save_msg,
-										"[SAVED WINDOW ERR <=%.0f%% LAT-UP] %d maps passed error rate check! Next step: base_mps=%.2f m/s",
-										endless_tuner.max_fail_rate_pct(), endless_tuner.target_window(), session.params.base_mps);
+										"[SAVED WINDOW ERR <=%.0f%% CURVECUT-UP] %d maps passed! bulge=%.2f c45=%.2f omg=%+.2f wav=%+.2f",
+										endless_tuner.max_fail_rate_pct(), endless_tuner.target_window(),
+										session.params.bulge_lat_acc, session.params.corner45_max_mps,
+										session.params.omega_add_mps, session.params.wave_add_mps);
 								}
 							} else if (ab_selected) {
 								std::snprintf(save_msg, sizeof save_msg,
-									"[SAVED STEP ADJUST] Error rate exceeded %.0f%% -> Reverted & probing next step: %.2f m/s (step dv: %.3f), kp=%.3f kd=%.0f",
-									endless_tuner.max_fail_rate_pct(), session.params.base_mps, endless_tuner.current_dv(), session.params.steer_kp, session.params.steer_kd);
+									"[SAVED STEP ADJUST] Error rate exceeded %.0f%% -> Next step: %.2f m/s (dv: %.3f), bulge=%.2f c45=%.2f",
+									endless_tuner.max_fail_rate_pct(), session.params.base_mps, endless_tuner.current_dv(),
+									session.params.bulge_lat_acc, session.params.corner45_max_mps);
 							} else if (ab_verified) {
 								std::snprintf(save_msg, sizeof save_msg,
 									"[SAVED A/B SPEED-UP >=2/3 WINNER] Speed-Up won >=2/3 of window! base_mps up from %.2f to %.2f m/s (step dv: %.3f)",
@@ -4398,9 +4498,10 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 									endless_tuner.recover_window(), prev_v, session.params.base_mps);
 							} else if (healed) {
 								std::snprintf(save_msg, sizeof save_msg,
-									"[SAVED AI-HEALED] Map #%zu healed [%s] at %.2f m/s! New gains: kp=%.3f kd=%.0f brk=%.2f",
+									"[SAVED AI-HEALED] Map #%zu healed [%s] at %.2f m/s! kp=%.3f kd=%.0f brk=%.2f b=%.2f c45=%.2f",
 									map_no, healed_role.c_str(), session.params.base_mps,
-									session.params.steer_kp, session.params.steer_kd, session.params.brake_margin_m);
+									session.params.steer_kp, session.params.steer_kd, session.params.brake_margin_m,
+									session.params.bulge_lat_acc, session.params.corner45_max_mps);
 							} else {
 								std::snprintf(save_msg, sizeof save_msg,
 									"[SAVED] Map #%zu at %.2f m/s (>= start_v) -> base_mps adjusted to %.2f m/s",
@@ -4410,14 +4511,18 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 							if (!opt.quiet) {
 								if (healed) {
 									std::printf("%s[%8.3f s]%s %s%s[SAVED AI-HEALED]%s Map #%zu healed %s[%s]%s at %s%s%.2f m/s%s! "
-										"New gains: kp=%s%.3f%s kd=%s%.0f%s brk=%s%.2f%s\n",
+										"New gains: kp=%s%.3f%s kd=%s%.0f%s brk=%s%.2f%s b=%s%.2f%s c45=%s%.2f%s omg=%s%+.2f%s wav=%s%+.2f%s\n",
 										col::Dim, sim->t(), col::Rst,
 										col::Bold, col::Mag, col::Rst, map_no,
 										col::Yel, healed_role.c_str(), col::Rst,
 										col::Bold, col::Yel, session.params.base_mps, col::Rst,
 										col::Cyn, session.params.steer_kp, col::Rst,
 										col::Cyn, session.params.steer_kd, col::Rst,
-										col::Grn, session.params.brake_margin_m, col::Rst);
+										col::Grn, session.params.brake_margin_m, col::Rst,
+										col::Mag, session.params.bulge_lat_acc, col::Rst,
+										col::Mag, session.params.corner45_max_mps, col::Rst,
+										col::Mag, session.params.omega_add_mps, col::Rst,
+										col::Mag, session.params.wave_add_mps, col::Rst);
 								} else {
 									std::printf("%s[%8.3f s]%s %s%s%s\n",
 										col::Dim, sim->t(), col::Rst,
