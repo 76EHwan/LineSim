@@ -22,7 +22,9 @@ endif()
 # ---------------------------------------------------------------------------
 set(FW_SOURCES
   Main/Src/foc.c
+  Main/Src/st_conv2d.c
   Main/Src/sensor.c
+  Main/Src/pp_steer.c
   Main/Src/motor.c
   Main/Src/drive.c
   Main/Src/menu.c
