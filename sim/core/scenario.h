@@ -34,6 +34,7 @@ struct DriveResult {
 	std::vector<Sample> samples;
 	std::string lcd;
 	std::string marker_check;   // "OK" or where the logged markers first differ from the course
+	bool marker_recovered_accel = false; // drive 4: missed/mismatched marker, but recovered and accelerated afterwards on a valid single lap
 };
 
 struct ScenarioOptions {

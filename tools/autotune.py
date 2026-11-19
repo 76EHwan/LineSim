@@ -411,7 +411,7 @@ def lost_line(d, max_lat_mm=MAX_LAT_MM):
             or d.get("max_beta_deg", 0.0) >= 90.0)
 
 
-def run(course, robot, speed, kp, kd, lat, extra, out, reuse, lag, mu, seed=1, drives="1,4"):
+def run(course, robot, speed, kp, kd, lat, extra, out, reuse, lag, mu, seed=1, drives="1,4", allow_d4_mk_recovery=False):
     extra = list(extra) + ([f"lat_acc_max={lat}"] if lat > 0 else [])
     j = sim(course, robot, drives, speed, kp, kd, extra, out, reuse, seed=seed)
     fast_num = drives.split(",")[-1].strip()
@@ -442,7 +442,8 @@ def run(course, robot, speed, kp, kd, lat, extra, out, reuse, lag, mu, seed=1, d
     elif lost_line(d_fast, fast_limit):
         reason = d_fast["outcome"] if d_fast["outcome"] != "finished" else ("spinout" if d_fast.get("max_beta_deg", 0.0) >= 90.0 else "line far off")
         r.update(lost=True, score=300.0 + clean1, why=f"{fast_num}: {reason}")
-    elif d_fast.get("marker_check") != "OK" or d_fast["lap_time_fw"] <= 0:
+    elif (d_fast.get("marker_check") != "OK"
+          and not (allow_d4_mk_recovery and fast_num == "4" and d_fast.get("marker_recovered_accel", False))) or d_fast["lap_time_fw"] <= 0:
         r.update(score=200.0 + clean1, why=f"{fast_num}: markers {d_fast.get('marker_check')}")
     else:
         r.update({"pass": True, "lap_fast": d_fast["lap_time_fw"], "score": 5.0 * d_fast["lap_time_fw"] + clean_score, "why": ""})
@@ -477,7 +478,7 @@ def run(course, robot, speed, kp, kd, lat, extra, out, reuse, lag, mu, seed=1, d
     return r
 
 
-def tune_at(speed, courses, robot, axes, extra, jobs, reuse, quiet=False, drives="1,4"):
+def tune_at(speed, courses, robot, axes, extra, jobs, reuse, quiet=False, drives="1,4", allow_d4_mk_recovery=False):
     """axes = (kps, kds, lats). Returns the grid evaluated at one base speed."""
     kps, kds, lats = axes
     lag, mu = robot_delay(robot), robot_mu(robot)
@@ -496,7 +497,7 @@ def tune_at(speed, courses, robot, axes, extra, jobs, reuse, quiet=False, drives
             for ci, c in enumerate(courses):
                 name = f"kp{kp:g}_kd{kd:g}s" + (f"_lat{lat:g}" if lat > 0 else "") + f"_c{ci}"
                 out = os.path.join(out_root, "runs", name)
-                futs[ex.submit(run, c, robot, speed, kp, kd, lat, extra, out, reuse, lag, mu, 1, drives)] = (kp, kd, lat, ci)
+                futs[ex.submit(run, c, robot, speed, kp, kd, lat, extra, out, reuse, lag, mu, 1, drives, allow_d4_mk_recovery)] = (kp, kd, lat, ci)
         for f in concurrent.futures.as_completed(futs):
             kp, kd, lat, ci = futs[f]
             results.setdefault((kp, kd, lat), {})[ci] = f.result()
@@ -645,10 +646,10 @@ def refine_axes(center, steps):
     return tuple(out)
 
 
-def search_at(speed, courses, robot, axes, extra, jobs, reuse, refine, quiet=False, drives="1,4"):
+def search_at(speed, courses, robot, axes, extra, jobs, reuse, refine, quiet=False, drives="1,4", allow_d4_mk_recovery=False):
     """Coarse grid, then `refine` times a 3x3x3 grid around the best point with half the step, then the
     pick is driven again with 2 more seeds (sensor noise / gain spread): it must pass every time."""
-    coarse = tune_at(speed, courses, robot, axes, extra, jobs, reuse, quiet, drives)
+    coarse = tune_at(speed, courses, robot, axes, extra, jobs, reuse, quiet, drives, allow_d4_mk_recovery)
     best = coarse
     log = []
 
@@ -663,7 +664,7 @@ def search_at(speed, courses, robot, axes, extra, jobs, reuse, refine, quiet=Fal
         if not best["pick"]:
             break
         ax = refine_axes(best["pick"], steps)
-        t = tune_at(speed, courses, robot, ax, extra, jobs, reuse, quiet=True, drives=drives)
+        t = tune_at(speed, courses, robot, ax, extra, jobs, reuse, quiet=True, drives=drives, allow_d4_mk_recovery=allow_d4_mk_recovery)
         step_txt = f"+-{steps[0]:g} kp, +-{steps[1]:g} s kd" + (f", +-{steps[2]:g} lat" if steps[2] > 0 else "")
         if t["pick"] and (t["pick"] in t["safe"] or best["pick"] not in best["safe"]):
             best = t
@@ -682,7 +683,7 @@ def search_at(speed, courses, robot, axes, extra, jobs, reuse, refine, quiet=Fal
             for ci, c in enumerate(courses):
                 name = f"kp{kp:g}_kd{kd:g}s" + (f"_lat{lat:g}" if lat > 0 else "") + f"_c{ci}_seed{seed}"
                 res.append(run(c, robot, speed, kp, kd, lat, extra, os.path.join(best["out_root"], "runs", name),
-                               reuse, lag, mu, seed, drives))
+                               reuse, lag, mu, seed, drives, allow_d4_mk_recovery))
         verified = all(r["pass"] for r in res)
         seed_txt = (f"  seeds {', '.join(map(str, SEED_CHECK))}: "
                     + ("pass" if verified else "FAIL (" + "; ".join(r["why"] for r in res if not r["pass"]) + ")"))
@@ -782,7 +783,7 @@ def run_endless(initial_speed, user_tracks, robot, axes, extra, jobs, reuse, ref
                            if overall_best else "OPTIMAL: searching initial...")
             print(f"{progress_hdr} Round #{round_no} | Testing base speed {current_speed:.2f} m/s | {best_banner}", flush=True)
 
-            s = search_at(round(current_speed, 3), current_courses, robot, axes, extra, jobs, reuse, refine, quiet=True, drives=drives)
+            s = search_at(round(current_speed, 3), current_courses, robot, axes, extra, jobs, reuse, refine, quiet=True, drives=drives, allow_d4_mk_recovery=True)
             t = s["final"]
             passed = t["pick"] is not None and t["pick"] in t["safe"] and s["verified"]
 

@@ -224,6 +224,17 @@ void fwb_get_drive_params(FwDriveParams *p) {
 #else
 	p->brake_margin_m = 0.06f;
 #endif
+#ifdef DRIVE_HAS_CURVE_CUT_SPEED
+	p->bulge_lat_acc = driveData.bulge_lat_acc;
+	p->corner45_max_mps = driveData.corner45_max_mps;
+	p->omega_add_mps = driveData.omega_add_mps;
+	p->wave_add_mps = driveData.wave_add_mps;
+#else
+	p->bulge_lat_acc = 6.50f;
+	p->corner45_max_mps = 3.30f;
+	p->omega_add_mps = 0.04f;
+	p->wave_add_mps = 0.25f;
+#endif
 }
 
 void fwb_set_drive_params(const FwDriveParams *p) {
@@ -249,6 +260,12 @@ void fwb_set_drive_params(const FwDriveParams *p) {
 #endif
 #ifdef DRIVE_HAS_BRAKE_MARGIN
 	driveData.brake_margin_m = p->brake_margin_m;
+#endif
+#ifdef DRIVE_HAS_CURVE_CUT_SPEED
+	driveData.bulge_lat_acc = p->bulge_lat_acc;
+	driveData.corner45_max_mps = p->corner45_max_mps;
+	driveData.omega_add_mps = p->omega_add_mps;
+	driveData.wave_add_mps = p->wave_add_mps;
 #endif
 }
 

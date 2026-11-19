@@ -1504,7 +1504,11 @@ bool save_drive_params_to_firmware_file(const FwDriveParams& p, std::string* out
 		"\n\t.yaw_gain_i = %.1ff,"
 		"\n\t.target_curve_gain = %.2ff,"
 		"\n\t.slalom_ratio = %.2ff,"
-		"\n\t.brake_margin_m = %.2ff,\n",
+		"\n\t.brake_margin_m = %.2ff,"
+		"\n\t.bulge_lat_acc = %.2ff,"
+		"\n\t.corner45_max_mps = %.2ff,"
+		"\n\t.omega_add_mps = %.2ff,"
+		"\n\t.wave_add_mps = %.2ff,\n",
 		p.base_mps, p.max_mps > 0 ? p.max_mps : 10.0f,
 		p.accel > 0 ? p.accel : 10.0f, p.decel > 0 ? p.decel : 10.0f,
 		p.steer_kp, p.steer_kd, p.pos_atten_gain,
@@ -1513,7 +1517,11 @@ bool save_drive_params_to_firmware_file(const FwDriveParams& p, std::string* out
 		p.yaw_kp, p.yaw_ki,
 		p.target_curve_gain,
 		p.slalom_ratio,
-		p.brake_margin_m > 0 ? p.brake_margin_m : 0.12f
+		p.brake_margin_m > 0 ? p.brake_margin_m : 0.12f,
+		p.bulge_lat_acc > 0.5f ? p.bulge_lat_acc : 6.50f,
+		p.corner45_max_mps > 0.1f ? p.corner45_max_mps : 3.30f,
+		p.omega_add_mps,
+		p.wave_add_mps
 	);
 
 	content.replace(open_brace + 1, close_brace - (open_brace + 1), new_body);
@@ -1585,6 +1593,10 @@ bool load_drive_params_from_firmware_file(FwDriveParams* p, std::string* out_pat
 			extract(".target_curve_gain", &p->target_curve_gain);
 			extract(".slalom_ratio", &p->slalom_ratio);
 			extract(".brake_margin_m", &p->brake_margin_m);
+			extract(".bulge_lat_acc", &p->bulge_lat_acc);
+			extract(".corner45_max_mps", &p->corner45_max_mps);
+			extract(".omega_add_mps", &p->omega_add_mps);
+			extract(".wave_add_mps", &p->wave_add_mps);
 		}
 	}
 	return true;
@@ -1609,6 +1621,10 @@ bool apply_param(FwDriveParams* p, const std::string& key, double v) {
 	else if (key == "target_curve_gain") p->target_curve_gain = (float) v;   // drive 3/4: target_pos x gain in curves
 	else if (key == "slalom_ratio") p->slalom_ratio = (float) v;             // drive 4: 45 deg speed ratio
 	else if (key == "brake_margin_m" || key == "brake_margin") p->brake_margin_m = (float) v;
+	else if (key == "bulge_lat_acc") p->bulge_lat_acc = (float) v;           // drive 4: Bulge shortcut lateral accel [m/s2]
+	else if (key == "corner45_max_mps") p->corner45_max_mps = (float) v;     // drive 4: Corner45 arc max speed [m/s]
+	else if (key == "omega_add_mps") p->omega_add_mps = (float) v;           // drive 4: Omega hairpin arc speed offset [m/s]
+	else if (key == "wave_add_mps") p->wave_add_mps = (float) v;             // drive 4: Wave180 shortcut speed offset [m/s]
 	else return false;
 	return true;
 }
@@ -2484,6 +2500,155 @@ static std::vector<MarkerVisualInfo> build_marker_visual_diags(const DriveResult
 	return diags;
 }
 
+// Evaluates whether Drive 4 completed a genuine single lap, recovered from marker
+// miss/wrong-type/ghost event(s), and subsequently accelerated above base_mps.
+static bool check_drive4_marker_recovery(
+	const DriveResult& d,
+	const Track& track,
+	const MarkerMissDiag& miss_diag,
+	const std::vector<MarkerVisualInfo>& marker_diags,
+	double base_mps)
+{
+	if (d.n != 4 || d.marker_check == "OK" || !d.is_finished() || d.lap_time_fw <= 0.0 || d.samples.size() < 20)
+		return false;
+
+	const double L = track.length();
+	if (L <= 0.0)
+		return false;
+
+	// 1. Verify genuine single-lap completion (reject premature false STOP and multi-lap runs)
+	if (track.closed()) {
+		int wraps = 0;
+		for (size_t i = 1; i < d.samples.size(); ++i) {
+			const double s_prev = d.samples[i - 1].s;
+			const double s_cur = d.samples[i].s;
+			if (s_prev > 0.80 * L && s_cur < 0.20 * L)
+				wraps++;
+			else if (s_prev < 0.20 * L && s_cur > 0.80 * L)
+				wraps--;
+		}
+		if (wraps != 1)
+			return false;
+		double ds_end = d.samples.back().s - d.samples.front().s;
+		while (ds_end > L * 0.5) ds_end -= L;
+		while (ds_end < -L * 0.5) ds_end += L;
+		if (std::abs(ds_end) > 3.0)
+			return false;
+	} else {
+		if (d.samples.back().s < L - 3.0)
+			return false;
+	}
+
+	if (d.dist_m < 0.70 * L || d.dist_m > 1.20 * L)
+		return false;
+
+	// 2. Build monotonically unwrapped s along the single lap
+	std::vector<double> u_s(d.samples.size(), 0.0);
+	u_s[0] = d.samples[0].s;
+	for (size_t i = 1; i < d.samples.size(); ++i) {
+		double ds = d.samples[i].s - d.samples[i - 1].s;
+		if (track.closed()) {
+			if (ds < -0.5 * L) ds += L;
+			else if (ds > 0.5 * L) ds -= L;
+		}
+		u_s[i] = u_s[i - 1] + ds;
+	}
+
+	auto find_smp_for_s = [&](double target_s) -> int {
+		double target_u = target_s;
+		if (track.closed() && target_u < u_s[0] - 0.5)
+			target_u += L;
+		int best_idx = -1;
+		double best_err = 1e9;
+		for (size_t i = 0; i < u_s.size(); ++i) {
+			const double err = std::abs(u_s[i] - target_u);
+			if (err < best_err) {
+				best_err = err;
+				best_idx = static_cast<int>(i);
+			}
+		}
+		return best_idx;
+	};
+
+	auto find_smp_for_ghost = [&](int marker_idx) -> int {
+		const int trig_j = -marker_idx - 1;
+		if (trig_j < 0)
+			return -1;
+		for (size_t i = 0; i < d.samples.size(); ++i) {
+			if (d.samples[i].markers > trig_j)
+				return static_cast<int>(i);
+		}
+		return -1;
+	};
+
+	int first_miss_smp = -1;
+	if (miss_diag.valid) {
+		if (miss_diag.is_ghost) {
+			double best_err = 1e9;
+			for (size_t i = 0; i < d.samples.size(); ++i) {
+				const double err = std::abs(static_cast<double>(d.samples[i].odom) - miss_diag.actual_odom_m);
+				if (err < best_err) {
+					best_err = err;
+					first_miss_smp = static_cast<int>(i);
+				}
+			}
+		} else {
+			first_miss_smp = find_smp_for_s(miss_diag.marker_s);
+		}
+	}
+
+	// Also locate the last non-STOP bad marker occurring at least 4.0m before the finish line
+	// so that a later unrecovered mid-course mismatch is still caught as FAIL.
+	int last_mid_bad_smp = -1;
+	const double mid_cutoff_u = u_s.back() - 4.0;
+	for (const auto& m : marker_diags) {
+		if (m.status == 1 || m.want == 'U')
+			continue;
+		const int smp_i = (m.status == 4 && m.marker_idx < 0)
+			? find_smp_for_ghost(m.marker_idx)
+			: find_smp_for_s(m.s);
+		if (smp_i < 0)
+			continue;
+		if (first_miss_smp < 0 || smp_i < first_miss_smp)
+			first_miss_smp = smp_i;
+		if (u_s[smp_i] < mid_cutoff_u && smp_i > last_mid_bad_smp)
+			last_mid_bad_smp = smp_i;
+	}
+
+	if (first_miss_smp < 0 || static_cast<size_t>(first_miss_smp) + 1 >= d.samples.size())
+		return false;
+
+	// 3. In Drive_Fourth, g_target_base_mps (tgt_base) can ONLY exceed base_mps when
+	//    state->mismatch == 0. Requiring a post-miss marker event, a low-speed phase
+	//    (to exclude pre-miss straight inertia), and subsequent tgt_base / cur_base / v
+	//    acceleration proves marker resync succeeded and acceleration succeeded afterwards.
+	auto has_post_miss_accel = [&](int start_smp, double cur_margin, double v_margin) -> bool {
+		if (start_smp < 0 || static_cast<size_t>(start_smp) + 1 >= d.samples.size())
+			return false;
+		const int mk0 = d.samples[start_smp].markers;
+		bool saw_low = (d.samples[start_smp].tgt_base <= base_mps + 0.10);
+		for (size_t i = static_cast<size_t>(start_smp) + 1; i < d.samples.size(); ++i) {
+			const Sample& smp = d.samples[i];
+			if (smp.tgt_base <= base_mps + 0.10)
+				saw_low = true;
+			if (saw_low && smp.markers > mk0 &&
+				smp.tgt_base > base_mps + 0.30 &&
+				smp.cur_base > base_mps + cur_margin &&
+				smp.v > base_mps + v_margin) {
+				return true;
+			}
+		}
+		return false;
+	};
+
+	if (!has_post_miss_accel(first_miss_smp, 0.20, 0.25))
+		return false;
+	if (last_mid_bad_smp > first_miss_smp && !has_post_miss_accel(last_mid_bad_smp, 0.10, 0.15))
+		return false;
+
+	return true;
+}
+
 ScenarioResult run_scenario(const ScenarioOptions& opt) {
 	enable_ansi_console();
 	ScenarioResult res;
@@ -2940,6 +3105,14 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 			std::snprintf(buf, sizeof buf, "#%zu %c (expected %c at %.2fm: wrong type)",
 				miss_diag.k, miss_diag.got, miss_diag.want, miss_diag.marker_s);
 			cur->marker_check = buf;
+		}
+
+		cur->marker_recovered_accel = false;
+		if (n == 4 && cur->marker_check != "OK") {
+			FwDriveParams dp_cur{};
+			fwb_get_drive_params(&dp_cur);
+			cur->marker_recovered_accel = check_drive4_marker_recovery(
+				*cur, track, miss_diag, marker_diags, static_cast<double>(dp_cur.base_mps));
 		}
 
 		if (!opt.quiet) {
@@ -3904,7 +4077,8 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 							if (out_str_osc) *out_str_osc = str4.score;
 							if (out_str_wz) *out_str_wz = str4.wz_rms;
 							if (out_str_lat) *out_str_lat = str4.lat_rms;
-							if (lost_line(d4) || d4.marker_check != "OK" || d4.lap_time_fw <= 0 || oversteered(d4)) {
+							const bool d4_mk_ok = (d4.marker_check == "OK" || d4.marker_recovered_accel);
+							if (lost_line(d4) || !d4_mk_ok || d4.lap_time_fw <= 0 || oversteered(d4)) {
 								const bool ov = oversteered(d4) || check_oversteer(d4, 22.0);
 								*out_pass = false;
 								if (out_fm) {
@@ -3926,9 +4100,10 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 								*out_lap4_s = d4.lap_time_fw;
 								*out_pace = (track.length() > 0) ? (10.0 * d4.lap_time_fw / track.length()) : 0.0;
 								*out_dist_diff = d4.dist_m - track.length();
-								std::snprintf(buf, sizeof buf, "%s4th: %.2fs (%.2fs/10m, %+.2fm | str: %.0fdps/%.1fmm)",
+								std::snprintf(buf, sizeof buf, "%s4th: %.2fs (%.2fs/10m, %+.2fm | str: %.0fdps/%.1fmm)%s",
 									only_drive4 ? "" : "1st: OK | ", *out_lap4_s, *out_pace, *out_dist_diff,
-									str4.wz_rms, str4.lat_rms);
+									str4.wz_rms, str4.lat_rms,
+									d4.marker_recovered_accel ? " [MK-RECOV]" : "");
 								if (out_fm) {
 									out_fm->d1_failed = false;
 									out_fm->was_oversteer = check_oversteer(d4, 18.0);
@@ -4427,7 +4602,8 @@ TrialResult evaluate_trial_headless(const ScenarioOptions& opt) {
 		return tr;
 	}
 	const DriveResult& d4 = res.drives[1];
-	if (lost_line(d4) || d4.marker_check != "OK" || d4.lap_time_fw <= 0 || oversteered(d4)) {
+	const bool d4_mk_ok = (d4.marker_check == "OK" || d4.marker_recovered_accel);
+	if (lost_line(d4) || !d4_mk_ok || d4.lap_time_fw <= 0 || oversteered(d4)) {
 		tr.d1_failed = false;
 		tr.was_oversteer = oversteered(d4) || check_oversteer(d4, 22.0);
 		tr.max_beta_deg = d4.max_beta_deg;
@@ -4463,8 +4639,10 @@ TrialResult evaluate_trial_headless(const ScenarioOptions& opt) {
 		tr.pace = 10.0 * d4.lap_time_fw / track.length();
 		tr.dist_diff = d4.dist_m - track.length();
 	}
-	char buf[120];
-	std::snprintf(buf, sizeof buf, "1st: OK | 4th: %.2fs (%.2fs/10m, %+.2fm)", tr.lap4_s, tr.pace, tr.dist_diff);
+	char buf[140];
+	std::snprintf(buf, sizeof buf, "1st: OK | 4th: %.2fs (%.2fs/10m, %+.2fm)%s",
+		tr.lap4_s, tr.pace, tr.dist_diff,
+		d4.marker_recovered_accel ? " [MK-RECOV]" : "");
 	tr.detail = buf;
 	return tr;
 }

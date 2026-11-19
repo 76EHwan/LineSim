@@ -421,7 +421,10 @@ void write_reports(const ScenarioOptions& opt, const ScenarioResult& res, const 
 	  << ", \"decel\": " << p.decel << ", \"steer_kp\": " << p.steer_kp << ", \"steer_kd\": " << p.steer_kd
 	  << ", \"pos_atten_gain\": " << p.pos_atten_gain << ", \"pit_in_m\": " << p.pit_in_m
 	  << ", \"target_shift\": " << p.target_shift << ", \"fan_en\": " << p.fan_en << ", \"yaw_kp\": " << p.yaw_kp
-	  << ", \"yaw_ki\": " << p.yaw_ki 	  << ", \"target_curve_gain\": " << p.target_curve_gain << ", \"slalom_ratio\": " << p.slalom_ratio << "},\n";
+	  << ", \"yaw_ki\": " << p.yaw_ki 	  << ", \"target_curve_gain\": " << p.target_curve_gain << ", \"slalom_ratio\": " << p.slalom_ratio
+	  << ", \"brake_margin_m\": " << p.brake_margin_m
+	  << ", \"bulge_lat_acc\": " << p.bulge_lat_acc << ", \"corner45_max_mps\": " << p.corner45_max_mps
+	  << ", \"omega_add_mps\": " << p.omega_add_mps << ", \"wave_add_mps\": " << p.wave_add_mps << "},\n";
 	j << "  \"drives\": [\n";
 	for (size_t i = 0; i < res.drives.size(); i++) {
 		const DriveResult& d = res.drives[i];
@@ -431,7 +434,9 @@ void write_reports(const ScenarioOptions& opt, const ScenarioResult& res, const 
 		  << d.rms_lat_mm << ", \"max_beta_deg\": " << d.max_beta_deg << ", \"markers\": \"";
 		for (const FwMarker& m : d.markers)
 			j << marker_name(m.type) << " ";
-		j << "\", \"marker_check\": \"" << esc(d.marker_check) << "\", \"lcd\": \"" << esc(d.lcd) << "\"}" << (i + 1 < res.drives.size() ? "," : "") << "\n";
+		j << "\", \"marker_check\": \"" << esc(d.marker_check)
+		  << "\", \"marker_recovered_accel\": " << (d.marker_recovered_accel ? "true" : "false")
+		  << ", \"lcd\": \"" << esc(d.lcd) << "\"}" << (i + 1 < res.drives.size() ? "," : "") << "\n";
 	}
 	j << "  ]\n}\n";
 }

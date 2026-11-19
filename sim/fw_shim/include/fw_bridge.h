@@ -47,6 +47,10 @@ typedef struct {
 	float target_curve_gain;             /* drive 3/4 target_pos x gain in curves (DRIVE_HAS_TARGET_CURVE_GAIN) */
 	float slalom_ratio;                  /* drive 4: 45 deg segments at base + (max - base) x ratio (DRIVE_HAS_SLALOM_RATIO) */
 	float brake_margin_m;                /* straight braking margin before curve [m] (DRIVE_HAS_BRAKE_MARGIN) */
+	float bulge_lat_acc;                 /* drive 4: Bulge curved shortcut lateral accel limit [m/s2] */
+	float corner45_max_mps;              /* drive 4: Corner45 arc shortcut max speed cap [m/s] */
+	float omega_add_mps;                 /* drive 4: Omega hairpin arc speed offset over Fourth_Corner_Mps [m/s] */
+	float wave_add_mps;                  /* drive 4: Wave180 shortcut speed offset over Fourth_Corner_Mps [m/s] */
 	int   fan_en;
 } FwDriveParams;
 void fwb_get_drive_params(FwDriveParams *p);

@@ -45,6 +45,10 @@ const ParamRow kRows[] = {
 	{"tgt curve gain", &FwDriveParams::target_curve_gain, 0.1f, 0.0f, 5.0f, "x%.2f"},   // drive 3/4, in curves
 	{"slalom ratio", &FwDriveParams::slalom_ratio, 0.05f, 0.0f, 1.0f, "%.2f"},          // drive 4, 45 deg segments
 	{"brake margin", &FwDriveParams::brake_margin_m, 0.01f, 0.0f, 1.0f, "%.2f m"},       // straight braking margin
+	{"bulge lat acc", &FwDriveParams::bulge_lat_acc, 0.5f, 1.0f, 25.0f, "%.1f m/s2"},    // drive 4: Bulge shortcut lat acc
+	{"c45 max spd", &FwDriveParams::corner45_max_mps, 0.10f, 1.5f, 8.0f, "%.2f m/s"},    // drive 4: Corner45 arc max speed
+	{"omega add spd", &FwDriveParams::omega_add_mps, 0.02f, -0.50f, 2.00f, "%+.2f m/s"}, // drive 4: Omega arc speed offset
+	{"wave add spd", &FwDriveParams::wave_add_mps, 0.05f, -0.50f, 3.00f, "%+.2f m/s"},   // drive 4: Wave180 speed offset
 };
 constexpr int kRowCount = sizeof kRows / sizeof kRows[0];
 
@@ -1183,6 +1187,10 @@ void LiveView::push_undo(const std::string& desc) {
 		    top.target_curve_gain == s.params.target_curve_gain &&
 		    top.slalom_ratio == s.params.slalom_ratio &&
 		    top.brake_margin_m == s.params.brake_margin_m &&
+		    top.bulge_lat_acc == s.params.bulge_lat_acc &&
+		    top.corner45_max_mps == s.params.corner45_max_mps &&
+		    top.omega_add_mps == s.params.omega_add_mps &&
+		    top.wave_add_mps == s.params.wave_add_mps &&
 		    top.fan_en == s.params.fan_en) {
 			return; // already top of stack
 		}
