@@ -242,6 +242,14 @@ void fwb_get_drive_params(FwDriveParams *p) {
 	p->ramp_jerk_s = 0.0f;
 	p->ramp_settle_ms = 0.0f;
 #endif
+#ifdef DRIVE_HAS_FOURTH_PARAMS
+	p->fourth_in_mm = driveData.fourth_in_mm;
+	p->fourth_side_mm = driveData.fourth_side_mm;
+	p->fourth_alat_gain = driveData.fourth_alat_gain;
+	p->fourth_hgain = driveData.fourth_hgain;
+#else
+	p->fourth_in_mm = p->fourth_side_mm = p->fourth_alat_gain = p->fourth_hgain = 0.0f;
+#endif
 }
 
 void fwb_set_drive_params(const FwDriveParams *p) {
@@ -277,6 +285,12 @@ void fwb_set_drive_params(const FwDriveParams *p) {
 #ifdef DRIVE_HAS_ACCEL_RAMP
 	driveData.ramp_jerk_s = p->ramp_jerk_s;
 	driveData.ramp_settle_ms = p->ramp_settle_ms;
+#endif
+#ifdef DRIVE_HAS_FOURTH_PARAMS
+	driveData.fourth_in_mm = p->fourth_in_mm;
+	driveData.fourth_side_mm = p->fourth_side_mm;
+	driveData.fourth_alat_gain = p->fourth_alat_gain;
+	driveData.fourth_hgain = p->fourth_hgain;
 #endif
 }
 

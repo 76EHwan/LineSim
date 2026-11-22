@@ -8,6 +8,7 @@
 #include <thread>
 #include <windows.h>
 
+#include "app/maprec.h"
 #include "core/scenario.h"
 #include "gpu/gpu_sim.h"
 #include "out/report.h"
@@ -96,6 +97,9 @@ static void usage() {
 		"                                                     GPU-accelerated parallel 1st-run batch sweep (DirectCompute)\n"
 		"  linesim gen [--complex] [--seed n] [--out file] [--board 6.1x4.88] [--length 35,55] [--crossings n]\n"
 		"                                                     random ZETIN course (short: --board 4.88x4.88 --length 8,30)\n"
+		"  linesim maprec <map log> [--out map.json] [--track true.json]\n"
+		"                                                     marker log (robot SD /Map_Log/map_NNN_dK.csv, save_slot,\n"
+		"                                                     drive_sysid.csv or driveN_markers.csv) -> ZETIN map track JSON\n"
 		"\n"
 		"options:\n"
 		"  --out <dir>          output folder (default: runs/<date-time>)\n"
@@ -113,6 +117,10 @@ static void usage() {
 		"                       light = summary.json + marker log (~15 KB), none = summary.json only\n"
 		"  --csv-hz <n>         thin the telemetry csv to n Hz (marker / line-lost rows are kept)\n"
 		"  --speed <x>          (view) playback speed, e.g. 0.25 for slow motion\n"
+		"  sessions keep a record DB in runs/tune_db.json (LINESIM_TUNE_DB overrides): per course\n"
+		"                       the best lap of each drive and its parameters, the champion set, and\n"
+		"                       hard seeds; a tuning result replaces the champion only if it wins\n"
+		"                       the benchmark courses (runs/tune_maps, rebuilt from seeds)\n"
 		"  --interactive        (view) boot to the firmware menu: arrows = U/D/L/R, Enter = K,\n"
 		"                       R = robot back on the start line");
 }
@@ -152,6 +160,8 @@ int main(int argc_in, char** argv_in) {
 	std::string cmd = argc >= 2 ? argv[1] : "";
 	if (cmd == "gen")
 		return run_gen(argc, argv);
+	if (cmd == "maprec")
+		return run_maprec(argc, argv);
 	if (cmd == "gpu")
 		return run_gpu_cli(argc, argv);
 	if (cmd == "eval-worker") {

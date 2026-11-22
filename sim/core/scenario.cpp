@@ -17,11 +17,13 @@
 #include <memory>
 #include <random>
 #include <regex>
+#include <thread>
 
 static volatile std::sig_atomic_t g_stop_requested = 0;
 
 #include "core/json.h"
 #include "core/simulation.h"
+#include "core/tune_db.h"
 #include "sim_mcu.h"
 #include "view/live_view.h"
 #include "view/viewer.h"
@@ -1585,7 +1587,7 @@ bool save_drive_params_to_firmware_file(const FwDriveParams& p, std::string* out
 		"\n\t.omega_add_mps = %.2ff,"
 		"\n\t.wave_add_mps = %.2ff,"
 		"\n\t.ramp_jerk_s = %.2ff,"
-		"\n\t.ramp_settle_ms = %.1ff,\n",
+		"\n\t.ramp_settle_ms = %.1ff,",
 		p.base_mps, p.max_mps > 0 ? p.max_mps : 10.0f,
 		p.accel > 0 ? p.accel : 10.0f, p.decel > 0 ? p.decel : 10.0f,
 		p.steer_kp, p.steer_kd, p.pos_atten_gain,
@@ -1603,7 +1605,20 @@ bool save_drive_params_to_firmware_file(const FwDriveParams& p, std::string* out
 		p.ramp_settle_ms
 	);
 
-	content.replace(open_brace + 1, close_brace - (open_brace + 1), new_body);
+	std::string body = new_body;
+	// 4회차 파라미터 (DRIVE_HAS_FOURTH_PARAMS 펌웨어만: 값이 모두 0 이면 필드가 없는 펌웨어로 보고 쓰지 않음)
+	if (p.fourth_in_mm > 0 || p.fourth_side_mm > 0 || p.fourth_alat_gain > 0 || p.fourth_hgain > 0) {
+		char f4[256];
+		std::snprintf(f4, sizeof f4,
+			"\n\t.fourth_in_mm = %.1ff,"
+			"\n\t.fourth_side_mm = %.1ff,"
+			"\n\t.fourth_alat_gain = %.2ff,"
+			"\n\t.fourth_hgain = %.2ff,",
+			p.fourth_in_mm, p.fourth_side_mm, p.fourth_alat_gain, p.fourth_hgain);
+		body += f4;
+	}
+	body += "\n";
+	content.replace(open_brace + 1, close_brace - (open_brace + 1), body);
 
 	std::ofstream out(found_path, std::ios::binary | std::ios::trunc);
 	if (!out.is_open()) {
@@ -1682,6 +1697,10 @@ bool load_drive_params_from_firmware_file(FwDriveParams* p, std::string* out_pat
 			extract(".wave_add_mps", &p->wave_add_mps);
 			extract(".ramp_jerk_s", &p->ramp_jerk_s);
 			extract(".ramp_settle_ms", &p->ramp_settle_ms);
+			extract(".fourth_in_mm", &p->fourth_in_mm);
+			extract(".fourth_side_mm", &p->fourth_side_mm);
+			extract(".fourth_alat_gain", &p->fourth_alat_gain);
+			extract(".fourth_hgain", &p->fourth_hgain);
 		}
 	}
 	return true;
@@ -1712,6 +1731,10 @@ bool apply_param(FwDriveParams* p, const std::string& key, double v) {
 	else if (key == "wave_add_mps") p->wave_add_mps = (float) v;             // drive 4: Wave180 shortcut speed offset [m/s]
 	else if (key == "ramp_jerk_s") p->ramp_jerk_s = (float) v;             // jerk-limited accel start [s], 0 = off
 	else if (key == "ramp_settle_ms") p->ramp_settle_ms = (float) v;       // max settle wait before accelerating [ms], 0 = off
+	else if (key == "fourth_in_mm") p->fourth_in_mm = (float) v;           // drive 4: inside offset limit [mm]
+	else if (key == "fourth_side_mm") p->fourth_side_mm = (float) v;       // drive 4: outside / straight offset limit [mm]
+	else if (key == "fourth_alat_gain") p->fourth_alat_gain = (float) v;   // drive 4: lateral-accel gain
+	else if (key == "fourth_hgain") p->fourth_hgain = (float) v;           // drive 4: IMU heading gain multiplier
 	else return false;
 	return true;
 }
@@ -1912,6 +1935,101 @@ static bool read_worker_result(WorkerProcess* wp) {
 		}
 	}
 	return true;
+}
+
+// 파라미터 세트(apply_param 키 전체)를 트랙 파일 하나에서 평가하는 워커 (1·4회차 헤드리스)
+static bool spawn_params_worker(const std::string& exe_path, const std::string& track_path,
+                                const std::string& robot_path, const tunedb::Params& kv,
+                                const ScenarioOptions& opt, WorkerProcess* wp) {
+	SECURITY_ATTRIBUTES sa{};
+	sa.nLength = sizeof(sa);
+	sa.bInheritHandle = TRUE;
+	HANDLE hRead = NULL, hWrite = NULL;
+	if (!CreatePipe(&hRead, &hWrite, &sa, 0))
+		return false;
+	SetHandleInformation(hRead, HANDLE_FLAG_INHERIT, 0);
+
+	std::string cmd = "\"" + exe_path + "\" eval-worker --track \"" + track_path + "\"";
+	if (!robot_path.empty())
+		cmd += " --robot \"" + robot_path + "\"";
+	if (opt.off_track_mm > 0)
+		cmd += " --off-track " + std::to_string(opt.off_track_mm);
+	char buf[96];
+	for (const auto& [k, v] : kv) {
+		std::snprintf(buf, sizeof buf, " --set %s=%.6g", k.c_str(), v);
+		cmd += buf;
+	}
+
+	STARTUPINFOA si{};
+	si.cb = sizeof(si);
+	si.dwFlags |= STARTF_USESTDHANDLES;
+	si.hStdOutput = hWrite;
+	si.hStdError = hWrite;
+	PROCESS_INFORMATION pi{};
+	BOOL ok = CreateProcessA(NULL, cmd.data(), NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+	CloseHandle(hWrite);
+	if (!ok) {
+		CloseHandle(hRead);
+		return false;
+	}
+	CloseHandle(pi.hThread);
+	wp->hProcess = pi.hProcess;
+	wp->hPipeRead = hRead;
+	return true;
+}
+
+// 벤치마크용 코스 파일: 시드에서 다시 만든다 (runs/tune_maps 에 캐시, 코스당 약 4 KB)
+static std::string tune_map_file(unsigned seed, const std::string& mode) {
+	fs::path dir = fs::path("runs") / "tune_maps";
+	std::error_code ec;
+	fs::create_directories(dir, ec);
+	fs::path f = dir / ("random_" + std::to_string(seed) + (mode == "hyper" ? "_hyper" : "") + ".json");
+	if (fs::exists(f, ec))
+		return f.string();
+	TrackGenOptions g;
+	g.seed = seed;
+	g.hyper_mode = mode == "hyper";
+	g.complex_mode = !g.hyper_mode;
+	std::string e;
+	const std::string text = generate_track(g, &e);
+	if (text.empty())
+		return "";
+	if (FILE* fp = std::fopen(f.string().c_str(), "wb")) {
+		std::fwrite(text.data(), 1, text.size(), fp);
+		std::fclose(fp);
+		return f.string();
+	}
+	return "";
+}
+
+// 파라미터 세트들을 시드 코스들에서 병렬 평가. jobs[i] = (세트 번호, 시드). 결과는 같은 순서.
+static std::vector<tunedb::BenchResult> run_bench_jobs(const std::vector<tunedb::Params>& sets,
+	const std::vector<std::pair<int, unsigned>>& jobs, const tunedb::TuneDb& db, const ScenarioOptions& opt) {
+	std::vector<tunedb::BenchResult> out(jobs.size());
+	const std::string exe = get_self_exe_path();
+	std::string rpath = opt.robot_path;
+	if (rpath.empty())
+		rpath = fs::exists("robots/full.json") ? "robots/full.json" : "robots/default.json";
+	unsigned hw = std::thread::hardware_concurrency();
+	const size_t par = static_cast<size_t>(std::clamp(opt.jobs > 1 ? opt.jobs : static_cast<int>(hw > 2 ? hw - 1 : 1), 1, 12));
+	for (size_t b = 0; b < jobs.size(); b += par) {
+		const size_t e = std::min(jobs.size(), b + par);
+		std::vector<WorkerProcess> wp(e - b);
+		std::vector<bool> started(e - b, false);
+		for (size_t i = b; i < e; ++i) {
+			const std::string tf = tune_map_file(jobs[i].second, db.mode_of(jobs[i].second));
+			if (!tf.empty())
+				started[i - b] = spawn_params_worker(exe, tf, rpath, sets[static_cast<size_t>(jobs[i].first)], opt, &wp[i - b]);
+		}
+		for (size_t i = b; i < e; ++i) {
+			if (!started[i - b] || !read_worker_result(&wp[i - b]))
+				continue;
+			out[i].pass = wp[i - b].result.pass;
+			out[i].pace = wp[i - b].result.pace;
+			out[i].lap4 = wp[i - b].result.lap4_s;
+		}
+	}
+	return out;
 }
 #endif
 
@@ -3062,6 +3180,39 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 
 	res.drives.reserve(opt.session ? 4096 : opt.drives.size());
 
+	// 튜닝 기록 DB (세션만): 코스마다 회차별 최고 랩과 그 파라미터, 챔피언, 벤치 / 어려운 시드
+	tunedb::TuneDb tune_db;
+	if (opt.session) {
+		const char* dbp = std::getenv("LINESIM_TUNE_DB");
+		tune_db.load(dbp && *dbp ? dbp : "runs/tune_db.json");
+	}
+	const std::string gen_mode = (opt.hyper_track || opt.track_path.find("hyper") != std::string::npos) ? "hyper" : "complex";
+	auto record_tune_drive = [&](int n, const DriveResult& d) {
+		if (!opt.session)
+			return;
+		const std::string nm = track.name();
+		unsigned seed = 0;
+		if (nm.rfind("random_", 0) == 0)
+			seed = static_cast<unsigned>(std::strtoul(nm.c_str() + 7, nullptr, 10));
+		FwDriveParams fp;
+		fwb_get_drive_params(&fp);
+		const tunedb::Params kv = tunedb::from_fw(fp);
+		const bool ok = d.is_finished() && d.marker_check == "OK" && d.lap_time_fw > 0 && d.max_lat_mm <= opt.off_track_mm;
+		const bool better = tune_db.record_drive(nm, seed, seed ? gen_mode : "", track.length(), n, ok, d.lap_time_fw, kv);
+		// 챔피언 파라미터로 실패한 랜덤 코스는 어려운 시드로 보관 (다음 벤치마크에 포함)
+		if (!ok && seed && tune_db.has_champion() && tunedb::same_params(kv, tune_db.champion())) {
+			tune_db.add_hard_seed(seed, gen_mode);
+			if (!opt.quiet)
+				std::printf("%s[tune db]%s champion failed drive %d on %s: kept as a hard seed\n", col::Cyn, col::Rst, n, nm.c_str());
+		}
+		tune_db.save();
+		if (better && !opt.quiet) {
+			const tunedb::MapRecord* r = tune_db.find(nm);
+			std::printf("%s[tune db]%s %s drive %d best %.2f s (%d runs on this course)\n", col::Cyn, col::Rst, nm.c_str(), n,
+				d.lap_time_fw, r ? r->runs : 0);
+		}
+	};
+
 	// One drive, as the operator does it: put the robot on the start line, select the drive.
 	auto run_one = [&](int n) {
 		res.drives.emplace_back();
@@ -3370,6 +3521,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 			live->record_lap(lap_key.empty() ? track.name() : lap_key, lap_label.empty() ? track.name() : lap_label, n,
 				attempt_tag, ok, cur->lap_time_fw, what);
 		}
+		record_tune_drive(n, *cur);
 		cur = nullptr;
 	};
 
@@ -3417,6 +3569,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 		start_map_prefetch();
 
 	// Session: a new random course (saved into the output folder), "" on failure.
+	std::vector<std::string> generated_files;
 	auto make_map = [&](std::string* label) {
 		std::string text;
 		unsigned used_seed = 0;
@@ -3440,6 +3593,17 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 			}
 		}
 		*label = save_generated(text, used_seed);   // load_course() makes it the course on the floor
+		// 생성 코스 파일은 최근 것만 둔다 (기록은 tune_db.json 에 시드로 남아 언제든 다시 만들 수 있음).
+		// 튜닝 코스는 최대 3개가 차례로 교체되므로 최근 8개면 쓰는 중인 파일은 지워지지 않는다.
+		generated_files.push_back(*label);
+		while (generated_files.size() > 8) {
+			const std::string old = generated_files.front();
+			generated_files.erase(generated_files.begin());
+			if (old != res.track_path_used && old != opt.track_path) {
+				std::error_code rec;
+				fs::remove(old, rec);
+			}
+		}
 		return text;
 	};
 	// Session: put a course on the floor (firmware idle, between events).
@@ -3644,6 +3808,113 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 				return spinout || limit_exceeded;
 			};
 
+			// 튜닝 시작: 챔피언 파라미터에서 출발 (명령줄 --set 값은 그 위에 다시 적용)
+			auto start_from_champion = [&]() {
+				if (!tune_db.has_champion())
+					return;
+				FwDriveParams p = session.params;
+				tunedb::to_fw(tune_db.champion(), &p);
+				for (const auto& kv : opt.params)
+					apply_param(&p, kv.first, kv.second);
+				session.params = p;
+				fwb_set_drive_params(&session.params);
+				res.params = session.params;
+				if (!opt.quiet)
+					std::printf("%s[tune db]%s tuning starts from the champion (since %s, %zu courses on record)\n",
+						col::Cyn, col::Rst, tune_db.champion_since().c_str(), tune_db.map_count());
+			};
+
+			// 튜닝 결과(session.params)를 챔피언과 같은 벤치마크 코스(고정 시드 + 최근 어려운 시드)에서 비교.
+			// 완주 수가 많거나, 같으면 평균 pace(10 m 당 4회차 랩, 코스 길이 무관)가 빠를 때만 챔피언 교체.
+			// 지면 챔피언 값으로 되돌리고 false (drive.c 에 저장하지 않는다).
+			auto champion_gate = [&](const char* who) -> bool {
+				const tunedb::Params chal = tunedb::from_fw(session.params);
+				const bool had = tune_db.has_champion();
+				const tunedb::Params champ = had ? tune_db.champion() : tunedb::from_fw(session.baseline_params);
+				if (tunedb::same_params(chal, champ)) {
+					if (!had) {
+						tune_db.set_champion(chal, {});
+						tune_db.save();
+					}
+					return true;
+				}
+				std::vector<unsigned> seeds = tune_db.bench_seeds();
+				const std::vector<unsigned>& hard = tune_db.hard_seeds();
+				for (size_t i = hard.size() > 5 ? hard.size() - 5 : 0; i < hard.size(); ++i)
+					seeds.push_back(hard[i]);
+				std::vector<std::pair<int, unsigned>> jobs;
+				for (unsigned s : seeds) {
+					jobs.push_back({0, s});   // 챔피언도 매번 다시 돈다 (펌웨어가 바뀌었을 수 있음)
+					jobs.push_back({1, s});
+				}
+				session.message = std::string("benchmark: ") + who + " result vs champion on " + std::to_string(seeds.size()) + " courses...";
+				if (!opt.quiet) {
+					std::printf("\n%s[tune db]%s benchmark %s result vs %s on %zu courses (%zu bench + %zu hard), %zu runs...\n",
+						col::Cyn, col::Rst, who, had ? "champion" : "starting parameters", seeds.size(),
+						tune_db.bench_seeds().size(), seeds.size() - tune_db.bench_seeds().size(), jobs.size());
+					std::fflush(stdout);
+				}
+				const auto t0 = std::chrono::steady_clock::now();
+#ifdef _WIN32
+				const std::vector<tunedb::BenchResult> r = run_bench_jobs({champ, chal}, jobs, tune_db, opt);
+#else
+				const std::vector<tunedb::BenchResult> r(jobs.size());
+#endif
+				std::map<unsigned, tunedb::BenchResult> champ_res, chal_res;
+				for (size_t i = 0; i < jobs.size(); ++i)
+					(jobs[i].first == 0 ? champ_res : chal_res)[jobs[i].second] = r[i];
+				int pc = 0, ph = 0, common = 0;
+				double sc = 0, sh = 0;
+				for (unsigned s : seeds) {
+					const tunedb::BenchResult& a = champ_res[s];
+					const tunedb::BenchResult& b = chal_res[s];
+					ph += a.pass;
+					pc += b.pass;
+					if (a.pass && b.pass) {
+						sh += a.pace;
+						sc += b.pace;
+						++common;
+					}
+				}
+				const bool accept = (pc != ph) ? (pc > ph) : (common > 0 && sc < sh * (1.0 - 0.002));
+				if (!opt.quiet) {
+					std::printf("  %-8s %-26s %-26s\n", "seed", had ? "champion" : "start params", "new");
+					for (unsigned s : seeds) {
+						auto cell = [](const tunedb::BenchResult& x) {
+							char b[40];
+							if (x.pass)
+								std::snprintf(b, sizeof b, "%6.2f s  %.3f s/10m", x.lap4, x.pace);
+							else
+								std::snprintf(b, sizeof b, "fail");
+							return std::string(b);
+						};
+						std::printf("  %-8u %-26s %-26s\n", s, cell(champ_res[s]).c_str(), cell(chal_res[s]).c_str());
+					}
+					std::printf("  finished %d vs %d, mean pace on %d common %.3f vs %.3f s/10m (%.0f s)\n  -> %s%s%s\n\n",
+						ph, pc, common, common ? sh / common : 0.0, common ? sc / common : 0.0,
+						std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count(),
+						accept ? col::Grn : col::Yel,
+						accept ? "new set wins: it becomes the champion" : "champion kept: the new set is dropped", col::Rst);
+					std::fflush(stdout);
+				}
+				if (accept) {
+					tune_db.set_champion(chal, chal_res);
+				} else {
+					if (!had)
+						tune_db.set_champion(champ, champ_res);
+					else
+						tune_db.champion_results() = champ_res;
+					FwDriveParams p = session.params;
+					tunedb::to_fw(champ, &p);
+					session.params = p;
+					fwb_set_drive_params(&session.params);
+					res.params = session.params;
+					session.message = std::string(who) + ": champion kept (the new set lost the benchmark)";
+				}
+				tune_db.save();
+				return accept;
+			};
+
 			for (;;) {
 				if (g_stop_requested) {
 					session.auto_tune = false;
@@ -3667,7 +3938,8 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 					if (!tune_courses.empty() && cur_course != 0 && load_course(tune_courses[0].text, tune_courses[0].label))
 						cur_course = 0;
 					std::string saved_path;
-					save_drive_params_to_firmware_file(session.params, &saved_path);
+					if (champion_gate("auto-tune [A]"))
+						save_drive_params_to_firmware_file(session.params, &saved_path);
 
 					if (!opt.quiet) {
 						std::printf("\n%s%s================================================================================%s\n", col::Bold, col::Cyn, col::Rst);
@@ -3727,7 +3999,8 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 						"endless [E] stopped: base_mps %.2f m/s | %s",
 						final_v, win_reason.c_str());
 					std::string saved_path;
-					if (save_drive_params_to_firmware_file(session.params, &saved_path)) {
+					const bool won = champion_gate("endless [E]");
+					if (won && save_drive_params_to_firmware_file(session.params, &saved_path)) {
 						session.message = "endless [E] ended: winning parameters saved to drive.c!";
 						if (!opt.quiet) {
 							std::printf("\n%s%s================================================================================%s\n", col::Bold, col::Cyn, col::Rst);
@@ -3748,7 +4021,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 							std::printf("%s%s================================================================================%s\n\n", col::Bold, col::Cyn, col::Rst);
 							std::fflush(stdout);
 						}
-					} else {
+					} else if (won) {
 						session.message = "endless [E] ended (drive 1-4 to try it)";
 					}
 					session.history.push_back(line);
@@ -3769,6 +4042,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 				if (session.auto_tune && session.tune_mode == 1) {
 					session.request_drive = 0;
 					if (!bayes_tuner.active) {
+						start_from_champion();
 						TuneSet from = params_to_tuneset();
 						tune_courses.clear();
 						if (std::string here = read_text(res.track_path_used); !here.empty())
@@ -4062,6 +4336,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 				if (session.auto_tune && session.tune_mode == 2) {
 					session.request_drive = 0;
 					if (!endless_tuner.active) {
+						start_from_champion();
 						TuneSet from = params_to_tuneset();
 						endless_tuner.start(session.params.base_mps, from, opt.endless_max_fail_pct, opt.endless_window, opt.endless_min_speed);
 						if (opt.jobs > 1 && !opt.quiet) {

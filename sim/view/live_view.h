@@ -98,7 +98,10 @@ public:
 		init_vector_odom();
 	}
 	// New course: the lap records start over.
-	void clear_laps() { courses_.clear(); }
+	void clear_laps() {
+		courses_.clear();
+		map_logs_.clear();
+	}
 	// A course left the auto-tune set: its records go.
 	void drop_course(const std::string& course) {
 		for (size_t i = 0; i < courses_.size(); i++)
@@ -164,6 +167,13 @@ private:
 	uint16_t prev_marker_count_ = 0;
 	std::vector<MapCalibNode> calib_nodes_;
 	std::vector<MapCalibMarker> calib_markers_;
+	// 완주한 회차들의 펌웨어 마커 로그 (같은 마커 순서끼리 융합해 맵 복원 정확도를 높인다)
+	struct MapLogEntry {
+		int drive;
+		std::vector<FwMarker> marks;
+	};
+	std::vector<MapLogEntry> map_logs_;
+	int calib_fused_ = 1;
 	MapCalibStats calib_stats_{};
 	struct LapSlot {
 		std::string last;      // latest attempt, empty = none yet

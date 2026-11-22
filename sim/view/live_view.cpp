@@ -39,16 +39,15 @@ const ParamRow kRows[] = {
 	{"steer kd", &FwDriveParams::steer_kd, 0.01f, 0.0f, 2.0f, "%.3f s", true},
 	{"pos atten gain", &FwDriveParams::pos_atten_gain, 0.05f, 0.0f, 2.0f, "%.2f"},
 	{"pit-in dist", &FwDriveParams::pit_in_m, 0.01f, 0.0f, 1.0f, "%.2f m"},
-	{"target shift", &FwDriveParams::target_shift, 0.05f, 0.0f, 1.50f, "%.2f"},
 	{"yaw kp", &FwDriveParams::yaw_kp, 0.01f, 0.0f, 20.0f, "%.2f"},          // cascade (0 / 0 = plain PD)
 	{"yaw ki", &FwDriveParams::yaw_ki, 0.01f, 0.0f, 500.0f, "%.2f /s"},
-	{"tgt curve gain", &FwDriveParams::target_curve_gain, 0.1f, 0.0f, 5.0f, "x%.2f"},   // drive 3/4, in curves
-	{"slalom ratio", &FwDriveParams::slalom_ratio, 0.05f, 0.0f, 1.0f, "%.2f"},          // drive 4, 45 deg segments
-	{"brake margin", &FwDriveParams::brake_margin_m, 0.01f, 0.0f, 1.0f, "%.2f m"},       // straight braking margin
-	{"bulge lat acc", &FwDriveParams::bulge_lat_acc, 0.5f, 1.0f, 25.0f, "%.1f m/s2"},    // drive 4: Bulge shortcut lat acc
-	{"c45 max spd", &FwDriveParams::corner45_max_mps, 0.10f, 1.5f, 8.0f, "%.2f m/s"},    // drive 4: Corner45 arc max speed
-	{"omega add spd", &FwDriveParams::omega_add_mps, 0.02f, -0.50f, 2.00f, "%+.2f m/s"}, // drive 4: Omega arc speed offset
-	{"wave add spd", &FwDriveParams::wave_add_mps, 0.05f, -0.50f, 3.00f, "%+.2f m/s"},   // drive 4: Wave180 speed offset
+	{"brake margin", &FwDriveParams::brake_margin_m, 0.01f, 0.0f, 1.0f, "%.2f m"},       // drive 2: straight braking margin
+	{"ramp jerk", &FwDriveParams::ramp_jerk_s, 0.01f, 0.0f, 1.0f, "%.2f s"},            // accel start jerk limit, 0 = off
+	{"ramp settle", &FwDriveParams::ramp_settle_ms, 5.0f, 0.0f, 500.0f, "%.0f ms"},      // settle wait before accelerating, 0 = off
+	{"4th inside", &FwDriveParams::fourth_in_mm, 1.0f, 0.0f, 145.0f, "%.0f mm"},         // drive 4: curve inside offset limit
+	{"4th side", &FwDriveParams::fourth_side_mm, 1.0f, 0.0f, 145.0f, "%.0f mm"},         // drive 4: outside / straight limit
+	{"4th lat acc", &FwDriveParams::fourth_alat_gain, 0.01f, 0.3f, 1.5f, "x%.2f"},       // drive 4: lateral-accel gain
+	{"4th head gain", &FwDriveParams::fourth_hgain, 0.1f, 0.5f, 4.0f, "x%.1f"},          // drive 4: IMU heading gain
 };
 constexpr int kRowCount = sizeof kRows / sizeof kRows[0];
 
@@ -64,6 +63,18 @@ void store(FwDriveParams& p, const ParamRow& r, float v) {
 LiveView::LiveView(Viewer& viewer, Robot& robot, const Track& track, bool interactive, double speed)
 	: v_(viewer), robot_(robot), track_(track), interactive_(interactive), speed_(speed) {
 	timeBeginPeriod(1);   // 1 ms Sleep granularity for smooth pacing
+	// Keep running at full speed when the window is covered or minimised: Windows 11 otherwise
+	// drops the 1 ms timer request and slows (EcoQoS) processes whose windows are not visible.
+	{
+#ifndef PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION
+#define PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION 0x4
+#endif
+		PROCESS_POWER_THROTTLING_STATE st{};
+		st.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+		st.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
+		st.StateMask = 0;   // controlled bits off = no throttling, timer resolution honoured
+		SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &st, sizeof st);
+	}
 	if (const char* a = std::getenv("LINESIM_AUTOSHOT"))
 		auto_shot_ = std::atof(a);
 	anchor_wall_ = wall();
@@ -881,8 +892,12 @@ void LiveView::tick(double t_sim, bool fast_forward, const std::string& phase) {
 		last_frame_ = -1;   // render now
 	}
 
+	// A frame can take 100-200 ms on an integrated GPU, more when another window shares the GPU.
+	// Never render more often than every 3 frame times, so drawing takes at most ~25 % of the wall
+	// time and the simulation keeps its speed instead of crawling between frames.
+	const double min_frame_gap = 3.0 * last_render_;
 	if (fast_forward) {
-		if (now - last_frame_ > 0.05) {
+		if (now - last_frame_ > std::max(0.05, min_frame_gap)) {
 			render(t_sim, phase + "   [fast forward]");
 			last_frame_ = wall();
 		}
@@ -909,7 +924,7 @@ void LiveView::tick(double t_sim, bool fast_forward, const std::string& phase) {
 	if (speed_ >= 4.0 || (session && session->auto_tune)) {
 		// Render at ~5-8 FPS in turbo/auto-tune mode (0.15s - 0.20s) so GPU rendering
 		// takes only ~10-15% of wall time, leaving 85-90% CPU for 6x-8x simulation physics.
-		const double frame_dt = (speed_ >= 16.0 || (session && session->auto_tune)) ? 0.20 : 0.12;
+		const double frame_dt = std::max((speed_ >= 16.0 || (session && session->auto_tune)) ? 0.20 : 0.12, min_frame_gap);
 		if (now - last_frame_ >= frame_dt) {
 			if (rate_wall_ > 0 && now - rate_wall_ >= 0.5) {
 				achieved_ = (t_sim - rate_sim_) / (now - rate_wall_);
@@ -934,7 +949,7 @@ void LiveView::tick(double t_sim, bool fast_forward, const std::string& phase) {
 		reanchor(t_sim);
 		target = now;
 	}
-	const double frame_dt = 1.0 / 60.0;
+	const double frame_dt = std::max(1.0 / 60.0, min_frame_gap);
 	if (now - last_frame_ >= frame_dt) {
 		if (rate_wall_ > 0 && now - rate_wall_ >= 0.5) {   // simulated seconds per wall second
 			achieved_ = (t_sim - rate_sim_) / (now - rate_wall_);
@@ -1167,8 +1182,10 @@ void LiveView::on_robot_stopped_at_end(const std::vector<FwMarker>& markers, Pos
 			dr_acc_ds_ = 0.0;
 			dr_acc_dth_ = 0.0;
 		}
-		for (size_t i = 0; i < calib_markers_.size() && i < markers.size(); ++i)
+		for (size_t i = 0; i < calib_markers_.size() && i < markers.size(); ++i) {
 			calib_markers_[i].type = markers[i].type;
+			calib_markers_[i].seg_yaw_deg = markers[i].yaw_deg;
+		}
 
 		const bool path_only = (drive_num_ >= 2);
 		const bool closed_ok = !markers.empty() && markers.back().type == 4
@@ -1181,6 +1198,44 @@ void LiveView::on_robot_stopped_at_end(const std::vector<FwMarker>& markers, Pos
 		cfg.rule_arc_radius = 0.25f;
 		cfg.closed_loop = closed_ok ? 1 : 0;
 		cfg.path_only = path_only ? 1 : 0;
+		cfg.mark_yaw_valid = (calib_markers_.size() == markers.size()) ? 1 : 0;
+
+		// 이전 회차 로그와 융합: 마커 순서가 같은 완주 로그의 구간 거리 / yaw 가중 평균
+		// (1~2회차 = 라인 위 주행 가중치 1, 3회차 이후 = 레이싱 라인 0.25)
+		calib_fused_ = 1;
+		if (cfg.mark_yaw_valid && !map_logs_.empty()) {
+			auto w_of = [](int drive) { return drive >= 3 ? 0.25 : 1.0; };
+			const size_t n = markers.size();
+			std::vector<double> ws(n, w_of(drive_num_)), ds(n), ys(n);
+			for (size_t i = 0; i < n; ++i) {
+				ds[i] = ws[i] * markers[i].dist_m;
+				ys[i] = ws[i] * markers[i].yaw_deg;
+			}
+			for (const MapLogEntry& L : map_logs_) {
+				bool same = closed_ok ? (L.marks.size() == n) : (L.marks.size() >= n);   // 이탈한 회차는 앞부분만
+				for (size_t i = 0; same && i < n; ++i)
+					same = L.marks[i].type == markers[i].type;
+				if (!same)
+					continue;
+				const double w = w_of(L.drive);
+				for (size_t i = 0; i < n; ++i) {
+					ws[i] += w;
+					ds[i] += w * L.marks[i].dist_m;
+					ys[i] += w * L.marks[i].yaw_deg;
+				}
+				++calib_fused_;
+			}
+			if (calib_fused_ > 1)
+				for (size_t i = 0; i < n; ++i) {
+					calib_markers_[i].seg_dist_m = static_cast<float>(ds[i] / ws[i]);
+					calib_markers_[i].seg_yaw_deg = static_cast<float>(ys[i] / ws[i]);
+				}
+		}
+		if (cfg.mark_yaw_valid && closed_ok) {
+			map_logs_.push_back({drive_num_, markers});
+			if (map_logs_.size() > 8)
+				map_logs_.erase(map_logs_.begin());
+		}
 
 		MapCalib_Run(calib_nodes_.data(), static_cast<int32_t>(calib_nodes_.size()),
 			calib_markers_.empty() ? nullptr : calib_markers_.data(),
@@ -1212,8 +1267,8 @@ void LiveView::on_robot_stopped_at_end(const std::vector<FwMarker>& markers, Pos
 		}
 		const double rms_e = rec_pts.empty() ? 0.0 : std::sqrt(sum_e2 / rec_pts.size());
 		std::fprintf(stderr,
-			"[%s] drive=%d nodes=%zu markers=%zu drift=%+.2fdeg scale=%.4f lat_err=%.1fmm cross_pairs=%d | map_err rms=%.1fmm max=%.1fmm\n",
-			path_only ? "PathCalib" : "MapCalib", drive_num_,
+			"[%s] drive=%d fused=%d nodes=%zu markers=%zu drift=%+.2fdeg scale=%.4f lat_err=%.1fmm cross_pairs=%d | map_err rms=%.1fmm max=%.1fmm\n",
+			(calib_stats_.rule_map || !path_only) ? "MapCalib" : "PathCalib", drive_num_, calib_fused_,
 			calib_nodes_.size(), calib_markers_.size(),
 			calib_stats_.gyro_drift_deg, calib_stats_.odom_scale,
 			calib_stats_.closure_lat_mm, calib_stats_.crossing_pairs,

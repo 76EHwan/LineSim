@@ -3,6 +3,7 @@
 #include <math.h>
 #include <stddef.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define MC_PI      3.14159265358979323846f
 #define MC_RAD2DEG 57.2957795130823208768f
@@ -335,6 +336,327 @@ static void reconstruct_curve_gap(MapCalibNode *nodes,
 	                                sub_th, th_b);
 }
 
+/*
+ * Rule-based ZETIN map (1st run): every marker-to-marker segment is a straight or one arc of
+ * k x 45 deg with R = rule_arc_radius. Arc lengths come from the rule, straight lengths from
+ * odometry. Straights that start at an arc exit read ~18 mm long (the marker fires at different
+ * distances after the curvature change at arc entry and exit). Headings are exact multiples of
+ * 45 deg, so the only free quantities are the straight lengths: a weighted least-squares
+ * correction closes the loop laterally (hard) and pulls paired crossing ('C') marks together (soft).
+ * Measured on 11 sim runs / 6 tracks: line rms 35 mm, worst point 117 mm.
+ */
+#define RM_MAX_SEG    256
+#define RM_MAX_EQ     33
+#define RM_LAG        0.040f   /* marker event after the curvature change [m] */
+#define RM_LAG_C      0.060f   /* crossing mark after the crossing point [m] */
+#define RM_STR_OFF    0.018f   /* straight after an arc exit reads this much long [m] */
+#define RM_SIG_STR0   0.017f   /* straight length error [m] = SIG0 + SIGK * length */
+#define RM_SIG_STRK   0.002f
+#define RM_SIG_CROSS  0.100f   /* crossing coincidence tolerance [m] */
+
+static int rm_snap_k45(float dyaw_deg, float seg_d, float R) {
+	if (fabsf(dyaw_deg) < 22.0f || seg_d <= 0.005f) return 0;
+	const float arc45 = R * (45.0f * MC_DEG2RAD);
+	if (fabsf(dyaw_deg) < 34.0f && seg_d > 1.6f * arc45) return 0;
+	float k_est = 0.5f * (fabsf(dyaw_deg) / (45.0f * 1.05f)) + 0.5f * (seg_d / (arc45 * 1.08f));
+	int k = (int)roundf(k_est);
+	if (k < 1) k = 1;
+	if (k > 6) k = 6;
+	return (dyaw_deg > 0.0f) ? k : -k;
+}
+
+typedef struct {
+	float len[RM_MAX_SEG];   /* straight length [m] (arcs: R * |phi|) */
+	float th[RM_MAX_SEG];    /* heading at segment start [rad] */
+	int   k45[RM_MAX_SEG];   /* 0 = straight, else signed number of 45 deg steps */
+	float ex[RM_MAX_SEG], ey[RM_MAX_SEG], eth[RM_MAX_SEG];   /* event point after the segment */
+	int   n;
+} RuleMap;
+
+/* Walks the segments from the sensor-bar start; boundaries sit RM_LAG before each event. */
+static void rm_trace(RuleMap *rm, float bx, float by, float R) {
+	float x = bx, y = by;
+	for (int j = 0; j < rm->n; ++j) {
+		const float th = rm->th[j];
+		if (rm->k45[j] == 0) {
+			x += rm->len[j] * cosf(th);
+			y += rm->len[j] * sinf(th);
+		} else {
+			const float phi = (float)rm->k45[j] * (45.0f * MC_DEG2RAD);
+			const float turn = (phi > 0.0f) ? 1.0f : -1.0f;
+			const float cx = x - turn * R * sinf(th), cy = y + turn * R * cosf(th);
+			const float rx = x - cx, ry = y - cy, c = cosf(phi), s = sinf(phi);
+			x = cx + rx * c - ry * s;
+			y = cy + rx * s + ry * c;
+		}
+		const float th_end = (j + 1 < rm->n) ? rm->th[j + 1]
+			: rm->th[j] + (float)rm->k45[j] * (45.0f * MC_DEG2RAD);
+		rm->ex[j] = x + RM_LAG * cosf(th_end);
+		rm->ey[j] = y + RM_LAG * sinf(th_end);
+		rm->eth[j] = th_end;
+	}
+}
+
+/* Point on the traced line at line distance d from the bar start (d may run past the end). */
+static void rm_point(const RuleMap *rm, float bx, float by, float R, float d, float *px, float *py) {
+	float x = bx, y = by;
+	for (int j = 0; j < rm->n; ++j) {
+		const float th = rm->th[j];
+		const float L = rm->len[j];
+		if (d <= L || j == rm->n - 1) {
+			const float u = (d < 0.0f) ? 0.0f : d;
+			if (rm->k45[j] == 0 || d > L) {
+				/* straight piece, or past the last arc: continue along the exit heading */
+				float t = th;
+				float base_x = x, base_y = y, run = u;
+				if (rm->k45[j] != 0) {
+					const float phi = (float)rm->k45[j] * (45.0f * MC_DEG2RAD);
+					const float turn = (phi > 0.0f) ? 1.0f : -1.0f;
+					const float cx = x - turn * R * sinf(th), cy = y + turn * R * cosf(th);
+					const float rx = x - cx, ry = y - cy, c = cosf(phi), s = sinf(phi);
+					base_x = cx + rx * c - ry * s;
+					base_y = cy + rx * s + ry * c;
+					t = th + phi;
+					run = u - L;
+				}
+				*px = base_x + run * cosf(t);
+				*py = base_y + run * sinf(t);
+			} else {
+				const float phi = (float)rm->k45[j] * (45.0f * MC_DEG2RAD) * (u / L);
+				const float turn = (rm->k45[j] > 0) ? 1.0f : -1.0f;
+				const float cx = x - turn * R * sinf(th), cy = y + turn * R * cosf(th);
+				const float rx = x - cx, ry = y - cy, c = cosf(phi), s = sinf(phi);
+				*px = cx + rx * c - ry * s;
+				*py = cy + rx * s + ry * c;
+			}
+			return;
+		}
+		/* advance to the end of segment j */
+		if (rm->k45[j] == 0) {
+			x += L * cosf(th);
+			y += L * sinf(th);
+		} else {
+			const float phi = (float)rm->k45[j] * (45.0f * MC_DEG2RAD);
+			const float turn = (phi > 0.0f) ? 1.0f : -1.0f;
+			const float cx = x - turn * R * sinf(th), cy = y + turn * R * cosf(th);
+			const float rx = x - cx, ry = y - cy, c = cosf(phi), s = sinf(phi);
+			x = cx + rx * c - ry * s;
+			y = cy + rx * s + ry * c;
+		}
+		d -= L;
+	}
+	*px = x;
+	*py = y;
+}
+
+/* Solves the small dense system M z = r (q x q, Gaussian elimination with partial pivoting). */
+static int rm_solve(float M[RM_MAX_EQ][RM_MAX_EQ], float *r, int q) {
+	for (int c = 0; c < q; ++c) {
+		int p = c;
+		for (int i = c + 1; i < q; ++i)
+			if (fabsf(M[i][c]) > fabsf(M[p][c])) p = i;
+		if (fabsf(M[p][c]) < 1e-12f) return 0;
+		if (p != c) {
+			for (int k = 0; k < q; ++k) { float t = M[c][k]; M[c][k] = M[p][k]; M[p][k] = t; }
+			float t = r[c]; r[c] = r[p]; r[p] = t;
+		}
+		for (int i = c + 1; i < q; ++i) {
+			const float f = M[i][c] / M[c][c];
+			for (int k = c; k < q; ++k) M[i][k] -= f * M[c][k];
+			r[i] -= f * r[c];
+		}
+	}
+	for (int c = q - 1; c >= 0; --c) {
+		float v = r[c];
+		for (int k = c + 1; k < q; ++k) v -= M[c][k] * r[k];
+		r[c] = v / M[c][c];
+	}
+	return 1;
+}
+
+static RuleMap g_rm;   /* last rule map (MapCalib_RuleFromLog reads it) */
+
+static int rule_zetin_map(MapCalibNode *nodes, int32_t n_nodes,
+                          MapCalibMarker *markers, int32_t n_markers,
+                          const MapCalibConfig *cfg, MapCalibStats *st) {
+	static float A[RM_MAX_EQ][RM_MAX_SEG];
+	static float Mq[RM_MAX_EQ][RM_MAX_EQ];
+	static float rq[RM_MAX_EQ];
+	const float R = cfg->rule_arc_radius;
+	const float th0 = cfg->start_th;
+	if (n_markers < 2 || n_markers > RM_MAX_SEG) return 0;
+
+	/* segments: 0 = robot start -> first mark, j = mark j-1 -> mark j */
+	g_rm.n = n_markers;
+	static float seg_d[RM_MAX_SEG];
+	float th = th0;
+	int prev_dir = 0;   /* -1: R 곡선, 0: 직선, +1: L 곡선 (직전 구간) */
+	for (int j = 0; j < n_markers; ++j) {
+		int32_t ib = markers[j].node_idx;
+		int32_t ia = (j == 0) ? 0 : markers[j - 1].node_idx;
+		if (ia < 0) ia = 0;
+		if (ib >= n_nodes) ib = n_nodes - 1;
+		if (ib < ia) ib = ia;
+		/* 여러 회차를 융합한 거리가 있으면 그것을 쓴다 (노드 위치는 비례 배치) */
+		const float d = (markers[j].seg_dist_m > 0.0f) ? markers[j].seg_dist_m : (nodes[ib].s - nodes[ia].s);
+		/* segment yaw from the firmware's own marker log (the viewer's sampled heading lags the marks) */
+		const float dyaw = markers[j].seg_yaw_deg;
+		/* 구간 종류는 ZETIN 마커 규칙으로 정한다: 곡선 시작은 자기 쪽 마커, 곡선->직선은 마지막 회전 쪽 마커.
+		   직전 마커가 X(L/R)이고 직전 구간이 X 곡선이면 이번 구간은 직선, 아니면 X 곡선.
+		   C/STOP 마커는 직전 방향을 유지. yaw 가 규칙과 크게 어긋나면 45도 스냅으로 되돌린다. */
+		int k = 0;
+		if (j > 0) {
+			const int32_t pt = markers[j - 1].type;
+			int expd;
+			if (pt == 1 || pt == 2) {
+				const int x = (pt == 1) ? 1 : -1;
+				expd = (prev_dir == x) ? 0 : x;
+			} else {
+				expd = (j > 1) ? prev_dir : 0;
+			}
+			if (expd != 0) {
+				if (dyaw * (float)expd < -30.0f) {
+					k = rm_snap_k45(dyaw, d, R);
+				} else {
+					const float arc45 = R * (45.0f * MC_DEG2RAD);
+					const float k_est = 0.5f * (fabsf(dyaw) / (45.0f * 1.05f)) + 0.5f * (d / (arc45 * 1.08f));
+					int kk = (int)roundf(k_est);
+					if (kk < 1) kk = 1;
+					if (kk > 6) kk = 6;
+					k = expd * kk;
+				}
+			} else if (fabsf(dyaw) > 60.0f) {
+				k = rm_snap_k45(dyaw, d, R);
+			}
+		}
+		prev_dir = (k > 0) ? 1 : ((k < 0) ? -1 : 0);
+		g_rm.k45[j] = k;
+		seg_d[j] = d;
+	}
+
+	for (int j = 0; j < n_markers; ++j) {
+		const int k = g_rm.k45[j];
+		const float d = seg_d[j];
+		g_rm.th[j] = th;
+		if (k != 0) {
+			g_rm.len[j] = R * fabsf((float)k) * (45.0f * MC_DEG2RAD);
+			th += (float)k * (45.0f * MC_DEG2RAD);
+		} else {
+			float L = d;
+			if (j == 0) L -= RM_LAG;                                   /* first boundary LAG before the mark */
+			else if (g_rm.k45[j - 1] != 0) L -= RM_STR_OFF;              /* straight after an arc exit */
+			g_rm.len[j] = (L > 0.01f) ? L : 0.01f;
+		}
+	}
+	const float bx = cfg->start_x + cfg->sensor_x * cosf(th0);
+	const float by = cfg->start_y + cfg->sensor_x * sinf(th0);
+	rm_trace(&g_rm, bx, by, R);
+
+	/* least squares on the straight lengths */
+	int q = 0;
+	const float nx = -sinf(th0), ny = cosf(th0);
+	/* 폐루프 조건은 스냅된 총 회전이 360도의 배수일 때만 (규칙 분류가 틀렸으면 닫지 않는다) */
+	int k_sum = 0;
+	for (int j = 0; j < g_rm.n; ++j) k_sum += g_rm.k45[j];
+	if (cfg->closed_loop && (k_sum % 8) == 0) {
+		for (int j = 0; j < g_rm.n; ++j)
+			A[q][j] = (g_rm.k45[j] == 0 && j > 0) ? cosf(g_rm.th[j]) * nx + sinf(g_rm.th[j]) * ny : 0.0f;
+		const int last = g_rm.n - 1;
+		const float lx = g_rm.ex[last] - RM_LAG * cosf(g_rm.eth[last]);
+		const float ly = g_rm.ey[last] - RM_LAG * sinf(g_rm.eth[last]);
+		rq[q] = -((lx - bx) * nx + (ly - by) * ny);
+		if (st) st->closure_lat_mm = -rq[q] * 1000.0f;
+		++q;
+	}
+	const int q_hard = q;
+	{
+		uint8_t used[RM_MAX_SEG] = {0};
+		for (int a = 0; a < g_rm.n && q + 2 <= RM_MAX_EQ; ++a) {
+			if (markers[a].type != 3 || used[a]) continue;
+			const float pax = g_rm.ex[a] - RM_LAG_C * cosf(g_rm.eth[a]);
+			const float pay = g_rm.ey[a] - RM_LAG_C * sinf(g_rm.eth[a]);
+			int best = -1;
+			float best_d = 0.80f;
+			for (int b = a + 1; b < g_rm.n; ++b) {
+				if (markers[b].type != 3 || used[b]) continue;
+				if (nodes[markers[b].node_idx].s - nodes[markers[a].node_idx].s < 1.0f) continue;
+				const float pbx = g_rm.ex[b] - RM_LAG_C * cosf(g_rm.eth[b]);
+				const float pby = g_rm.ey[b] - RM_LAG_C * sinf(g_rm.eth[b]);
+				const float dd = hypotf(pax - pbx, pay - pby);
+				if (dd < best_d) { best_d = dd; best = b; }
+			}
+			if (best < 0) continue;
+			used[a] = used[best] = 1;
+			const float pbx = g_rm.ex[best] - RM_LAG_C * cosf(g_rm.eth[best]);
+			const float pby = g_rm.ey[best] - RM_LAG_C * sinf(g_rm.eth[best]);
+			for (int comp = 0; comp < 2; ++comp) {
+				for (int j = 0; j < g_rm.n; ++j) {
+					const int between = (g_rm.k45[j] == 0 && j > a && j <= best);
+					A[q][j] = between ? (comp == 0 ? cosf(g_rm.th[j]) : sinf(g_rm.th[j])) : 0.0f;
+				}
+				rq[q] = (comp == 0) ? (pax - pbx) : (pay - pby);
+				++q;
+			}
+			if (st) st->crossing_pairs++;
+		}
+	}
+	if (q > 0) {
+		/* dl = S A' (A S A' + Rn)^-1 r,  S = diag(sigma_j^2) */
+		for (int i = 0; i < q; ++i) {
+			for (int k = 0; k < q; ++k) {
+				float acc = 0.0f;
+				for (int j = 0; j < g_rm.n; ++j) {
+					if (g_rm.k45[j] != 0 || j == 0) continue;
+					const float sg = RM_SIG_STR0 + RM_SIG_STRK * g_rm.len[j];
+					acc += A[i][j] * sg * sg * A[k][j];
+				}
+				Mq[i][k] = acc;
+			}
+			Mq[i][i] += (i < q_hard) ? 1e-8f : RM_SIG_CROSS * RM_SIG_CROSS;
+		}
+		if (rm_solve(Mq, rq, q)) {
+			for (int j = 1; j < g_rm.n; ++j) {
+				if (g_rm.k45[j] != 0) continue;
+				const float sg = RM_SIG_STR0 + RM_SIG_STRK * g_rm.len[j];
+				float acc = 0.0f;
+				for (int i = 0; i < q; ++i) acc += A[i][j] * rq[i];
+				g_rm.len[j] += sg * sg * acc;
+				if (g_rm.len[j] < 0.01f) g_rm.len[j] = 0.01f;
+			}
+			rm_trace(&g_rm, bx, by, R);
+		}
+	}
+
+	/* nodes: proportional position inside their segment, on the line (boundaries LAG before the marks) */
+	float seg_start = -RM_LAG;   /* line distance of the event that starts segment j (robot start = 0) */
+	float line_acc = 0.0f;       /* line distance of the start of segment j */
+	for (int j = 0; j < g_rm.n; ++j) {
+		const int32_t ia = (j == 0) ? 0 : markers[j - 1].node_idx;
+		const int32_t ib = markers[j].node_idx;
+		const float sa = nodes[ia < 0 ? 0 : ia].s, sb = nodes[ib >= n_nodes ? n_nodes - 1 : ib].s;
+		const float line_a = (j == 0) ? 0.0f : line_acc + RM_LAG;   /* event j-1 on the line */
+		const float line_b = line_acc + g_rm.len[j] + RM_LAG;          /* event j */
+		for (int32_t i = (j == 0 ? 0 : ia + 1); i <= ib && i < n_nodes; ++i) {
+			const float u = (sb - sa > 1e-5f) ? (nodes[i].s - sa) / (sb - sa) : 1.0f;
+			rm_point(&g_rm, bx, by, R, line_a + u * (line_b - line_a), &nodes[i].x, &nodes[i].y);
+		}
+		line_acc += g_rm.len[j];
+		(void)seg_start;
+	}
+	{
+		const int32_t il = markers[g_rm.n - 1].node_idx;
+		const float s_last = nodes[il].s;
+		for (int32_t i = il + 1; i < n_nodes; ++i)
+			rm_point(&g_rm, bx, by, R, line_acc + RM_LAG + (nodes[i].s - s_last), &nodes[i].x, &nodes[i].y);
+	}
+	for (int j = 0; j < g_rm.n; ++j) {
+		markers[j].x = g_rm.ex[j];
+		markers[j].y = g_rm.ey[j];
+	}
+	if (st) st->odom_scale = 1.0f;
+	return 1;
+}
+
 void MapCalib_Run(MapCalibNode *nodes, int32_t n_nodes,
                   MapCalibMarker *markers, int32_t n_markers,
                   const MapCalibConfig *cfg, MapCalibStats *stats_out) {
@@ -378,6 +700,13 @@ void MapCalib_Run(MapCalibNode *nodes, int32_t n_nodes,
 	}
 
 	const int used_zetin = (!cfg->path_only && cfg->rule_arc_radius > 0.0f && markers && n_markers >= 2);
+	/* 마커 로그(회차별 yaw)가 있으면 모든 회차에서 규칙 기반 ZETIN 맵 복원 (R 0.25 원호, 직선 길이 최소제곱) */
+	if (cfg->mark_yaw_valid && cfg->rule_arc_radius > 0.0f && markers && n_markers >= 2
+	    && rule_zetin_map(nodes, n_nodes, markers, n_markers, cfg, &st)) {
+		st.rule_map = 1;
+		if (stats_out) *stats_out = st;
+		return;
+	}
 	/* Stage 2 + Stage 3 + Stage 4: Vector reconstruction (always run so 1st drive also has vector map) */
 	{
 		/*
@@ -597,4 +926,39 @@ void MapCalib_Run(MapCalibNode *nodes, int32_t n_nodes,
 	}
 
 	if (stats_out) *stats_out = st;
+}
+
+/* 마커 로그만으로 규칙 기반 맵 복원 (실차 SD 맵 로그 / 시뮬 driveN_markers.csv). */
+int32_t MapCalib_RuleFromLog(const MapLogMark *marks, int32_t n, uint8_t closed_loop,
+                             int32_t *seg_k45, float *seg_len, MapCalibStats *stats_out) {
+	static MapCalibNode nodes[RM_MAX_SEG + 1];
+	static MapCalibMarker mk[RM_MAX_SEG];
+	MapCalibStats st = {0.0f, 1.0f, 0.0f, 0, 0};
+	if (!marks || n < 2 || n > RM_MAX_SEG) return 0;
+	float s = 0.0f;
+	memset(&nodes[0], 0, sizeof nodes[0]);
+	for (int32_t j = 0; j < n; ++j) {
+		const float d = (marks[j].dist_m > 0.0f) ? marks[j].dist_m : 0.0f;
+		s += d;
+		memset(&nodes[j + 1], 0, sizeof nodes[j + 1]);
+		nodes[j + 1].ds = d;
+		nodes[j + 1].s = s;
+		memset(&mk[j], 0, sizeof mk[j]);
+		mk[j].node_idx = j + 1;
+		mk[j].type = marks[j].type;
+		mk[j].seg_yaw_deg = marks[j].seg_yaw_deg;
+	}
+	MapCalibConfig cfg;
+	memset(&cfg, 0, sizeof cfg);
+	cfg.rule_arc_radius = 0.25f;
+	cfg.closed_loop = closed_loop;
+	cfg.mark_yaw_valid = 1;
+	if (!rule_zetin_map(nodes, n + 1, mk, n, &cfg, &st)) return 0;
+	for (int32_t j = 0; j < n; ++j) {
+		if (seg_k45) seg_k45[j] = g_rm.k45[j];
+		if (seg_len) seg_len[j] = g_rm.len[j];
+	}
+	st.rule_map = 1;
+	if (stats_out) *stats_out = st;
+	return n;
 }

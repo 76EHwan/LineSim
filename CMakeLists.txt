@@ -172,9 +172,11 @@ option(LINESIM_BUILD_APP "Build the simulator executable" ON)
 if(LINESIM_BUILD_APP)
 add_executable(linesim
   sim/app/main.cpp
+  sim/app/maprec.cpp
   sim/core/json.cpp
   sim/core/simulation.cpp
   sim/core/scenario.cpp
+  sim/core/tune_db.cpp
   sim/gpu/gpu_sim.cpp
   sim/world/track.cpp
   sim/world/track_gen.cpp

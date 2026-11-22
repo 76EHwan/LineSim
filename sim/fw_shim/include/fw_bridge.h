@@ -54,6 +54,8 @@ typedef struct {
 	int   fan_en;
 	float ramp_jerk_s;                  /* jerk-limited accel start [s], 0 = off (DRIVE_HAS_ACCEL_RAMP) */
 	float ramp_settle_ms;               /* max wait for line/yaw settle before accelerating [ms], 0 = off */
+	float fourth_in_mm, fourth_side_mm; /* drive 4: inside / outside+straight offset limits [mm] (DRIVE_HAS_FOURTH_PARAMS) */
+	float fourth_alat_gain, fourth_hgain; /* drive 4: lateral-accel gain, IMU heading gain multiplier */
 } FwDriveParams;
 void fwb_get_drive_params(FwDriveParams *p);
 void fwb_set_drive_params(const FwDriveParams *p);
