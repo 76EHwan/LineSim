@@ -113,7 +113,7 @@ public:
 	// ok = counts as a lap.
 	void record_lap(const std::string& course, const std::string& label, int drive, const std::string& tag, bool ok, double lap_s,
 		const std::string& what) {
-		if (drive < 1 || drive > 4)
+		if (drive < 1 || drive > 5)
 			return;
 		CourseLaps* c = nullptr;
 		for (CourseLaps& e : courses_)
@@ -172,7 +172,7 @@ private:
 	};
 	struct CourseLaps {
 		std::string key, label;
-		LapSlot d[4];
+		LapSlot d[5];
 	};
 	std::vector<CourseLaps> courses_;   // in the order they were first driven
 	bool stop_ = false;

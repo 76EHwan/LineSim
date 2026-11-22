@@ -235,6 +235,13 @@ void fwb_get_drive_params(FwDriveParams *p) {
 	p->omega_add_mps = 0.04f;
 	p->wave_add_mps = 0.25f;
 #endif
+#ifdef DRIVE_HAS_ACCEL_RAMP
+	p->ramp_jerk_s = driveData.ramp_jerk_s;
+	p->ramp_settle_ms = driveData.ramp_settle_ms;
+#else
+	p->ramp_jerk_s = 0.0f;
+	p->ramp_settle_ms = 0.0f;
+#endif
 }
 
 void fwb_set_drive_params(const FwDriveParams *p) {
@@ -266,6 +273,10 @@ void fwb_set_drive_params(const FwDriveParams *p) {
 	driveData.corner45_max_mps = p->corner45_max_mps;
 	driveData.omega_add_mps = p->omega_add_mps;
 	driveData.wave_add_mps = p->wave_add_mps;
+#endif
+#ifdef DRIVE_HAS_ACCEL_RAMP
+	driveData.ramp_jerk_s = p->ramp_jerk_s;
+	driveData.ramp_settle_ms = p->ramp_settle_ms;
 #endif
 }
 

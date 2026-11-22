@@ -48,6 +48,8 @@ struct ScenarioOptions {
 	double max_drive_time = 0.0;      // [s] per drive before the operator lifts the robot (<= 0 to disable)
 	double off_track_mm = 295.0;      // sensor bar / extension bar (295mm) this far from the line -> lift
 	bool quiet = false;
+	int report_level = 2;            // 2 = full (csv + svg + html), 1 = light (summary + markers), 0 = summary.json only
+	double csv_hz = 0.0;             // thin the telemetry csv to this rate (<= 0 keeps every sample)
 	bool view = false;                // 3D viewer, real-time playback of the drives
 	bool interactive = false;         // 3D viewer + firmware menu driven from the keyboard
 	bool session = false;             // 3D viewer, drives started from the keyboard, parameters edited live

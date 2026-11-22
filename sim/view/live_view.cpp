@@ -131,7 +131,9 @@ void LiveView::handle_keys() {
 			break;
 		}
 		case 'R':
-			if ((interactive_ || (session && !session->busy)) && on_reset) {
+			if (session) {
+				session_key(k);
+			} else if (interactive_ && on_reset) {
 				on_reset();
 				v_.clear_trail();
 				has_trail_pose_ = false;
@@ -220,6 +222,49 @@ void LiveView::session_key(int k) {
 				speed_ = 32.0;
 		}
 		break;
+	case 'R': { // Toggle Drive 5 Endless Background RL + Live 3D Viewer Replay
+		extern HANDLE g_drive5_rl_proc;
+		if (g_drive5_rl_proc) {
+			DWORD code = 0;
+			if (GetExitCodeProcess(g_drive5_rl_proc, &code) && code == STILL_ACTIVE) {
+				TerminateProcess(g_drive5_rl_proc, 0);
+				CloseHandle(g_drive5_rl_proc);
+				g_drive5_rl_proc = nullptr;
+				s.message = "Drive 5 RL stopped (press 5 to test latest weights)";
+				break;
+			}
+			CloseHandle(g_drive5_rl_proc);
+			g_drive5_rl_proc = nullptr;
+		}
+		STARTUPINFOA si{};
+		si.cb = sizeof(si);
+		PROCESS_INFORMATION pi{};
+		const char* cwd = nullptr;
+		char cmd[512];
+		if (GetFileAttributesA("tools\\train_drive5_rl.py") != INVALID_FILE_ATTRIBUTES) {
+			std::snprintf(cmd, sizeof cmd, "tools\\.venv\\Scripts\\python.exe tools\\train_drive5_rl.py --endless --workers 8");
+		} else if (GetFileAttributesA("..\\..\\tools\\train_drive5_rl.py") != INVALID_FILE_ATTRIBUTES) {
+			cwd = "..\\..";
+			std::snprintf(cmd, sizeof cmd, "..\\..\\tools\\.venv\\Scripts\\python.exe ..\\..\\tools\\train_drive5_rl.py --endless --workers 8");
+		} else {
+			std::snprintf(cmd, sizeof cmd, "E:\\kth59\\LineSim\\tools\\.venv\\Scripts\\python.exe E:\\kth59\\LineSim\\tools\\train_drive5_rl.py --endless --workers 8");
+			cwd = "E:\\kth59\\LineSim";
+		}
+		if (CreateProcessA(nullptr, cmd, nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, cwd, &si, &pi)) {
+			CloseHandle(pi.hThread);
+			g_drive5_rl_proc = pi.hProcess;
+			s.message = "Drive 5 RL started! Replaying Drive 5 in viewer...";
+			if (!s.busy) {
+				s.request_drive = 5;
+			}
+			if (speed_ < 16.0) {
+				speed_ = 16.0;
+			}
+		} else {
+			s.message = "Failed to launch tools\\train_drive5_rl.py";
+		}
+		break;
+	}
 	case 'E':   // Endless 100-Map Reliability + AI Gain Auto-Heal (mode 2)
 		if (s.auto_tune && s.tune_mode == 2) {
 			s.auto_tune = false;
@@ -503,7 +548,66 @@ std::string LiveView::session_panel() const {
 	return t;
 }
 
+HANDLE g_drive5_rl_proc = nullptr;
+
+static void poll_drive5_rl_viewer(SessionState* s) {
+	if (!s || !g_drive5_rl_proc) {
+		return;
+	}
+	DWORD code = 0;
+	if (!GetExitCodeProcess(g_drive5_rl_proc, &code) || code != STILL_ACTIVE) {
+		CloseHandle(g_drive5_rl_proc);
+		g_drive5_rl_proc = nullptr;
+		s->message = "Drive 5 RL exited";
+		return;
+	}
+	static DWORD last_poll_ms = 0;
+	static int last_seen_gen = -1;
+	DWORD now = GetTickCount();
+	if (now - last_poll_ms < 500) {
+		return;
+	}
+	last_poll_ms = now;
+
+	const char* st_path = (GetFileAttributesA("runs\\drive5_rl\\state.json") != INVALID_FILE_ATTRIBUTES)
+	                    ? "runs\\drive5_rl\\state.json"
+	                    : "E:\\kth59\\LineSim\\runs\\drive5_rl\\state.json";
+	FILE* f = std::fopen(st_path, "rb");
+	if (!f) {
+		return;
+	}
+	char buf[1024];
+	size_t n = std::fread(buf, 1, sizeof(buf) - 1, f);
+	std::fclose(f);
+	buf[n] = '\0';
+
+	int gen = -1;
+	double best_lap = -1.0;
+	if (const char* pg = std::strstr(buf, "\"gen\":")) {
+		gen = std::atoi(pg + 6);
+	}
+	if (const char* pl = std::strstr(buf, "\"lap_s\":")) {
+		best_lap = std::atof(pl + 8);
+	}
+	if (gen >= 0) {
+		char msg[160];
+		if (best_lap > 0.0) {
+			std::snprintf(msg, sizeof msg, "RL gen %d | best %.2fs (R: stop)", gen, best_lap);
+		} else {
+			std::snprintf(msg, sizeof msg, "RL gen %d | searching... (R: stop)", gen);
+		}
+		s->message = msg;
+		if (!s->busy && s->request_drive == 0) {
+			last_seen_gen = gen;
+			s->request_drive = 5;
+		}
+	} else if (!s->busy && s->request_drive == 0) {
+		s->request_drive = 5;
+	}
+}
+
 void LiveView::render(double t_sim, const std::string& phase) {
+	poll_drive5_rl_viewer(session);
 	FwTelemetry tm;
 	fwb_telemetry(&tm);
 	ViewerHud hud;
@@ -588,22 +692,23 @@ void LiveView::render(double t_sim, const std::string& phase) {
 			"1 (Search)    ",
 			"2 (Straight)  ",
 			"3 (Shift)     ",
-			"4 (Out-In-Out)"
+			"4 (Out-In-Out)",
+			"5 (RL)        "
 		};
-		const char* dname = (d >= 0 && d < 4) ? names[d] : "d?";
+		const char* dname = (d >= 0 && d < 5) ? names[d] : "d?";
 		char line[240];
 		std::snprintf(line, sizeof line, "drive %s  %s    %s", dname, best, l.last.empty() ? "" : l.last.c_str());
 		return std::string(line);
 	};
 	if (courses_.size() == 1) {
 		hud.status += "\n\nlaps";
-		for (int d = 0; d < 4; d++)
+		for (int d = 0; d < 5; d++)
 			hud.status += "\n" + lap_line(d, courses_[0].d[d]);
 	} else if (courses_.size() > 1) {
 		hud.status += "\n\nlaps (per course)";
 		for (const CourseLaps& c : courses_) {
 			hud.status += "\n" + c.label;
-			for (int d = 0; d < 4; d++)
+			for (int d = 0; d < 5; d++)
 				if (!c.d[d].last.empty())
 					hud.status += "\n   " + lap_line(d, c.d[d]);
 		}
@@ -616,7 +721,7 @@ void LiveView::render(double t_sim, const std::string& phase) {
 		hud.help = "Arrows: U/D/L/R buttons   Enter: K button   R: robot back to start\n" + hud.help;
 	if (session) {
 		hud.help = "1..5: Drive   G: Apply Gains   U: Undo Gain   Shift+U: Revert All   S: Save drive.c\n"
-		           "Arrows: Pick/Step   Enter: Type   A: Auto-tune   E: AI heal   H: FFT HUD   X: Stop\n" + hud.help;
+		           "Arrows: Pick/Step   Enter: Type   A: Auto-tune   E: AI heal   R: RL 5th   H: FFT HUD   X: Stop\n" + hud.help;
 		hud.panel = session_panel();
 	} else {
 		hud.help += "\n[G]: Toggle AI Gain Card   [H]: Toggle FFT Spectrum HUD";

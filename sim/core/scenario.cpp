@@ -9,6 +9,7 @@
 #include <ctime>
 #include <cmath>
 #include <cstdio>
+#include <cctype>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -1582,7 +1583,9 @@ bool save_drive_params_to_firmware_file(const FwDriveParams& p, std::string* out
 		"\n\t.bulge_lat_acc = %.2ff,"
 		"\n\t.corner45_max_mps = %.2ff,"
 		"\n\t.omega_add_mps = %.2ff,"
-		"\n\t.wave_add_mps = %.2ff,\n",
+		"\n\t.wave_add_mps = %.2ff,"
+		"\n\t.ramp_jerk_s = %.2ff,"
+		"\n\t.ramp_settle_ms = %.1ff,\n",
 		p.base_mps, p.max_mps > 0 ? p.max_mps : 10.0f,
 		p.accel > 0 ? p.accel : 10.0f, p.decel > 0 ? p.decel : 10.0f,
 		p.steer_kp, p.steer_kd, p.pos_atten_gain,
@@ -1595,7 +1598,9 @@ bool save_drive_params_to_firmware_file(const FwDriveParams& p, std::string* out
 		p.bulge_lat_acc > 0.5f ? p.bulge_lat_acc : 6.50f,
 		p.corner45_max_mps > 0.1f ? p.corner45_max_mps : 3.30f,
 		p.omega_add_mps,
-		p.wave_add_mps
+		p.wave_add_mps,
+		p.ramp_jerk_s,
+		p.ramp_settle_ms
 	);
 
 	content.replace(open_brace + 1, close_brace - (open_brace + 1), new_body);
@@ -1646,6 +1651,10 @@ bool load_drive_params_from_firmware_file(FwDriveParams* p, std::string* out_pat
 				break;
 			auto extract = [&](const char* key, float* out) {
 				size_t kpos = line.find(key);
+				const size_t kend = (kpos == std::string::npos) ? 0 : kpos + std::strlen(key);
+				if (kpos != std::string::npos && kend < line.size()
+						&& (std::isalnum((unsigned char) line[kend]) || line[kend] == '_'))
+					kpos = std::string::npos;   // ".accel" must not match ".accel_xxx"
 				if (kpos != std::string::npos) {
 					size_t eq = line.find('=', kpos);
 					if (eq != std::string::npos) {
@@ -1671,6 +1680,8 @@ bool load_drive_params_from_firmware_file(FwDriveParams* p, std::string* out_pat
 			extract(".corner45_max_mps", &p->corner45_max_mps);
 			extract(".omega_add_mps", &p->omega_add_mps);
 			extract(".wave_add_mps", &p->wave_add_mps);
+			extract(".ramp_jerk_s", &p->ramp_jerk_s);
+			extract(".ramp_settle_ms", &p->ramp_settle_ms);
 		}
 	}
 	return true;
@@ -1699,6 +1710,8 @@ bool apply_param(FwDriveParams* p, const std::string& key, double v) {
 	else if (key == "corner45_max_mps") p->corner45_max_mps = (float) v;     // drive 4: Corner45 arc max speed [m/s]
 	else if (key == "omega_add_mps") p->omega_add_mps = (float) v;           // drive 4: Omega hairpin arc speed offset [m/s]
 	else if (key == "wave_add_mps") p->wave_add_mps = (float) v;             // drive 4: Wave180 shortcut speed offset [m/s]
+	else if (key == "ramp_jerk_s") p->ramp_jerk_s = (float) v;             // jerk-limited accel start [s], 0 = off
+	else if (key == "ramp_settle_ms") p->ramp_settle_ms = (float) v;       // max settle wait before accelerating [ms], 0 = off
 	else return false;
 	return true;
 }
@@ -2785,6 +2798,8 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 	for (const auto& [k, v] : opt.robot_params) {   // --robot-param (model-error stress tests)
 		if (k == "sensor_delay") rp.sensor_delay = v;
 		else if (k == "tire_mu") rp.tire.mu = v;
+		else if (k == "tire_mu_viscous") rp.tire.mu_viscous = v;
+		else if (k == "tire_slip_stiffness") rp.tire.slip_stiffness = v;
 		else if (k == "drive_lag") rp.motor.drive_lag = v;
 		else if (k == "fan_force") rp.fan_force = v;
 		else if (k == "gyro_bias_dps") rp.gyro_bias_dps = v;
@@ -2952,7 +2967,7 @@ ScenarioResult run_scenario(const ScenarioOptions& opt) {
 				ff = !booted || (current && !(ramp_seen && !ramp_done));
 				phase = !booted ? "booting firmware"
 				        : current ? "drive " + std::to_string(current) + (ramp_done ? " - finished" : ramp_seen ? "" : " - starting")
-				                  : "session: press 1-4 to drive";
+				                  : "session: press 1-5 to drive";
 			} else {
 				ff = !(current && ramp_seen && !ramp_done);
 				phase = current ? "drive " + std::to_string(current) + (ramp_done ? " - finished" : ramp_seen ? "" : " - starting")

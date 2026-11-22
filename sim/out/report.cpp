@@ -21,6 +21,18 @@ const char* marker_name(int t) {
 	}
 }
 
+// SVG is parsed as XML, so a raw & in a label breaks the whole file (a panel title carries one).
+std::string xml_esc(const std::string& s) {
+	std::string o;
+	for (char c : s) {
+		if (c == '&') o += "&amp;";
+		else if (c == '<') o += "&lt;";
+		else if (c == '>') o += "&gt;";
+		else o += c;
+	}
+	return o;
+}
+
 std::string esc(const std::string& s) {
 	std::string o;
 	for (char c : s) {
@@ -38,6 +50,9 @@ std::string esc(const std::string& s) {
 // speed -> color (dark blue .. cyan .. yellow .. red)
 std::string speed_color(double v, double vmax) {
 	double t = vmax > 0 ? std::clamp(v / vmax, 0.0, 1.0) : 0.0;
+	// 32 steps across the ramp: invisible on a 3 px line, but neighbouring samples then share
+	// a colour, so the trajectory collapses into a few long polylines instead of thousands.
+	t = std::round(t * 32.0) / 32.0;
 	struct C { double r, g, b; } stops[] = {{40, 60, 200}, {0, 190, 220}, {250, 220, 40}, {230, 40, 30}};
 	double x = t * 3;
 	int i = std::min(2, static_cast<int>(x));
@@ -48,13 +63,25 @@ std::string speed_color(double v, double vmax) {
 	return buf;
 }
 
-void write_csv(const fs::path& p, const DriveResult& d) {
+void write_csv(const fs::path& p, const DriveResult& d, double hz) {
 	std::ofstream f(p);
 	f << "t,x,y,yaw_deg,v,wz_dps,lat_mm,s,pitch_deg,wheel_v_l,wheel_v_r,iq_l,iq_r,"
 	     "fw_target_base,fw_current_base,fw_target_pos,fw_odom,fw_yaw,fw_omega_t_l,fw_omega_t_r,"
 	     "fw_omega_m_l,fw_omega_m_r,fw_iq_cmd_l,fw_iq_cmd_r,fw_lost,fw_markers,body_contact,fw_cmd_mps,beta_deg\n";
 	char line[512];
+	// hz > 0 thins the log to roughly that rate. Samples where a marker fires or the line-lost
+	// flag flips are always kept, so no event disappears between two kept rows.
+	const double step = hz > 0.0 ? 1.0 / hz : 0.0;
+	double next_t = -1e9;
+	int prev_markers = -1, prev_lost = -1;
 	for (const Sample& s : d.samples) {
+		const bool event = (s.markers != prev_markers) || (s.lost != prev_lost);
+		if (step > 0.0 && s.t < next_t && !event)
+			continue;
+		prev_markers = s.markers;
+		prev_lost = s.lost;
+		if (step > 0.0)
+			next_t = s.t + step;
 		std::snprintf(line, sizeof line,
 			"%.4f,%.5f,%.5f,%.3f,%.4f,%.2f,%.2f,%.4f,%.3f,%.4f,%.4f,%.4f,%.4f,"
 			"%.4f,%.4f,%.4f,%.4f,%.3f,%.2f,%.2f,%.2f,%.2f,%.4f,%.4f,%d,%d,%d,%.4f,%.2f\n",
@@ -73,20 +100,27 @@ void write_markers(const fs::path& p, const DriveResult& d) {
 		  << "\n";
 }
 
-void track_svg_body(std::ostream& o, const Track& track) {
+void track_svg_body(std::ostream& o, const Track& track, double px_per_m) {
 	// white shapes, drawn in meters inside a flipped group
 	o << "<g fill=\"#f4f4f4\" stroke=\"none\">\n";
+	char cb[64];
 	for (const Shape& s : track.shapes()) {
 		if (s.kind == Shape::ArcBand) {
 			o << "<path d=\"";
-			int n = std::max(8, static_cast<int>(std::fabs(s.sweep) * s.R / 0.005));
+			// ~1.5 px per step instead of a fixed 5 mm: the chord error stays far below a pixel.
+			const double step_m = px_per_m > 0.0 ? std::max(0.005, 1.5 / px_per_m) : 0.005;
+			int n = std::max(8, static_cast<int>(std::fabs(s.sweep) * s.R / step_m));
 			for (int k = 0; k <= n; k++) {
 				double a = s.a0 + s.sweep * k / n;
-				o << (k ? " L" : "M") << s.a.x + (s.R + s.hw) * std::cos(a) << "," << s.a.y + (s.R + s.hw) * std::sin(a);
+				std::snprintf(cb, sizeof cb, "%s%.3f,%.3f", k ? " L" : "M",
+					s.a.x + (s.R + s.hw) * std::cos(a), s.a.y + (s.R + s.hw) * std::sin(a));
+				o << cb;
 			}
 			for (int k = n; k >= 0; k--) {
 				double a = s.a0 + s.sweep * k / n;
-				o << " L" << s.a.x + (s.R - s.hw) * std::cos(a) << "," << s.a.y + (s.R - s.hw) * std::sin(a);
+				std::snprintf(cb, sizeof cb, " L%.3f,%.3f",
+					s.a.x + (s.R - s.hw) * std::cos(a), s.a.y + (s.R - s.hw) * std::sin(a));
+				o << cb;
 			}
 			o << " Z\"/>\n";
 		} else {
@@ -126,18 +160,36 @@ void write_track_svg(const fs::path& p, const Track& track, const ScenarioResult
 	o << "<rect width=\"100%\" height=\"100%\" fill=\"#15171a\"/>\n";
 	o << "<g transform=\"translate(" << -x0 * scale << "," << y1 * scale << ") scale(" << scale << "," << -scale
 	  << ")\">\n";
-	track_svg_body(o, track);
+	track_svg_body(o, track, scale);
+	o << "<g fill=\"none\" stroke-linecap=\"round\" stroke-linejoin=\"round\" opacity=\"0.9\" stroke-width=\"" << 3.0 / scale << "\">\n";
+	// Same vertices as before, but a run of equally coloured segments becomes ONE <polyline>
+	// instead of one <line> each, and points are written at 1 mm (far below one screen pixel).
 	for (size_t di = 0; di < res.drives.size(); di++) {
 		const DriveResult& d = res.drives[di];
 		const size_t step = 10;
+		std::string run_color, pts;
+		char pb[64];
+		auto flush_run = [&]() {
+			if (!pts.empty())
+				o << "<polyline stroke=\"" << run_color << "\" points=\"" << pts << "\"/>\n";
+			pts.clear();
+		};
 		for (size_t i = 0; i + step < d.samples.size(); i += step) {
 			const Sample& a = d.samples[i];
 			const Sample& b = d.samples[i + step];
-			o << "<line x1=\"" << a.x << "\" y1=\"" << a.y << "\" x2=\"" << b.x << "\" y2=\"" << b.y << "\" stroke=\""
-			  << speed_color(0.5 * (a.v + b.v), vmax) << "\" stroke-width=\"" << 3.0 / scale
-			  << "\" stroke-linecap=\"round\" opacity=\"0.9\"/>\n";
+			std::string c = speed_color(0.5 * (a.v + b.v), vmax);
+			if (c != run_color) {
+				flush_run();   // the previous run ends at a; the new one starts there too, so they join
+				run_color = c;
+				std::snprintf(pb, sizeof pb, "%.3f,%.3f ", a.x, a.y);
+				pts = pb;
+			}
+			std::snprintf(pb, sizeof pb, "%.3f,%.3f ", b.x, b.y);
+			pts += pb;
 		}
+		flush_run();
 	}
+	o << "</g>\n";
 
 	struct OversteerEvent {
 		int drive;
@@ -155,6 +207,39 @@ void write_track_svg(const fs::path& p, const Track& track, const ScenarioResult
 		bool in_event = false;
 		double cur_peak_beta = 0.0;
 		size_t cur_peak_idx = 0;
+		// Consecutive segments of the same severity are emitted as one <polyline> pair
+		// instead of two <line> elements per segment.
+		int run_cls = 0;
+		std::string ov_pts;
+		char ob[64];
+		auto ov_emit = [&](const char* col, double w, const char* op) {
+			o << "<polyline fill=\"none\" stroke=\"" << col << "\" stroke-width=\"" << w / scale
+			  << "\" stroke-linecap=\"round\" stroke-linejoin=\"round\" opacity=\"" << op
+			  << "\" points=\"" << ov_pts << "\"/>\n";
+		};
+		auto flush_ov = [&]() {
+			if (!ov_pts.empty() && run_cls == 2) {
+				ov_emit("#ff1744", 8.0, "0.6");    // severe: wide glow
+				ov_emit("#ff5252", 4.0, "0.95");   // severe: core
+			} else if (!ov_pts.empty() && run_cls == 1) {
+				ov_emit("#ff9100", 5.0, "0.85");   // warning band
+			}
+			ov_pts.clear();
+		};
+		auto ov_add = [&](const Sample& a, const Sample& b, int cls) {
+			if (cls != run_cls) {
+				flush_ov();
+				run_cls = cls;
+				if (cls == 0)
+					return;
+				std::snprintf(ob, sizeof ob, "%.3f,%.3f ", a.x, a.y);
+				ov_pts = ob;
+			}
+			if (cls == 0)
+				return;
+			std::snprintf(ob, sizeof ob, "%.3f,%.3f ", b.x, b.y);
+			ov_pts += ob;
+		};
 
 		for (size_t i = 0; i + step < d.samples.size(); i += step) {
 			const Sample& a = d.samples[i];
@@ -170,22 +255,9 @@ void write_track_svg(const fs::path& p, const Track& track, const ScenarioResult
 				beta = std::abs(std::remainder(th_veh - th_traj, 360.0));
 			}
 			max_overall_beta = std::max(max_overall_beta, beta);
+			ov_add(a, b, (beta >= 28.0) ? 2 : (beta >= 20.0 ? 1 : 0));
 
 			if (beta >= 20.0) {
-				if (beta >= 28.0) {
-					// Severe oversteer: wide glowing red/magenta band
-					o << "<line x1=\"" << a.x << "\" y1=\"" << a.y << "\" x2=\"" << b.x << "\" y2=\"" << b.y
-					  << "\" stroke=\"#ff1744\" stroke-width=\"" << 8.0 / scale
-					  << "\" stroke-linecap=\"round\" opacity=\"0.6\"/>\n";
-					o << "<line x1=\"" << a.x << "\" y1=\"" << a.y << "\" x2=\"" << b.x << "\" y2=\"" << b.y
-					  << "\" stroke=\"#ff5252\" stroke-width=\"" << 4.0 / scale
-					  << "\" stroke-linecap=\"round\" opacity=\"0.95\"/>\n";
-				} else {
-					// Warning: orange band
-					o << "<line x1=\"" << a.x << "\" y1=\"" << a.y << "\" x2=\"" << b.x << "\" y2=\"" << b.y
-					  << "\" stroke=\"#ff9100\" stroke-width=\"" << 5.0 / scale
-					  << "\" stroke-linecap=\"round\" opacity=\"0.85\"/>\n";
-				}
 
 				if (!in_event) {
 					in_event = true;
@@ -205,6 +277,7 @@ void write_track_svg(const fs::path& p, const Track& track, const ScenarioResult
 				}
 			}
 		}
+		flush_ov();
 		if (in_event && cur_peak_beta >= 25.0) {
 			const Sample& pk = d.samples[cur_peak_idx];
 			events.push_back({d.n, pk.x, pk.y, cur_peak_beta, pk.v});
@@ -312,17 +385,21 @@ void plot_panel(std::ostream& o, double px, double py, double pw, double ph, con
 	o << "<text x=\"" << px - 6 << "\" y=\"" << py + 10 << "\" text-anchor=\"end\" fill=\"#999\">" << buf << "</text>\n";
 	std::snprintf(buf, sizeof buf, "%.3g", lo);
 	o << "<text x=\"" << px - 6 << "\" y=\"" << py + ph << "\" text-anchor=\"end\" fill=\"#999\">" << buf << "</text>\n";
-	o << "<text x=\"" << px + 6 << "\" y=\"" << py + 16 << "\" fill=\"#ddd\">" << title << "</text>\n";
+	o << "<text x=\"" << px + 6 << "\" y=\"" << py + 16 << "\" fill=\"#ddd\">" << xml_esc(title) << "</text>\n";
 	double lx = px + pw - 10;
 	for (int k = static_cast<int>(ser.size()) - 1; k >= 0; k--) {
 		const Series& s = ser[k];
-		o << "<text x=\"" << lx << "\" y=\"" << py + 16 << "\" text-anchor=\"end\" fill=\"" << s.color << "\">" << s.name
+		o << "<text x=\"" << lx << "\" y=\"" << py + 16 << "\" text-anchor=\"end\" fill=\"" << s.color << "\">" << xml_esc(s.name)
 		  << "</text>\n";
 		lx -= 12 + 7.0 * s.name.size();
 		o << "<polyline fill=\"none\" stroke=\"" << s.color << "\" stroke-width=\"1.3\" points=\"";
-		size_t stride = std::max<size_t>(1, s.y.size() / 2000);
-		for (size_t i = 0; i < s.y.size(); i += stride)
-			o << X(t[i]) << "," << Y(s.y[i]) << " ";
+		// one point per horizontal pixel is all the plot can resolve, written at 0.1 px
+		size_t stride = std::max<size_t>(1, s.y.size() / std::max<size_t>(1, static_cast<size_t>(pw)));
+		char pb[48];
+		for (size_t i = 0; i < s.y.size(); i += stride) {
+			std::snprintf(pb, sizeof pb, "%.1f,%.1f ", X(t[i]), Y(s.y[i]));
+			o << pb;
+		}
 		o << "\"/>\n";
 	}
 }
@@ -367,16 +444,23 @@ void write_drive_plot(const fs::path& p, const DriveResult& d) {
 
 void write_reports(const ScenarioOptions& opt, const ScenarioResult& res, const Track& track) {
 	fs::path out = opt.out_dir;
+	// report_level: 2 = everything, 1 = summary.json + marker logs, 0 = summary.json only.
+	// A full 1st run on the championship track is ~9.9 MiB, of which the csv and the SVGs are 99%.
+	const int lvl = opt.report_level;
 	for (const DriveResult& d : res.drives) {
 		std::string n = std::to_string(d.n);
-		write_csv(out / ("drive" + n + ".csv"), d);
-		write_markers(out / ("drive" + n + "_markers.csv"), d);
-		write_drive_plot(out / ("drive" + n + ".svg"), d);
+		if (lvl >= 2) {
+			write_csv(out / ("drive" + n + ".csv"), d, opt.csv_hz);
+			write_drive_plot(out / ("drive" + n + ".svg"), d);
+		}
+		if (lvl >= 1)
+			write_markers(out / ("drive" + n + "_markers.csv"), d);
 	}
-	write_track_svg(out / "trajectory.svg", track, res);
+	if (lvl >= 2)
+		write_track_svg(out / "trajectory.svg", track, res);
 
 	// index.html: summary table + all plots on one page
-	{
+	if (lvl >= 2) {
 		std::ofstream h(out / "index.html");
 		h << "<!doctype html><html><head><meta charset=\"utf-8\"><title>LineSim - " << track.name()
 		  << "</title><style>body{background:#15171a;color:#ddd;font-family:sans-serif;margin:16px}"

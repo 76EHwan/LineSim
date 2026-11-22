@@ -9,6 +9,7 @@
 #include <windows.h>
 
 #include "core/scenario.h"
+#include "gpu/gpu_sim.h"
 #include "out/report.h"
 #include "world/track.h"
 #include "world/track_gen.h"
@@ -91,6 +92,8 @@ static void usage() {
 		"  linesim view <scenario.json> [options]             same run in a 3D window, real time\n"
 		"  linesim view --interactive --track <track.json>    firmware menu driven from the keyboard\n"
 		"  linesim view --session --track <track.json>        keep driving: pick drive 1-5, tune params, new maps\n"
+		"  linesim gpu [--track <track.json>] [--candidates N] [--random-maps M] [--set k=v]\n"
+		"                                                     GPU-accelerated parallel 1st-run batch sweep (DirectCompute)\n"
 		"  linesim gen [--complex] [--seed n] [--out file] [--board 6.1x4.88] [--length 35,55] [--crossings n]\n"
 		"                                                     random ZETIN course (short: --board 4.88x4.88 --length 8,30)\n"
 		"\n"
@@ -100,10 +103,15 @@ static void usage() {
 		"  --set key=value      override a firmware drive parameter (repeatable):\n"
 		"                       base_mps max_mps accel decel steer_kp steer_kd pos_atten_gain\n"
 		"                       pit_in_m target_shift fan_en, steer_kd_s (kd in seconds)\n"
-		"  --robot-param k=v    override a robot model value: sensor_delay tire_mu drive_lag fan_force\n"
+		"  --robot-param k=v    override a robot model value: sensor_delay tire_mu tire_mu_viscous\n"
+		"                       tire_slip_stiffness drive_lag fan_force\n"
 		"  --seed <n>           sensor noise / gain spread seed\n"
 		"  --max-time <s>       per-drive time limit before the robot is lifted\n"
 		"  --quiet              no progress lines\n"
+		"  --report full|light|none\n"
+		"                       what lands in <dir>: full = csv + svg + html (~10 MB per 1st run),\n"
+		"                       light = summary.json + marker log (~15 KB), none = summary.json only\n"
+		"  --csv-hz <n>         thin the telemetry csv to n Hz (marker / line-lost rows are kept)\n"
 		"  --speed <x>          (view) playback speed, e.g. 0.25 for slow motion\n"
 		"  --interactive        (view) boot to the firmware menu: arrows = U/D/L/R, Enter = K,\n"
 		"                       R = robot back on the start line");
@@ -144,6 +152,8 @@ int main(int argc_in, char** argv_in) {
 	std::string cmd = argc >= 2 ? argv[1] : "";
 	if (cmd == "gen")
 		return run_gen(argc, argv);
+	if (cmd == "gpu")
+		return run_gpu_cli(argc, argv);
 	if (cmd == "eval-worker") {
 		ScenarioOptions opt;
 		opt.view = false;
@@ -243,6 +253,11 @@ int main(int argc_in, char** argv_in) {
 			opt.max_drive_time = std::atof(next().c_str());
 		} else if (a == "--quiet") {
 			opt.quiet = true;
+		} else if (a == "--report") {
+			std::string r = next();
+			opt.report_level = (r == "none" || r == "0") ? 0 : ((r == "light" || r == "1") ? 1 : 2);
+		} else if (a == "--csv-hz") {
+			opt.csv_hz = std::atof(next().c_str());
 		} else if (a == "--session") {
 			opt.session = true;
 			if (cmd == "view")

@@ -52,6 +52,8 @@ typedef struct {
 	float omega_add_mps;                 /* drive 4: Omega hairpin arc speed offset over Fourth_Corner_Mps [m/s] */
 	float wave_add_mps;                  /* drive 4: Wave180 shortcut speed offset over Fourth_Corner_Mps [m/s] */
 	int   fan_en;
+	float ramp_jerk_s;                  /* jerk-limited accel start [s], 0 = off (DRIVE_HAS_ACCEL_RAMP) */
+	float ramp_settle_ms;               /* max wait for line/yaw settle before accelerating [ms], 0 = off */
 } FwDriveParams;
 void fwb_get_drive_params(FwDriveParams *p);
 void fwb_set_drive_params(const FwDriveParams *p);

@@ -175,6 +175,7 @@ add_executable(linesim
   sim/core/json.cpp
   sim/core/simulation.cpp
   sim/core/scenario.cpp
+  sim/gpu/gpu_sim.cpp
   sim/world/track.cpp
   sim/world/track_gen.cpp
   sim/world/robot.cpp
