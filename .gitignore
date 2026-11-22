@@ -24,3 +24,7 @@ nul
 # Antigravity session continuity runtime state
 /.agents/session_checkpoint.json
 /.agents/SESSION_HANDOFF.md
+
+# generated: throwaway verification build, ws1 GPU shader cache
+/build_verify/
+/scripts/ws1/shader-cache/
